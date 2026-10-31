@@ -1,0 +1,29 @@
+# SYSTEMD_PATCH：memory-rag 索引服务（sidecars/memory-rag，:8093）
+# 模板 scripts/systemd/qq-memory-rag.service.in，由 scripts/systemd/install.sh 渲染后装到 ~/.config/systemd/user/。
+[Unit]
+Description=qq-bridge memory-rag (vector index sidecar, :8093)
+# 有 embedding 就先等它就绪；没有也照样起（检索自动只走 BM25），所以是 Wants 不是 Requires：
+# embedding 停了或因显存不足没起，memory-rag 不跟着停。
+Wants=qq-embedding.service
+After=qq-embedding.service
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory={{RAG_DIR}}
+Environment=PATH={{PATH}}
+# 输出直接落日志，崩溃前最后几行不会卡在缓冲区里；不往源码目录写 __pycache__（和以前从终端起时一样）。
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+# 8093 已被占（systemd 之外还有一份）就不起，免得起了绑不上端口、反复重启到 failed。
+ExecCondition={{BRIDGE_DIR}}/scripts/systemd/qqb-helper.sh port-free 8093
+ExecStart={{RAG_PY}} -W ignore::SyntaxWarning -m memory_rag.app
+StandardOutput=append:{{RUN_DIR}}/memory-rag.log
+StandardError=inherit
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target

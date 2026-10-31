@@ -1,0 +1,20 @@
+[project]
+name = "memory-rag"
+version = "0.1.0"
+description = "qq-bridge 向量记忆索引服务：聊天存档 → 话题切块 → Chroma + FTS5 混合检索"
+requires-python = ">=3.12"
+dependencies = [
+    "chromadb",
+    "fastapi",
+    "uvicorn[standard]",
+    "jieba",
+    "numpy",
+    "httpx",
+    "pyyaml",
+]
+
+[dependency-groups]
+dev = ["pytest"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

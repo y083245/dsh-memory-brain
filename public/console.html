@@ -1755,6 +1755,70 @@ button:active:not(:disabled) {
 #section-usage .usage-legend i.off { background:var(--accent) }
 #section-usage .usage-legend i.mixed { background:var(--accent-hover) }
 
+
+/* TTS_API_PATCH */
+.tts-voice-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:10px; margin-top:10px }
+.tts-voice { border:1px solid var(--border-input); border-radius:10px; padding:10px 12px; background:var(--surface) }
+.tts-voice.active { border-color:var(--accent); box-shadow:0 0 0 2px var(--accent-ring) }
+.tts-voice-name { font-weight:600; font-size:14px }
+textarea.tts-code { font-family:Consolas,"SFMono-Regular",monospace; font-size:12px; line-height:1.6; white-space:pre; overflow:auto }
+
+/* REPORT_PATCH：每日报表（规格 DAILY_REPORT_SPEC.md §2） */
+.report-toolbar { align-items:center; gap:10px }
+.pill.report-partial { background:var(--warn-bg); color:var(--warn-fg); border:1px solid var(--warn-border); cursor:help; margin-left:2px }
+/* .pill 的 display 会盖掉 UA 的 [hidden] 规则，这里显式处理，否则「部分」标签永远显示。 */
+.pill.report-partial[hidden] { display:none }
+/* 窄屏：宽表放进可横向滚动的容器，页面本身不出现横向滚动条（规格 §4.4）。 */
+.report-scroll { overflow-x:auto; -webkit-overflow-scrolling:touch; margin-top:10px; max-width:100% }
+.report-scroll table { margin-top:0; min-width:560px }
+#section-report-speech .report-scroll table { min-width:900px }
+.report-table td.num, .report-table th.num { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap }
+.report-table td.report-key, .report-table th.report-key { white-space:nowrap }
+.report-table tr.report-total td { font-weight:600; color:var(--text-strong) }
+.report-table tr.report-total td.num { font-variant-numeric:tabular-nums }
+.report-delta { display:block; font-size:10px; color:var(--muted-soft); font-weight:400; font-variant-numeric:tabular-nums; white-space:nowrap }
+.report-pair-sep { color:var(--muted-soft); padding:0 3px }
+.report-null { color:var(--muted-soft); cursor:help }
+.report-sticker { white-space:nowrap }
+.report-bad { color:var(--err); font-weight:600 }
+.report-good { color:var(--ok) }
+.report-muted { color:var(--muted-soft) }
+.report-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(210px,1fr)); gap:0 20px; margin-top:10px }
+.report-group-title { grid-column:1/-1; font-size:11px; font-weight:600; color:var(--muted-soft); margin-top:12px; padding-top:8px; border-top:1px solid var(--border-subtle) }
+.report-group-title:first-child { margin-top:0; padding-top:0; border-top:0 }
+.report-kv { display:flex; justify-content:space-between; align-items:baseline; gap:10px; font-size:12px; color:var(--text-secondary); padding:6px 0; border-bottom:1px solid var(--border-subtle); min-width:0 }
+.report-kv>span:first-child { color:var(--label); flex-shrink:0 }
+.report-kv>span:last-child { text-align:right; min-width:0; overflow-wrap:anywhere }
+.report-kv b { color:var(--text-strong); font-weight:600; font-variant-numeric:tabular-nums }
+.report-kv .report-delta { display:inline; margin-left:5px }
+.report-note { grid-column:1/-1; font-size:11px; color:var(--muted); margin-top:4px }
+.report-errors { grid-column:1/-1; margin-top:8px; font-size:12px; color:var(--text-secondary) }
+.report-errors summary { cursor:pointer; color:var(--label); font-size:12px }
+.report-error-line { display:flex; gap:8px; padding:3px 0; font-size:11px; color:var(--text-secondary); border-bottom:1px solid var(--border-subtle) }
+.report-error-line time { color:var(--muted-soft); flex-shrink:0; font-variant-numeric:tabular-nums }
+.report-error-line span { overflow-wrap:anywhere }
+.report-charts { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; margin-top:16px }
+@media(max-width:900px) { .report-charts { grid-template-columns:minmax(0,1fr) } }
+.report-chart { min-width:0; border:1px solid var(--border-subtle); border-radius:10px; padding:10px 12px 6px; background:var(--surface-subtle) }
+.report-chart-title { font-size:12px; font-weight:600; color:var(--text-strong); margin-bottom:2px }
+.report-chart svg { display:block; width:100%; height:auto }
+.report-chart .rg-grid { stroke:var(--border-subtle); stroke-width:1 }
+.report-chart .rg-axis { fill:var(--muted); font-size:10px }
+.report-chart .rg-event { stroke:var(--warn-fg-strong); stroke-width:1; stroke-dasharray:4 3 }
+.report-chart .rg-event-label { fill:var(--warn-fg-strong); font-size:9px }
+.report-chart .rg-line { fill:none; stroke-width:2; stroke-linejoin:round; stroke-linecap:round }
+.report-chart .rg-line.her, .report-chart .rg-dot.her { stroke:var(--accent) }
+.report-chart .rg-line.their, .report-chart .rg-dot.their { stroke:var(--ok) }
+.report-chart .rg-line.xing, .report-chart .rg-dot.xing { stroke:var(--accent-hover) }
+.report-chart .rg-line.care, .report-chart .rg-dot.care { stroke:var(--warn-fg-strong) }
+.report-chart .rg-dot { fill:var(--surface); stroke-width:1.6 }
+.report-legend { display:flex; flex-wrap:wrap; gap:12px; margin-top:6px }
+.report-legend span { display:inline-flex; align-items:center; gap:5px; font-size:11px; color:var(--muted) }
+.report-legend i { width:14px; height:3px; border-radius:2px; display:inline-block }
+.report-legend i.her { background:var(--accent) }
+.report-legend i.their { background:var(--ok) }
+.report-legend i.xing { background:var(--accent-hover) }
+.report-legend i.care { background:var(--warn-fg-strong) }
 </style>
 </head>
 <body>
@@ -1771,6 +1835,11 @@ button:active:not(:disabled) {
       <button data-view="social-v2" class="nav-item"><span class="nav-icon" aria-hidden="true">◈</span>二代仿真<span class="nav-note">V2</span></button>
       <button data-view="social-v1" class="nav-item"><span class="nav-icon" aria-hidden="true">◇</span>一代仿真<span class="nav-note">V1</span></button>
       <button data-view="slang" class="nav-item"><span class="nav-icon" aria-hidden="true">▤</span>黑话词库</button>
+      <button data-view="tts" class="nav-item"><span class="nav-icon" aria-hidden="true">♪</span>语音合成 API</button>
+      <button data-view="ltm" class="nav-item"><span class="nav-icon" aria-hidden="true">✎</span>长期记忆</button>
+      <button data-view="mind" class="nav-item"><span class="nav-icon" aria-hidden="true">♡</span>人格与情绪</button>
+      <!-- REPORT_PATCH：每日报表（子项目 4 v1，规格 DAILY_REPORT_SPEC.md §2） -->
+      <button data-view="report" class="nav-item"><span class="nav-icon" aria-hidden="true">▦</span>每日报表</button>
       <div class="nav-label">管理</div>
       <button data-view="usage" class="nav-item"><span class="nav-icon" aria-hidden="true">◧</span>令牌与花费</button>
       <button data-view="access" class="nav-item"><span class="nav-icon" aria-hidden="true">⊙</span>访问与安全</button>
@@ -2417,6 +2486,353 @@ button:active:not(:disabled) {
           <span class="meta" id="slangConfigMsg"></span>
         </div>
       </details>
+    </section>
+<!-- LTM_PATCH：长期记忆 -->
+<section id="section-ltm-people" data-page="ltm" class="card span-all">
+      <h2>人物账本</h2>
+      <div class="meta">按 QQ 号永久保存，会话重建、上下文压缩都不会丢；每次唤醒会把相关的人的记忆带给 AI。标「仅该会话」的条目只在记下它的那个会话里出现（私聊里记的默认如此）。数据在本机 <code>state/long-memory/</code>。</div>
+      <div class="row" style="margin-top:8px">
+        <select id="ltmPerson" style="flex:1 1 260px"></select>
+        <button id="ltmRefresh" type="button" class="btn-secondary small">刷新</button>
+      </div>
+      <div id="ltmItems" class="meta" style="margin-top:8px">加载中…</div>
+      <details class="settings-group" style="margin-top:10px"><summary>手动添加一条</summary><div class="settings-content">
+        <div class="row">
+          <input type="text" id="ltmAddUser" placeholder="QQ 号（默认当前选中的人）" style="flex:0 1 200px">
+          <select id="ltmAddCat" style="flex:0 1 200px"></select>
+          <select id="ltmAddScope" style="flex:0 1 160px"><option value="public">各处可见</option><option value="private">仅私聊可见</option></select>
+        </div>
+        <textarea id="ltmAddText" placeholder="例如：不吃香菜；生日是 3 月 14 日" style="min-height:60px;margin-top:8px"></textarea>
+        <!-- LIFE_LOOP_PATCH（规格 §8.4）：类别选「约定」时多出到期日与谁答应的。 -->
+        <div class="row" id="ltmAddPendingRow" style="display:none;margin-top:6px">
+          <input type="text" id="ltmAddDue" placeholder="YYYY-MM-DD 或 明天/周五" style="flex:1 1 220px">
+          <select id="ltmAddBy" style="flex:0 1 180px"><option value="">谁答应的（可不填）</option><option value="them">他答应的</option><option value="me">你答应的</option></select>
+        </div>
+        <div class="row" style="margin-top:6px"><button id="ltmAddBtn" type="button" class="small">添加</button><span class="meta" id="ltmAddMsg"></span></div>
+      </div></details>
+    </section>
+
+<section id="section-ltm-archive" data-page="ltm" class="card span-all">
+      <h2>聊天存档</h2>
+      <div class="meta">每条收发消息都永久追加在这里（AI 只能检索它自己所在的会话）。</div>
+      <div class="row" style="margin-top:8px">
+        <select id="ltmKey" style="flex:1 1 220px"></select>
+        <input type="text" id="ltmQuery" placeholder="关键词（空格分隔，全部命中）" style="flex:2 1 220px">
+      </div>
+      <div class="row" style="margin-top:6px">
+        <input type="text" id="ltmFrom" placeholder="从 YYYY-MM-DD" style="flex:0 1 150px">
+        <input type="text" id="ltmTo" placeholder="到 YYYY-MM-DD" style="flex:0 1 150px">
+        <input type="text" id="ltmSpeaker" placeholder="说话人（名字/QQ/我）" style="flex:0 1 170px">
+        <button id="ltmSearchBtn" type="button">检索</button>
+        <span class="meta" id="ltmSearchMsg"></span>
+      </div>
+      <pre id="ltmSearchOut" style="margin-top:8px;max-height:480px;overflow:auto;white-space:pre-wrap">（选择会话后点检索；不填关键词就是最近的记录）</pre>
+      <!-- RAG_PATCH（P2）：删除记录。原地写墓碑（字节数不变），并让 memory-rag 清掉这个会话的向量索引。 -->
+      <div style="margin-top:14px;font-weight:600;color:var(--label)">删除记录</div>
+      <div class="meta" style="margin-top:4px">删除是永久的：存档里这一行会被抹掉（原位置留一个空记录），这个会话的向量索引会清掉重建。她当前对话里已经看到的、日记里写过的、生活回路里留下的短预览，不会跟着删。</div>
+      <div class="row" style="margin-top:6px">
+        <button id="ltmRowsBtn" type="button" class="btn-secondary small">列出记录</button>
+        <button id="ltmDeleteRangeBtn" type="button" class="danger small">删除这个日期范围内的全部记录</button>
+      </div>
+      <div class="meta" id="ltmRowsMsg" style="margin-top:6px"></div>
+      <div id="ltmRows"></div>
+      <div class="meta" id="ltmDeleteMsg" style="margin-top:6px"></div>
+    </section>
+
+<!-- RAG_PATCH（P2）：向量索引（memory-rag）状态与维护 -->
+<section id="section-ltm-rag" data-page="ltm" class="card span-all">
+      <h2>向量索引</h2>
+      <div class="meta">语义检索用的索引（memory-rag，:8093）。原始存档不会被它改动；索引随时可以删掉重建。</div>
+      <div class="row" style="margin-top:8px">
+        <button id="ltmRagRefresh" type="button" class="btn-secondary small">刷新</button>
+        <button id="ltmRagIndex" type="button" class="small">立即索引</button>
+        <button id="ltmRagRebuild" type="button" class="danger small">全量重建</button>
+        <!-- RAG_PATCH（P3）：提炼失败的块可以手动重排；失败数为 0 时由 ltmRagRenderDistill 隐藏。 -->
+        <button id="ltmRagDistillRetry" type="button" class="btn-secondary small" style="display:none">重试失败的</button>
+        <span class="meta" id="ltmRagMsg"></span>
+      </div>
+      <div id="ltmRagStatus" class="meta" style="margin-top:8px">加载中…</div>
+    </section>
+
+<!-- RAG_PATCH（P3）：自动想起（影子）——私聊来信唤醒时桥接算出「本会想起哪几件旧事」，先只记录 -->
+<section id="section-ltm-recall" data-page="ltm" class="card span-all">
+      <h2>自动想起（影子）</h2>
+      <div class="meta">私聊有人来信唤醒她时，桥接算出「这时候本来会想起哪几件旧事」。影子模式下只记录、不告诉她；你在这里标「相关 / 无关」，攒够数据再决定要不要开。</div>
+      <div class="row" style="margin-top:8px">
+        <button id="ltmRecallRefresh" type="button" class="btn-secondary small">刷新</button>
+        <span class="meta" id="ltmRecallMsg"></span>
+      </div>
+      <div id="ltmRecallStats" class="meta" style="margin-top:8px">加载中…</div>
+      <div id="ltmRecallList" style="margin-top:10px"></div>
+      <div class="row" style="margin-top:8px">
+        <button id="ltmRecallMore" type="button" class="btn-secondary small" style="display:none">更早的</button>
+      </div>
+    </section>
+
+<!-- SUGGEST_PATCH：账本建议（规格 LEDGER_SUGGEST_SPEC.md §5）——提炼器顺手抽的「关于某人、值得长期记住的事」，
+     这个会话下次唤醒她时挑几条给她，记不记由她自己定；这里能看采用率，也能提前作废张冠李戴的。 -->
+<section id="section-ltm-suggest" data-page="ltm" class="card span-all">
+      <h2>账本建议</h2>
+      <div class="meta">提炼器写摘要时顺手抽的「关于某个人、值得长期记住的事」。这个会话下次唤醒她时，桥接会把其中几条给她看，记不记由她自己定；没采用的 3 天后作废。候选原文只在 memory-rag 的索引里（删存档就跟着删），控制台和报表都不存原文。</div>
+      <div class="row" style="margin-top:8px">
+        <select id="ltmSuggestKey" style="flex:1 1 220px"><option value="">全部</option></select>
+        <button id="ltmSuggestRefresh" type="button" class="btn-secondary small">刷新</button>
+        <span class="meta" id="ltmSuggestMsg"></span>
+      </div>
+      <div id="ltmSuggestStats" class="meta" style="margin-top:8px">加载中…</div>
+      <div id="ltmSuggestList" style="margin-top:10px"></div>
+    </section>
+
+<!-- LIFE_LOOP_PATCH：生活回路（own-life 的时间表、忽然想起、到期约定的主动唤醒） -->
+<section id="section-life-loop" data-page="ltm" class="card span-all">
+      <h2>生活回路</h2>
+      <div class="meta">她自己的时间、忽然想起的旧事，以及到期约定的主动提醒。数据来自 <code>GET /api/life-loop</code>；素材只取主人私聊与公开的账本条目。</div>
+      <div class="row" style="margin-top:8px">
+        <button id="lifeLoopRefresh" type="button" class="btn-secondary small">刷新</button>
+        <span class="meta" id="lifeLoopMsg"></span>
+      </div>
+      <div id="lifeLoopStatus" class="meta" style="margin-top:8px">加载中…</div>
+      <div class="meta" style="margin-top:10px;font-weight:600;color:var(--label)">最近的回忆 / 到期唤醒</div>
+      <div id="lifeLoopHistory" class="meta"></div>
+    </section>
+<!-- PERSONA_PATCH：人格与情绪 -->
+<section id="section-mind-now" data-page="mind" class="card span-all">
+      <h2>此刻</h2>
+      <div class="meta" id="mindStatus">加载中…</div>
+      <div id="mindUsage" style="margin-top:8px"></div>
+      <div id="mindChart" style="margin-top:8px"></div>
+      <pre id="mindNow" style="margin-top:8px;max-height:320px;overflow:auto;white-space:pre-wrap"></pre>
+      <div class="row" style="margin-top:6px"><button id="mindRefresh" type="button" class="btn-secondary small">刷新</button></div>
+    </section>
+
+<section id="section-mind-traits" data-page="mind" class="card span-all">
+      <h2>性格</h2>
+      <div class="meta">出厂值来自角色卡，确认后才开始判读和注入。当前值只在出厂值 ±15 内漂移，每项每天最多动 1；锁定的项不会变。</div>
+      <!-- PERSONA_PATCH（v2 §12.1）：角色卡在确认出厂之后改过 / 没记录过版本时的提醒。默认隐藏，由 mindRenderCard 按 status.card 决定。 -->
+      <div id="mindCardNotice" style="display:none;margin-top:8px;padding:8px;border:1px solid currentColor;border-radius:6px">
+        <div id="mindCardNoticeText"></div>
+        <div class="row" style="margin-top:6px"><button id="mindCardAck" type="button" class="small">不影响性格，忽略</button></div>
+      </div>
+      <div id="mindTraits" class="meta" style="margin-top:8px"></div>
+      <div id="mindBeliefs" class="meta" style="margin-top:8px"></div>
+      <!-- PERSONA_PATCH（v2 §9 B3）：好恶小区。列出当前好恶，点「编辑好恶」用同格式文本框改，保存走 /api/persona/prefs。 -->
+      <div id="mindPrefs" class="meta" style="margin-top:8px"></div>
+      <div class="row" style="margin-top:6px"><button id="mindPrefsEdit" type="button" class="btn-secondary small">编辑好恶</button><span class="meta" id="mindPrefsMsg"></span></div>
+      <div id="mindPrefsEditor" style="display:none;margin-top:6px">
+        <textarea id="mindPrefsText" placeholder="一行一条：喜欢｜被认真夸｜0.6｜夸,厉害&#10;雷点｜被叫大肥鱼｜0.9｜大肥鱼" style="min-height:80px"></textarea>
+        <div class="row" style="margin-top:6px"><button id="mindPrefsSave" type="button" class="small">保存好恶</button><span class="meta">类型可写 喜欢 / 讨厌 / 萌点 / 雷点；强度和关键词可省略。</span></div>
+      </div>
+      <details class="settings-group" style="margin-top:10px"><summary>设置 / 修改出厂性格</summary><div class="settings-content">
+        <div class="row"><button id="mindPropose" type="button" class="btn-secondary small">从当前角色卡提议</button><span class="meta" id="mindProposeMsg"></span></div>
+        <div class="row" style="margin-top:6px" id="mindFactoryInputs"></div>
+        <label for="mindFactoryManifests" class="meta" style="display:block;margin-top:8px">每项表现（一行一项：<code>开放：……</code> 或 <code>O：……</code>，中文名或键名都认）</label>
+        <textarea id="mindFactoryManifests" placeholder="开放：对新鲜东西好奇，爱聊没聊过的话题&#10;嘴硬：心软但嘴上不承认" style="min-height:80px"></textarea>
+        <label for="mindFactoryPrefs" class="meta" style="display:block;margin-top:8px">好恶（一行一条：<code>喜欢｜被认真夸｜0.6｜夸,厉害</code>，关键词用逗号分隔）</label>
+        <textarea id="mindFactoryPrefs" placeholder="喜欢｜被认真夸｜0.6｜夸,厉害&#10;雷点｜被叫大肥鱼｜0.9｜大肥鱼" style="min-height:60px"></textarea>
+        <textarea id="mindFactoryBeliefs" placeholder="她对自己的看法，一行一句（最多 5 句）" style="min-height:60px;margin-top:8px"></textarea>
+        <div class="row" style="margin-top:6px"><button id="mindConfirm" type="button" class="small">确认出厂性格</button><span class="meta" id="mindConfirmMsg"></span></div>
+      </div></details>
+    </section>
+
+<section id="section-mind-people" data-page="mind" class="card span-all">
+      <h2>和每个人</h2>
+      <!-- PERSONA_PATCH（v2 §9 A1）：先从聊天记录算播种预览，确认后才写入，避免一打开就改数据。 -->
+      <div class="row" style="margin-bottom:8px">
+        <button id="mindSeedBtn" type="button" class="btn-secondary small">从聊天记录初始化关系</button>
+        <button id="mindSeedApply" type="button" class="small" disabled>确认写入</button>
+        <span class="meta" id="mindSeedMsg"></span>
+      </div>
+      <div id="mindSeedPreview" style="margin-bottom:8px"></div>
+      <div id="mindPeople" class="meta">加载中…</div>
+    </section>
+
+<section id="section-mind-history" data-page="mind" class="card span-all">
+      <h2>养成记录</h2>
+      <div class="row">
+        <select id="mindSnapshot" style="flex:0 1 200px"></select>
+        <button id="mindRollback" type="button" class="btn-secondary small">回滚到这一天</button>
+        <button id="mindNightly" type="button" class="btn-secondary small">立即结算一次</button>
+        <span class="meta" id="mindHistoryMsg"></span>
+      </div>
+      <div class="row" style="margin-top:6px">
+        <select id="mindReport" style="flex:0 1 200px"></select>
+        <button id="mindReportBtn" type="button" class="btn-secondary small">看周报</button>
+      </div>
+      <pre id="mindReportOut" style="margin-top:8px;max-height:360px;overflow:auto;white-space:pre-wrap"></pre>
+      <div class="meta" style="margin-top:8px">最近的养成证据（不含聊天原文）：</div>
+      <div id="mindEvidence" class="meta"></div>
+    </section>
+
+<section id="section-mind-settings" data-page="mind" class="card span-all">
+      <h2>情绪判读设置</h2>
+      <div class="meta">每条和她相关的消息额外调一次 DeepSeek 判读情绪；失败、超时、超每日上限时退回规则表。数据在本机 <code>state/persona/</code>。</div>
+      <div class="row" style="margin-top:8px">
+        <label class="meta"><input type="checkbox" id="mindEnabled"> 启用</label>
+        <label class="meta"><input type="checkbox" id="mindInject"> 注入给她（关掉 = 影子期，只算不注入）</label>
+      </div>
+      <div class="row" style="margin-top:6px">
+        <select id="mindMode" style="flex:0 1 160px"><option value="model">模型判读</option><option value="rules">只用规则</option><option value="off">关闭判读</option></select>
+        <input type="text" id="mindModel" placeholder="模型名" style="flex:0 1 200px">
+        <input type="text" id="mindBaseUrl" placeholder="接口地址" style="flex:1 1 220px">
+        <input type="number" id="mindDailyLimit" placeholder="每日上限" style="flex:0 1 120px">
+      </div>
+      <div class="row" style="margin-top:6px">
+        <input type="password" id="mindApiKey" placeholder="判读用的 DeepSeek 密钥（留空不修改）" style="flex:1 1 260px" autocomplete="off">
+        <button id="mindSave" type="button" class="small">保存</button>
+        <button id="mindClearKey" type="button" class="btn-secondary small">清除密钥</button>
+        <span class="meta" id="mindSaveMsg"></span>
+      </div>
+    </section>
+<!-- REPORT_PATCH：每日报表（子项目 4 v1，规格 DAILY_REPORT_SPEC.md §2）。数据只来自 /api/report/daily 与 /api/report/series。 -->
+<section id="section-report-toolbar" data-page="report" class="card span-all">
+      <h2>每日报表 <span id="reportPartialTag" class="pill report-partial" hidden title="这天的快照是补算的，只靠桥接计数的数字（own-life 投递、报错、中断）没有">部分</span></h2>
+      <div class="meta">今天的数字是现算的；以前的来自每天凌晨的快照，标「部分」的那天有些数字缺失。数字旁边的小字是「比昨天 ±n」，昨天没有这项就不标。</div>
+      <div id="reportError" class="connection-alert" role="alert" hidden style="margin-top:12px"></div>
+      <div class="row report-toolbar" style="margin-top:10px">
+        <label class="sr-only" for="reportDay">报表日期</label>
+        <select id="reportDay" style="flex:0 1 220px"><option value="">今天</option></select>
+        <button id="reportRefresh" type="button" class="btn-secondary small">刷新</button>
+        <span class="meta" id="reportMsg">加载中…</span>
+      </div>
+    </section>
+
+<section id="section-report-traffic" data-page="report" class="card span-all">
+      <h2>收发</h2>
+      <div class="meta">按会话统计当天的收到、她发出、DSH 唤醒回合和工具调用；最后一行是合计。</div>
+      <div class="report-scroll" id="reportTraffic">加载中…</div>
+    </section>
+
+<section id="section-report-memory" data-page="report" class="card span-all">
+      <h2>记忆</h2>
+      <div class="meta">她当天自己记下、更新、删掉的账本条目，查记忆的次数，以及账本现状、own-life 投递、忽然想起、自动想起（影子）、提炼和账本建议的情况。</div>
+      <div class="report-grid" id="reportMemory">加载中…</div>
+    </section>
+
+<section id="section-report-cost" data-page="report" class="card span-all">
+      <h2>花费</h2>
+      <div class="meta">单位：元，保留 4 位小数。她聊天按 <code>model-prices.js</code> 的价目表折算（含峰谷时段），人格判读与联想提炼用各自的用量记录。</div>
+      <div class="report-scroll" id="reportCost">加载中…</div>
+    </section>
+
+<section id="section-report-service" data-page="report" class="card span-all">
+      <h2>服务状态</h2>
+      <div class="meta">实时状态只在看「今天」时显示；过去的日子只有当天报错次数和最长中断（这些数字来自桥接计数，所以补算的快照里没有）。</div>
+      <div id="reportService" class="report-grid">加载中…</div>
+    </section>
+
+<section id="section-report-speech" data-page="report" class="card span-all">
+      <h2>她的说话</h2>
+      <div class="meta">只看存档里的文字消息（去掉纯图片 / 表情 / 语音）。当天文字消息不足 5 条的会话，比例类数字显示「—（太少）」。下面两张折线是近 14 天的全部会话合计，竖虚线标出特别的日子。</div>
+      <div class="report-scroll" id="reportSpeech">加载中…</div>
+      <div id="reportCharts" class="report-charts"></div>
+    </section>
+<!-- TTS_API_PATCH：语音合成 API -->
+<section id="section-tts-api" data-page="tts" class="card span-all">
+      <h2>接口与模型</h2>
+      <div class="meta">默认接入小米 MiMo 语音合成（<code>/v1/chat/completions</code>），也可以填其它 OpenAI 风格的接口。密钥只保存在本机 <code>state/tts-api/config.json</code>（权限 600），页面不会回显原文。</div>
+      <label for="ttsEndpoint">接口地址</label>
+      <div class="row">
+        <input type="text" id="ttsEndpoint" placeholder="https://api.xiaomimimo.com/v1/chat/completions">
+        <button id="ttsEndpointDefault" type="button" class="btn-secondary small">恢复默认</button>
+      </div>
+      <label for="ttsModelsUrl">模型列表地址（可选，留空自动推导）</label>
+      <input type="text" id="ttsModelsUrl" placeholder="留空 = 由接口地址推导">
+      <div class="meta" id="ttsModelsUrlHint"></div>
+      <label for="ttsApiKey">API 密钥</label>
+      <div class="row">
+        <input type="password" id="ttsApiKey" placeholder="未填写" autocomplete="new-password" style="flex:1 1 260px">
+        <label style="flex:0 0 auto;margin:0"><input type="checkbox" id="ttsApiKeyClear" style="width:auto"> 清除已保存的密钥</label>
+      </div>
+      <div class="meta" id="ttsApiKeyHint">留空保存 = 保留原密钥。</div>
+      <label for="ttsModel">模型</label>
+      <div class="row">
+        <select id="ttsModel" style="flex:1 1 260px"></select>
+        <button id="ttsFetchModels" type="button" class="btn-secondary">从接口获取模型</button>
+      </div>
+      <div class="row" style="margin-top:6px">
+        <input type="text" id="ttsModelManual" placeholder="或手动输入模型 ID（优先于上面的选择）">
+      </div>
+      <div class="meta" id="ttsModelsMsg"></div>
+      <div class="row" style="margin-top:6px">
+        <div style="flex:1 1 220px"><label for="ttsMode">模型类型</label><select id="ttsMode"></select></div>
+        <div style="flex:0 0 140px"><label for="ttsFormat">音频格式</label><select id="ttsFormat"><option value="wav">wav</option><option value="mp3">mp3</option><option value="pcm16">pcm16（裸 PCM，自动封 wav）</option></select></div>
+        <div style="flex:0 0 140px"><label for="ttsMaxChars">AI 单次字数上限</label><input type="number" id="ttsMaxChars" min="10" max="2000"></div>
+        <div style="flex:0 0 140px"><label for="ttsTimeout">超时（秒）</label><input type="number" id="ttsTimeout" min="5" max="600"></div>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <label style="flex:0 0 auto;margin:0"><input type="checkbox" id="ttsEnabled" style="width:auto"> 允许 QQ 里的 AI 用这个模型发语音（工具 <code>qq_tts_voice</code>）</label>
+      </div>
+    </section>
+
+<section id="section-tts-preset" data-page="tts" class="card span-all" data-tts-mode="preset">
+      <h2>官方音色</h2>
+      <div class="meta">预置音色模型（如 <code>mimo-v2.5-tts</code>）可用的官方音色。「试听」会用当前模型合成一段示例并缓存；「使用」把它设为发语音时的音色。</div>
+      <div id="ttsVoiceGrid" class="tts-voice-grid"></div>
+      <label for="ttsPresetInstruction">风格指令（可选，作为 user 消息发送，不会被念出来）</label>
+      <textarea id="ttsPresetInstruction" placeholder="例如：温柔、语速稍慢，像在睡前轻声说话。也可以在要合成的文字开头写 (风格) 标签。" style="min-height:70px"></textarea>
+    </section>
+
+<section id="section-tts-template" data-page="tts" class="card span-all" data-tts-mode="design custom">
+      <h2>请求头与请求体</h2>
+      <div id="ttsDesignBox">
+        <label for="ttsDesignPrompt">音色描述（填进 <code>{{instruction}}</code>，voicedesign 模型必填）</label>
+        <textarea id="ttsDesignPrompt" placeholder="例如：二十出头的女生，声音清亮带点慵懒，语速偏慢，说话时尾音轻轻上扬，像在和熟人撒娇。" style="min-height:70px"></textarea>
+      </div>
+      <div class="meta">两段都按原文保存、原文发送：请求头一行一个「名: 值」，只做占位符替换，<b>不会自动补 Content-Type / Authorization</b>；请求体替换占位符后按字节原样发送，不做 JSON 解析或格式化。往 JSON 字符串里放文字请用 <code>_json</code> 结尾的占位符（已转义）。</div>
+      <label for="ttsHeaders">请求头</label>
+      <textarea id="ttsHeaders" class="tts-code" spellcheck="false" style="min-height:90px"></textarea>
+      <div class="row" style="margin-top:6px">
+        <button id="ttsHeadersSave" type="button" class="small">保存请求头</button>
+        <button id="ttsHeadersReset" type="button" class="btn-secondary small">恢复默认</button>
+        <span class="meta" id="ttsHeadersMsg"></span>
+      </div>
+      <label for="ttsBody">请求体</label>
+      <textarea id="ttsBody" class="tts-code" spellcheck="false" style="min-height:140px"></textarea>
+      <div class="row" style="margin-top:6px">
+        <button id="ttsBodySave" type="button" class="small">保存请求体</button>
+        <button id="ttsBodyReset" type="button" class="btn-secondary small">恢复默认</button>
+        <span class="meta" id="ttsBodyMsg"></span>
+      </div>
+      <details class="settings-group" style="margin-top:10px"><summary>可用占位符</summary><div class="settings-content"><div id="ttsPlaceholders" class="meta"></div></div></details>
+    </section>
+
+<section id="section-tts-clone" data-page="tts" class="card span-all" data-tts-mode="clone">
+      <h2>克隆音频</h2>
+      <div class="meta">上传一段要复刻的声音（只支持 mp3 / wav，官方要求 Base64 后不超过 10MB）。建议 5~30 秒、单人、无背景音乐的清晰人声。请只上传你本人或已获授权的声音。</div>
+      <div class="row" style="margin-top:8px">
+        <input type="file" id="ttsCloneFile" accept=".mp3,.wav,audio/mpeg,audio/wav" style="flex:1 1 260px">
+        <button id="ttsCloneUpload" type="button">上传并使用</button>
+        <span class="meta" id="ttsCloneMsg"></span>
+      </div>
+      <div id="ttsCloneList" class="meta" style="margin-top:8px">还没有样本。</div>
+      <label for="ttsCloneInstruction">风格指令（可选，作为 user 消息发送）</label>
+      <textarea id="ttsCloneInstruction" placeholder="例如：语气轻松，带一点笑意。" style="min-height:70px"></textarea>
+    </section>
+
+<section id="section-tts-check" data-page="tts" class="card">
+      <h2>保存与检查</h2>
+      <div class="meta">「保存配置」保存接口、密钥、模型、音色和风格设置（请求头 / 请求体各自用自己的保存按钮）。「检查」会核对配置并实际请求一次模型列表来验证密钥。</div>
+      <div class="row" style="margin-top:8px">
+        <button id="ttsSave" type="button">保存配置</button>
+        <button id="ttsCheck" type="button" class="btn-secondary">检查</button>
+        <span class="meta" id="ttsSaveMsg"></span>
+      </div>
+      <div id="ttsCheckList" class="meta" style="margin-top:8px"></div>
+    </section>
+
+<section id="section-tts-test" data-page="tts" class="card">
+      <h2>试合成</h2>
+      <div class="meta">用已保存的配置合成一段，直接在这里试听（不会发到 QQ）。</div>
+      <label for="ttsTestText">要合成的文字</label>
+      <textarea id="ttsTestText" style="min-height:70px">今天辛苦啦，早点休息，晚安。</textarea>
+      <label for="ttsTestStyle">本次语气（可选）</label>
+      <input type="text" id="ttsTestStyle" placeholder="例如：困得迷迷糊糊、慢吞吞地">
+      <div class="row" style="margin-top:8px">
+        <button id="ttsTestBtn" type="button">试合成</button>
+        <span class="meta" id="ttsTestMsg"></span>
+      </div>
+      <audio id="ttsAudio" controls preload="none" style="width:100%;margin-top:10px"></audio>
+      <div class="meta">AI 发语音：DSH 重启后会多出 <code>qq_tts_voice</code> 工具，它用这里保存的模型和音色合成，并走与 <code>qq_send_voice</code> 相同的白名单、频率上限与回读校验。</div>
     </section>
 <section id="section-reference" data-page="reference" class="card span-all">
       <h2>DSH 侧 MCP 工具</h2>
@@ -4430,6 +4846,10 @@ const consolePages = {
   'social-v2': ['二代仿真', '自主参与，恰到好处。', '管理 AI 的工具、唤醒与发言节奏。展开需要调整的分组，修改后保存参数。'],
   'social-v1': ['一代仿真', '为自然对话，设定合适的节奏。', '调整参与概率、活跃周期和分条发送；所有配置项完整保留。'],
   slang: ['黑话词库', '读懂群聊里的，言外之意。', '从候选到确认，让 AI 逐渐熟悉大家的表达习惯。'],
+  ltm: ['长期记忆', '聊过的，都还记得。', '查看和修改 AI 记住的每个人，或翻找以前的聊天记录。会话重建、上下文压缩都不会让它们消失。'],
+  mind: ['人格与情绪', '她会开心，也会委屈。', '看她此刻的情绪、慢慢养成的性格，以及和每个人的关系；可以确认出厂性格、锁定特质、回滚到某一天、设置情绪判读。'],
+  report: ['每日报表', '这一天，过得怎么样。', '按天看她这一天的收发、记忆、花费、服务状态和说话习惯；今天的数字是现算的，以前的来自每天凌晨的快照。'],
+  tts: ['语音合成 API', '给她一副，真正的嗓子。', '接入小米 MiMo 或其它 OpenAI 风格的语音合成接口，选好音色，让 AI 用它发 QQ 语音。'],
   usage: ['令牌与花费', '每一次思考，都算得清楚。', '实时查看 AI 的 token 消耗与花费，可下钻到每个群、每个好友、每一轮对话。'],
   access: ['访问与安全', '明确边界，安心连接。', '管理允许对话的对象、管理员权限与控制台访问凭证。'],
   operations: ['调试与运维', '让桥接，始终井然有序。', '测试消息、引导 AI，或维护桥接进程与会话工作区。'],
@@ -4462,6 +4882,24 @@ function setConsolePage(page, { updateHash = true, focus = false, target = '' } 
   closeConsoleSearch();
   // 语音库按需加载：进入二代仿真页时才探测（避免每次开控制台都压网关）。
   if (page === 'social-v2' && typeof loadVoiceLibrary === 'function') loadVoiceLibrary();
+  if (page === 'tts' && typeof loadTtsPanel === 'function') loadTtsPanel();
+  // LIFE_LOOP_PATCH（规格 §8.4 顺手修）：长期记忆 / 人格页的状态对象（ltmUi / ltmEl / mindUi / mindEl）
+  // 声明在脚本后半段。直接以 #ltm / #mind 打开时，这里的首次调用早于那些 const，会撞上暂时性死区
+  // （Cannot access 'ltmUi' / 'mindUi' before initialization）。延后一个微任务，等整个脚本跑完再加载。
+  if (page === 'ltm') {
+    if (typeof loadLtmPanel === 'function') queueMicrotask(loadLtmPanel);
+    if (typeof loadLifeLoopPanel === 'function') queueMicrotask(loadLifeLoopPanel);
+    // RAG_PATCH（P2）：向量索引状态也跟着进页面刷一次；函数体里的 let 到微任务执行时已初始化。
+    if (typeof loadLtmRagStatus === 'function') queueMicrotask(loadLtmRagStatus);
+    // RAG_PATCH（P3）：自动想起（影子）同样进页面刷一次（loadLtmRecallShadow 自带在途去重）。
+    if (typeof loadLtmRecallShadow === 'function') queueMicrotask(loadLtmRecallShadow);
+    // SUGGEST_PATCH：账本建议也刷一次（loadLtmSuggest 自带在途去重）。
+    if (typeof loadLtmSuggest === 'function') queueMicrotask(loadLtmSuggest);
+  }
+  if (page === 'mind' && typeof loadMindPanel === 'function') queueMicrotask(loadMindPanel);
+  // REPORT_PATCH：每日报表的状态对象声明在脚本末尾；同样延后一个微任务，直接以 #report 打开也不撞暂时性死区。
+  // 每次切回这一页都重新请求「今天」的数据（规格 §2）。
+  if (page === 'report' && typeof loadReportPanel === 'function') queueMicrotask(loadReportPanel);
   if (focus) {
     document.getElementById('mainContent').focus({ preventScroll: true });
     document.getElementById(target || 'mainContent')?.scrollIntoView({ block: 'start', behavior: 'instant' });
@@ -5076,6 +5514,2533 @@ setInterval(() => { if (currentConsolePage !== 'usage') return; refreshUsage(); 
     if (!stored()) apply(event.matches ? 'dark' : 'light', false);
   });
 })();
+
+// ── TTS_API_PATCH：语音合成 API 页面 ──────────────────────────────────────
+const tts = { data: null, loaded: false, original: { headers: null, body: null } };
+const ttsEl = (id) => document.getElementById(id);
+const TTS_MODE_LABEL = { preset: '预置音色', design: '文字描述音色', clone: '语音克隆', custom: '自定义接口' };
+// 浏览器的 textarea 会把 \r\n 规范成 \n：没改动时保存要回传服务端给的原文，才能保证字节一致。
+const ttsNormalizeNewlines = (s) => String(s ?? '').replace(/\r\n?/g, '\n');
+
+function ttsSetMsg(id, text, ok) {
+  const el = ttsEl(id);
+  if (!el) return;
+  el.textContent = text;
+  el.className = 'meta' + (ok === true ? ' ok' : ok === false ? ' err' : '');
+}
+
+function ttsFileUrl(kind, name) {
+  const token = localStorage.getItem('consoleToken') || '';
+  return `/api/tts/file?kind=${encodeURIComponent(kind)}&name=${encodeURIComponent(name)}&token=${encodeURIComponent(token)}&t=${Date.now()}`;
+}
+
+function ttsPlay(kind, name) {
+  const audio = ttsEl('ttsAudio');
+  audio.src = ttsFileUrl(kind, name);
+  audio.play().catch(() => {});
+}
+
+function ttsCurrentMode() {
+  const sel = ttsEl('ttsMode').value;
+  if (sel && sel !== 'auto') return sel;
+  const model = ttsEl('ttsModelManual').value.trim() || ttsEl('ttsModel').value;
+  const s = model.toLowerCase();
+  if (/clone/.test(s)) return 'clone';
+  if (/design/.test(s)) return 'design';
+  if (/tts|speech|audio|voice/.test(s)) return 'preset';
+  return 'custom';
+}
+
+function ttsApplyModeVisibility() {
+  const mode = ttsCurrentMode();
+  document.querySelectorAll('[data-tts-mode]').forEach((el) => {
+    const show = el.dataset.ttsMode.split(/\s+/).includes(mode);
+    el.style.display = show ? '' : 'none';
+  });
+  ttsEl('ttsDesignBox').style.display = mode === 'design' ? '' : 'none';
+  const autoOpt = ttsEl('ttsMode').querySelector('option[value="auto"]');
+  if (autoOpt) autoOpt.textContent = `自动判断（当前：${TTS_MODE_LABEL[mode]}）`;
+}
+
+function ttsRenderModels(models, selected) {
+  const sel = ttsEl('ttsModel');
+  sel.innerHTML = '';
+  const list = Array.isArray(models) ? models.slice() : [];
+  if (selected && !list.some((m) => m.id === selected)) list.unshift({ id: selected, mode: null });
+  if (!list.length) {
+    const o = document.createElement('option');
+    o.value = ''; o.textContent = '（先填密钥，再点「从接口获取模型」）';
+    sel.appendChild(o);
+    return;
+  }
+  const groups = {};
+  for (const m of list) {
+    const g = m.mode ? TTS_MODE_LABEL[m.mode] + (m.mode === 'custom' ? '（非语音合成模型）' : '') : '已保存的模型';
+    (groups[g] ||= []).push(m);
+  }
+  for (const [g, items] of Object.entries(groups)) {
+    const og = document.createElement('optgroup');
+    og.label = g;
+    for (const m of items) {
+      const o = document.createElement('option');
+      o.value = m.id; o.textContent = m.id;
+      if (m.id === selected) o.selected = true;
+      og.appendChild(o);
+    }
+    sel.appendChild(og);
+  }
+}
+
+function ttsRenderVoices() {
+  const grid = ttsEl('ttsVoiceGrid');
+  const cfg = tts.data.config;
+  grid.innerHTML = '';
+  for (const v of tts.data.presetVoices) {
+    const card = document.createElement('div');
+    card.className = 'tts-voice' + (cfg.preset.voice === v.id ? ' active' : '');
+    const title = document.createElement('div');
+    title.className = 'tts-voice-name';
+    title.textContent = v.name;
+    const sub = document.createElement('div');
+    sub.className = 'meta';
+    sub.style.marginTop = '2px';
+    sub.textContent = [v.lang, v.gender, v.note].filter((x) => x && x !== '—').join(' · ');
+    const row = document.createElement('div');
+    row.className = 'row';
+    row.style.marginTop = '6px';
+    const listen = document.createElement('button');
+    listen.type = 'button'; listen.className = 'btn-secondary small'; listen.textContent = '试听';
+    listen.addEventListener('click', async () => {
+      listen.disabled = true; listen.textContent = '合成中…';
+      try {
+        const r = await api('/api/tts/preview', 'POST', { voice: v.id });
+        if (!r.ok) throw new Error(r.error || '试听失败');
+        ttsPlay('preview', r.name);
+        listen.textContent = '再听一次';
+      } catch (e) {
+        showConsoleToast('试听失败：' + e.message);
+        listen.textContent = '试听';
+      } finally { listen.disabled = false; }
+    });
+    const use = document.createElement('button');
+    use.type = 'button'; use.className = 'small'; use.textContent = cfg.preset.voice === v.id ? '使用中' : '使用';
+    use.disabled = cfg.preset.voice === v.id;
+    use.addEventListener('click', async () => {
+      const r = await api('/api/tts/config', 'POST', { preset: { voice: v.id } });
+      if (!r.ok) { showConsoleToast('设置失败：' + (r.error || '')); return; }
+      tts.data.config = r.config;
+      ttsRenderVoices();
+      showConsoleToast(`已使用音色「${v.name}」`);
+    });
+    row.append(listen, use);
+    card.append(title, sub, row);
+    grid.appendChild(card);
+  }
+}
+
+function ttsRenderClone() {
+  const box = ttsEl('ttsCloneList');
+  const samples = tts.data.cloneSamples || [];
+  const current = tts.data.config.clone.file;
+  box.innerHTML = '';
+  if (!samples.length) { box.textContent = '还没有样本。'; return; }
+  for (const s of samples) {
+    const row = document.createElement('div');
+    row.className = 'row';
+    row.style.margin = '4px 0';
+    const label = document.createElement('label');
+    label.style.cssText = 'flex:1 1 260px;margin:0';
+    const radio = document.createElement('input');
+    radio.type = 'radio'; radio.name = 'ttsCloneSel'; radio.value = s.name; radio.checked = s.name === current;
+    radio.style.cssText = 'width:auto;margin-right:6px';
+    radio.addEventListener('change', async () => {
+      const r = await api('/api/tts/config', 'POST', { clone: { file: s.name } });
+      if (!r.ok) { showConsoleToast('选择失败：' + (r.error || '')); return; }
+      tts.data.config = r.config;
+      showConsoleToast('已选用样本 ' + s.name);
+    });
+    label.append(radio, document.createTextNode(`${s.name}（${(s.bytes / 1024).toFixed(0)} KB）`));
+    const play = document.createElement('button');
+    play.type = 'button'; play.className = 'btn-secondary small'; play.textContent = '听原声';
+    play.addEventListener('click', () => ttsPlay('clone', s.name));
+    const del = document.createElement('button');
+    del.type = 'button'; del.className = 'danger small'; del.textContent = '删除';
+    del.addEventListener('click', async () => {
+      if (!confirm(`删除样本 ${s.name}？`)) return;
+      const r = await api('/api/tts/clone/delete', 'POST', { name: s.name });
+      if (!r.ok) { showConsoleToast('删除失败：' + (r.error || '')); return; }
+      tts.data = { ...tts.data, ...r };
+      ttsRenderClone();
+    });
+    row.append(label, play, del);
+    box.appendChild(row);
+  }
+}
+
+function ttsTemplateMeta(which, t) {
+  ttsSetMsg(which === 'headers' ? 'ttsHeadersMsg' : 'ttsBodyMsg', `${t.saved ? '已保存' : '默认模板（尚未保存）'} · ${t.bytes} 字节 · sha256 ${t.sha256.slice(0, 12)}`, t.saved ? true : null);
+}
+
+function ttsFill(data) {
+  tts.data = data;
+  const c = data.config;
+  ttsEl('ttsEndpoint').value = c.endpoint || '';
+  ttsEl('ttsModelsUrl').value = c.modelsUrl || '';
+  ttsEl('ttsModelsUrlHint').textContent = c.modelsUrlResolved ? `实际请求：${c.modelsUrlResolved}` : '';
+  ttsEl('ttsApiKey').value = '';
+  ttsEl('ttsApiKey').placeholder = c.hasApiKey ? `已保存 ${c.apiKeyHint}` : '未填写';
+  ttsEl('ttsApiKeyClear').checked = false;
+  ttsRenderModels(c.models, c.model);
+  ttsEl('ttsModelManual').value = '';
+  const modeSel = ttsEl('ttsMode');
+  modeSel.innerHTML = '';
+  for (const [v, label] of [['auto', '自动判断'], ...Object.entries(TTS_MODE_LABEL)]) {
+    const o = document.createElement('option');
+    o.value = v; o.textContent = label;
+    if ((c.mode || 'auto') === v) o.selected = true;
+    modeSel.appendChild(o);
+  }
+  ttsEl('ttsFormat').value = c.format || 'wav';
+  ttsEl('ttsMaxChars').value = c.maxChars;
+  ttsEl('ttsTimeout').value = Math.round((c.timeoutMs || 120000) / 1000);
+  ttsEl('ttsEnabled').checked = c.enabled !== false;
+  ttsEl('ttsPresetInstruction').value = c.preset.instruction || '';
+  ttsEl('ttsDesignPrompt').value = c.design.prompt || '';
+  ttsEl('ttsCloneInstruction').value = c.clone.instruction || '';
+  for (const which of ['headers', 'body']) {
+    const t = data.templates[which];
+    tts.original[which] = t.text;
+    ttsEl(which === 'headers' ? 'ttsHeaders' : 'ttsBody').value = t.text;
+    ttsTemplateMeta(which, t);
+  }
+  ttsEl('ttsPlaceholders').innerHTML = data.placeholders.map(([k, d]) => `<code>{{${esc(k)}}}</code> ${esc(d)}`).join('<br>');
+  ttsRenderVoices();
+  ttsRenderClone();
+  ttsApplyModeVisibility();
+}
+
+async function loadTtsPanel(force = false) {
+  if (tts.loaded && !force) return;
+  try {
+    const r = await api('/api/tts/config');
+    if (!r.ok) throw new Error(r.error || '读取失败');
+    ttsFill(r);
+    tts.loaded = true;
+  } catch (e) {
+    ttsSetMsg('ttsSaveMsg', '读取语音合成配置失败：' + e.message, false);
+  }
+}
+
+function ttsCollectConfig() {
+  const model = ttsEl('ttsModelManual').value.trim() || ttsEl('ttsModel').value;
+  const patch = {
+    endpoint: ttsEl('ttsEndpoint').value.trim(),
+    modelsUrl: ttsEl('ttsModelsUrl').value.trim(),
+    model,
+    mode: ttsEl('ttsMode').value,
+    format: ttsEl('ttsFormat').value,
+    maxChars: Number(ttsEl('ttsMaxChars').value),
+    timeoutMs: Number(ttsEl('ttsTimeout').value) * 1000,
+    enabled: ttsEl('ttsEnabled').checked,
+    preset: { instruction: ttsEl('ttsPresetInstruction').value },
+    design: { prompt: ttsEl('ttsDesignPrompt').value },
+    clone: { instruction: ttsEl('ttsCloneInstruction').value }
+  };
+  const key = ttsEl('ttsApiKey').value.trim();
+  if (ttsEl('ttsApiKeyClear').checked) patch.clearApiKey = true;
+  else if (key) patch.apiKey = key;
+  return patch;
+}
+
+async function ttsSaveConfig({ quiet = false } = {}) {
+  const r = await api('/api/tts/config', 'POST', ttsCollectConfig());
+  if (!r.ok) { ttsSetMsg('ttsSaveMsg', '保存失败：' + (r.error || ''), false); return false; }
+  tts.data.config = r.config;
+  ttsEl('ttsApiKey').value = '';
+  ttsEl('ttsApiKey').placeholder = r.config.hasApiKey ? `已保存 ${r.config.apiKeyHint}` : '未填写';
+  ttsEl('ttsApiKeyClear').checked = false;
+  ttsEl('ttsModelsUrlHint').textContent = r.config.modelsUrlResolved ? `实际请求：${r.config.modelsUrlResolved}` : '';
+  ttsApplyModeVisibility();
+  ttsRenderVoices();
+  if (!quiet) ttsSetMsg('ttsSaveMsg', '✅ 已保存', true);
+  return true;
+}
+
+async function ttsSaveTemplate(which) {
+  const ta = ttsEl(which === 'headers' ? 'ttsHeaders' : 'ttsBody');
+  const original = tts.original[which];
+  const text = original !== null && ttsNormalizeNewlines(original) === ta.value ? original : ta.value;
+  const r = await api('/api/tts/template', 'POST', { which, text });
+  if (!r.ok) { ttsSetMsg(which === 'headers' ? 'ttsHeadersMsg' : 'ttsBodyMsg', '保存失败：' + (r.error || ''), false); return; }
+  tts.original[which] = text;
+  ttsTemplateMeta(which, r);
+}
+
+async function ttsResetTemplate(which) {
+  if (!confirm(`把${which === 'headers' ? '请求头' : '请求体'}恢复成默认模板？已保存的内容会被删除。`)) return;
+  const r = await api('/api/tts/template', 'POST', { which, reset: true });
+  if (!r.ok) { showConsoleToast('恢复失败：' + (r.error || '')); return; }
+  tts.original[which] = r.text;
+  ttsEl(which === 'headers' ? 'ttsHeaders' : 'ttsBody').value = r.text;
+  ttsTemplateMeta(which, r);
+}
+
+ttsEl('ttsEndpointDefault').addEventListener('click', () => {
+  ttsEl('ttsEndpoint').value = tts.data?.defaults?.endpoint || 'https://api.xiaomimimo.com/v1/chat/completions';
+});
+ttsEl('ttsModel').addEventListener('change', () => { ttsEl('ttsModelManual').value = ''; ttsApplyModeVisibility(); });
+ttsEl('ttsModelManual').addEventListener('input', ttsApplyModeVisibility);
+ttsEl('ttsMode').addEventListener('change', ttsApplyModeVisibility);
+ttsEl('ttsFetchModels').addEventListener('click', async function () {
+  this.disabled = true;
+  ttsSetMsg('ttsModelsMsg', '正在获取模型列表…');
+  try {
+    const r = await api('/api/tts/models', 'POST', {
+      endpoint: ttsEl('ttsEndpoint').value.trim(),
+      modelsUrl: ttsEl('ttsModelsUrl').value.trim(),
+      apiKey: ttsEl('ttsApiKey').value.trim()
+    });
+    if (!r.ok) throw new Error(r.error || '获取失败');
+    const current = ttsEl('ttsModelManual').value.trim() || ttsEl('ttsModel').value;
+    const tts3 = r.models.filter((m) => m.mode !== 'custom');
+    const pick = r.models.some((m) => m.id === current) ? current : (tts3[0]?.id || r.models[0]?.id || '');
+    ttsRenderModels(r.models, pick);
+    ttsApplyModeVisibility();
+    ttsSetMsg('ttsModelsMsg', `✅ 获取到 ${r.models.length} 个模型（语音合成类 ${tts3.length} 个），选好后记得「保存配置」`, true);
+  } catch (e) {
+    ttsSetMsg('ttsModelsMsg', '获取失败：' + e.message, false);
+  } finally { this.disabled = false; }
+});
+ttsEl('ttsHeadersSave').addEventListener('click', () => ttsSaveTemplate('headers'));
+ttsEl('ttsBodySave').addEventListener('click', () => ttsSaveTemplate('body'));
+ttsEl('ttsHeadersReset').addEventListener('click', () => ttsResetTemplate('headers'));
+ttsEl('ttsBodyReset').addEventListener('click', () => ttsResetTemplate('body'));
+ttsEl('ttsSave').addEventListener('click', () => ttsSaveConfig());
+ttsEl('ttsCheck').addEventListener('click', async function () {
+  this.disabled = true;
+  ttsEl('ttsCheckList').textContent = '检查中…';
+  try {
+    if (!(await ttsSaveConfig({ quiet: true }))) return;
+    const r = await api('/api/tts/check', 'POST', {});
+    if (!r.ok && !r.items) throw new Error(r.error || '检查失败');
+    const icon = { ok: '✅', warn: '⚠️', error: '❌' };
+    ttsEl('ttsCheckList').innerHTML = `<div><b>${r.ok ? '✅ 可以使用' : '❌ 还有问题'}</b> · 当前类型：${esc(TTS_MODE_LABEL[r.mode] || r.mode)}</div>` +
+      r.items.map((i) => `<div>${icon[i.level] || '•'} ${esc(i.name)}：${esc(i.detail)}</div>`).join('');
+    ttsSetMsg('ttsSaveMsg', '已保存并检查', r.ok);
+  } catch (e) {
+    ttsEl('ttsCheckList').textContent = '检查失败：' + e.message;
+  } finally { this.disabled = false; }
+});
+ttsEl('ttsTestBtn').addEventListener('click', async function () {
+  const text = ttsEl('ttsTestText').value.trim();
+  if (!text) { ttsSetMsg('ttsTestMsg', '先写点要合成的文字', false); return; }
+  this.disabled = true;
+  ttsSetMsg('ttsTestMsg', '合成中…');
+  try {
+    if (!(await ttsSaveConfig({ quiet: true }))) throw new Error('配置保存失败');
+    const r = await api('/api/tts/test', 'POST', { text, style: ttsEl('ttsTestStyle').value });
+    if (!r.ok) throw new Error(r.error || '合成失败');
+    ttsPlay('test', r.name);
+    ttsSetMsg('ttsTestMsg', `✅ ${TTS_MODE_LABEL[r.mode] || r.mode} · ${r.model}${r.voice ? ' · ' + r.voice : ''} · 用时 ${(r.ms / 1000).toFixed(1)} 秒${r.detail ? ' · ' + r.detail : ''}`, true);
+  } catch (e) {
+    ttsSetMsg('ttsTestMsg', '合成失败：' + e.message, false);
+  } finally { this.disabled = false; }
+});
+ttsEl('ttsCloneUpload').addEventListener('click', async function () {
+  const file = ttsEl('ttsCloneFile').files?.[0];
+  if (!file) { ttsSetMsg('ttsCloneMsg', '先选择一个 mp3 / wav 文件', false); return; }
+  if (file.size > 7.4 * 1024 * 1024) { ttsSetMsg('ttsCloneMsg', '文件太大：官方要求 Base64 后不超过 10MB（原文件约 7.4MB 以内）', false); return; }
+  this.disabled = true;
+  ttsSetMsg('ttsCloneMsg', '上传中…');
+  try {
+    const dataBase64 = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result));
+      reader.onerror = () => reject(new Error('读取文件失败'));
+      reader.readAsDataURL(file);
+    });
+    const r = await api('/api/tts/clone/upload', 'POST', { filename: file.name, dataBase64 });
+    if (!r.ok) throw new Error(r.error || '上传失败');
+    tts.data = { ...tts.data, ...r };
+    ttsRenderClone();
+    ttsEl('ttsCloneFile').value = '';
+    ttsSetMsg('ttsCloneMsg', `✅ 已上传并选用 ${r.sample.name}`, true);
+  } catch (e) {
+    ttsSetMsg('ttsCloneMsg', '上传失败：' + e.message, false);
+  } finally { this.disabled = false; }
+});
+if (location.hash === '#tts') loadTtsPanel();
+
+// ── LTM_PATCH：长期记忆页面 ────────────────────────────────────────────────
+const ltmUi = { loaded: false, cats: {}, people: [] };
+const ltmEl = (id) => document.getElementById(id);
+const LTM_KEY_LABEL = (k) => k.startsWith('private:') ? `私聊 ${k.slice(8)}` : `群 ${k.slice(6)}`;
+
+// LIFE_LOOP_PATCH（规格 §8.4）：条目徽标。日期一律比本地 YYYY-MM-DD 字符串，不用 UTC 切片。
+const LTM_STATUS_BADGE = { done: '已兑现', missed: '没兑现', cancelled: '已取消' };
+const LTM_BY_BADGE = { me: '你答应的', them: '他答应的' };
+function ltmLocalToday() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+// LIFE_LOOP_PATCH：ISO 时间戳转本地 YYYY-MM-DD。at.slice(0, 10) 是 UTC 日期，
+// 本机在东八区，凌晨 0～8 点记的条目会显示成前一天。解析不了就退回原来的切片写法。
+function ltmLocalDay(iso) {
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return String(iso ?? '').slice(0, 10);
+  const d = new Date(t);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+function ltmDueBadge(it, today) {
+  if (!it || it.cat !== 'pending' || !it.due) return '';
+  // LIFE_LOOP_PATCH：已结束的约定不再催——它们已有「已兑现 / 没兑现 / 已取消」徽标。
+  if ((it.status ?? 'open') !== 'open') return '';
+  if (it.due === today) return '今天到期';
+  if (it.due < today) {
+    const days = Math.round((Date.parse(today + 'T00:00:00') - Date.parse(it.due + 'T00:00:00')) / 86400000);
+    return `已过期 ${Number.isFinite(days) ? days : 0} 天`;
+  }
+  return `${it.due.slice(5)} 到期`;
+}
+function ltmBadges(it, today) {
+  const out = [];
+  if (it.core) out.push('核心');
+  const due = ltmDueBadge(it, today);
+  if (due) out.push(due);
+  if (it.cat === 'pending' && it.status && it.status !== 'open') out.push(LTM_STATUS_BADGE[it.status] || it.status);
+  if (it.cat === 'pending' && LTM_BY_BADGE[it.by]) out.push(LTM_BY_BADGE[it.by]);
+  // DECAY_PATCH（规格 §11）：遗忘状态放在「已归档」之前——归档是最终状态，放最后一眼能看到。
+  // 没有 decay 字段（桥接没启用遗忘模块）时这两行都不生效，徽标与以前完全一致。
+  if (it.decay?.frozen && !it.outdatedAt) out.push('已淡忘');
+  if (it.outdatedAt) out.push('已过时');
+  if (it.archivedAt) out.push('已归档');
+  return out;
+}
+function ltmBadgeBox(badges) {
+  const box = document.createElement('div');
+  box.style.cssText = 'flex:0 0 auto;margin-right:4px';
+  for (const b of badges) {
+    const s = document.createElement('span');
+    s.className = 'meta';
+    s.style.cssText = 'display:inline-block;border:1px solid var(--border-chip);border-radius:8px;padding:0 6px;margin:1px 4px 1px 0;font-size:12px';
+    s.textContent = b;
+    box.appendChild(s);
+  }
+  return box;
+}
+
+// ── DECAY_PATCH（规格 §11）：遗忘状态的显示 ─────────────────────────────────
+// 桥接没启用遗忘模块时条目上没有 decay 字段，下面这些函数全部退化成「什么都不显示」，
+// 页面与上线前逐字一致（只有统计行少了「已淡忘」一项）。
+function ltmFrozen(it) {
+  // 已过时优先：过时的条目用徽标 + 删除线表示，不再提淡忘。
+  return Boolean(it && it.decay?.frozen && !it.outdatedAt);
+}
+// 牢固程度用天，前面几天变化最明显所以保留一位小数；一年以上换算成年，免得出现 800 天这种数。
+function ltmStrengthText(S) {
+  if (!Number.isFinite(S) || S <= 0) return '';
+  if (S > 365) return `${(S / 365).toFixed(1)} 年`;
+  if (S < 10) return `${S.toFixed(1)} 天`;
+  return `${Math.round(S)} 天`;
+}
+// 条目右侧元信息追加的一段；过时的条目已经用徽标和删除线说明，不再重复。
+function ltmDecayMeta(it) {
+  if (!it || !it.decay || it.outdatedAt) return '';
+  if (it.decay.exempt) return '不会淡忘';
+  const R = Number(it.decay.R);
+  if (!Number.isFinite(R)) return '';
+  const s = ltmStrengthText(Number(it.decay.S));
+  return `记得 ${Math.round(R * 100)}%${s ? ' · 牢固 ' + s : ''}`;
+}
+// 已淡忘的条目手动唤醒一次（复习 good）。reviewed=false 表示 1 小时内已经复习过，
+// 不是错误，所以走普通提示而不是报错。
+function ltmReviewBtn(p, it) {
+  const b = document.createElement('button');
+  b.type = 'button'; b.className = 'btn-secondary small'; b.textContent = '唤醒';
+  b.addEventListener('click', async () => {
+    const r = await api('/api/ltm/review', 'POST', { userId: p.userId, itemId: it.id });
+    if (!r.ok) { showConsoleToast('唤醒失败：' + (r.error || '')); return; }
+    ltmRenderPerson(r.person);
+    if (r.reviewed === false) showConsoleToast('1 小时内已经唤醒过，这次没有再加固');
+  });
+  return b;
+}
+// 情况变了就把旧条目标过时——不删除，只是不再带给她（也不会自己冒出来）。
+function ltmOutdateBtn(p, it) {
+  const b = document.createElement('button');
+  b.type = 'button'; b.className = 'btn-secondary small'; b.textContent = '标过时';
+  b.addEventListener('click', async () => {
+    if (!confirm('标成已过时？（情况变了；不会删除，只是不再带给她）')) return;
+    const r = await api('/api/ltm/update', 'POST', { userId: p.userId, itemId: it.id, outdated: true });
+    if (!r.ok) { showConsoleToast('操作失败：' + (r.error || '')); return; }
+    ltmRenderPerson(r.person);
+  });
+  return b;
+}
+
+function ltmRenderPerson(p) {
+  const box = ltmEl('ltmItems');
+  box.innerHTML = '';
+  if (!p || !p.items?.length) { box.textContent = p ? '这个人还没有记忆条目。' : '账本是空的：AI 用 qq_ltm_remember 记下第一件事后会出现在这里。'; return; }
+  const today = ltmLocalToday();
+  // DECAY_PATCH（规格 §11）：顶部统计。N 只数未归档的条目；旧桥接的条目没有 decay 字段，
+  // 这时只说「共 N 条，已过时 O 条」，不凭空报「已淡忘 0 条」。
+  const active = p.items.filter((x) => !x.archivedAt);
+  const stat = document.createElement('div');
+  stat.className = 'meta';
+  if (p.items.some((x) => x.decay)) {
+    const frozen = active.filter((x) => ltmFrozen(x)).length;
+    const outdated = active.filter((x) => x.outdatedAt).length;
+    stat.textContent = `共 ${active.length} 条，已淡忘 ${frozen} 条，已过时 ${outdated} 条`;
+  } else {
+    const outdated = active.filter((x) => x.outdatedAt).length;
+    stat.textContent = `共 ${active.length} 条，已过时 ${outdated} 条`;
+  }
+  box.appendChild(stat);
+  for (const [cat, label] of Object.entries(ltmUi.cats)) {
+    const items = p.items.filter((x) => x.cat === cat);
+    if (!items.length) continue;
+    const h = document.createElement('div');
+    h.style.cssText = 'margin-top:10px;font-weight:600;color:var(--label)';
+    h.textContent = `${label}（${items.length}）`;
+    box.appendChild(h);
+    for (const it of items.slice().reverse()) {
+      // LIFE_LOOP_PATCH：每条两行——第一行徽标 / 正文 / 元信息，第二行按钮。
+      // 以前全塞进同一个 .row，窄屏换行位置不固定，「删」会挤到下一行最左边紧挨「设为核心」，容易误点。
+      const item = document.createElement('div');
+      item.style.cssText = 'margin:6px 0';
+      // 已归档的整条变灰（仍能看到、能恢复）。
+      if (it.archivedAt) item.style.opacity = '0.55';
+      // DECAY_PATCH（规格 §11）：过时与已归档一样淡；已淡忘轻一点。归档 / 过时优先，取更低的那档。
+      if (it.outdatedAt) item.style.opacity = '0.55';
+      else if (!it.archivedAt && ltmFrozen(it)) item.style.opacity = '0.75';
+      const row = document.createElement('div');
+      row.className = 'row';
+      row.style.cssText = 'align-items:flex-start';
+      const txt = document.createElement('div');
+      txt.style.cssText = 'flex:1 1 300px;color:var(--text-input)';
+      txt.textContent = it.text;
+      // DECAY_PATCH（规格 §11）：过时的条目划掉，表示「以前是这样，现在不算数了」。
+      if (it.outdatedAt) txt.style.textDecoration = 'line-through';
+      const meta = document.createElement('div');
+      meta.className = 'meta';
+      meta.style.cssText = 'margin:0;flex:0 0 auto';
+      meta.textContent = `${ltmLocalDay(it.at)} · ${it.scope === 'private' ? '仅该会话' : '各处可见'} · ${it.sourceKey ? LTM_KEY_LABEL(it.sourceKey) : ''}`;
+      // DECAY_PATCH（规格 §11）：后面接一段「记得 86% · 牢固 21 天」。没有 decay 字段时不追加，
+      // 文本与上线前逐字相同。
+      const decayMeta = ltmDecayMeta(it);
+      if (decayMeta) meta.textContent += ' · ' + decayMeta;
+      // LIFE_LOOP_PATCH：状态 / 核心 / 归档都走同一个 /api/ltm/update。
+      const act = (text, patch) => {
+        const b = document.createElement('button');
+        b.type = 'button'; b.className = 'btn-secondary small'; b.textContent = text;
+        b.addEventListener('click', async () => {
+          const r = await api('/api/ltm/update', 'POST', { userId: p.userId, itemId: it.id, ...patch });
+          if (!r.ok) { showConsoleToast('操作失败：' + (r.error || '')); return; }
+          ltmRenderPerson(r.person);
+        });
+        return b;
+      };
+      const edit = document.createElement('button');
+      edit.type = 'button'; edit.className = 'btn-secondary small'; edit.textContent = '改';
+      edit.addEventListener('click', async () => {
+        const v = prompt('修改这条记忆：', it.text);
+        if (v === null || !v.trim() || v === it.text) return;
+        const r = await api('/api/ltm/update', 'POST', { userId: p.userId, itemId: it.id, content: v.trim() });
+        if (!r.ok) { showConsoleToast('修改失败：' + (r.error || '')); return; }
+        ltmRenderPerson(r.person);
+      });
+      const del = document.createElement('button');
+      del.type = 'button'; del.className = 'danger small'; del.textContent = '删';
+      del.addEventListener('click', async () => {
+        if (!confirm(`删除这条记忆？\n${it.text}`)) return;
+        const r = await api('/api/ltm/forget', 'POST', { userId: p.userId, itemId: it.id });
+        if (!r.ok) { showConsoleToast('删除失败：' + (r.error || '')); return; }
+        ltmRenderPerson(r.person);
+      });
+      const badges = ltmBadges(it, today);
+      if (badges.length) row.appendChild(ltmBadgeBox(badges));
+      row.append(txt, meta);
+      // LIFE_LOOP_PATCH：按钮单独一行，顺序固定，「删」用 margin-left:auto 推到最右边和别的按钮分开。
+      const btnRow = document.createElement('div');
+      btnRow.className = 'row';
+      btnRow.style.cssText = 'margin-top:2px;gap:6px';
+      btnRow.appendChild(edit);
+      btnRow.appendChild(act(it.core ? '取消核心' : '设为核心', { core: !it.core }));
+      btnRow.appendChild(act(it.archivedAt ? '恢复' : '归档', { archived: !it.archivedAt }));
+      // DECAY_PATCH（规格 §11）：淡忘的可以手动唤醒；过时的能取消过时，正常的能标过时（核心条目不动）。
+      if (ltmFrozen(it)) btnRow.appendChild(ltmReviewBtn(p, it));
+      if (it.outdatedAt) btnRow.appendChild(act('取消过时', { outdated: false }));
+      else if (!it.core) btnRow.appendChild(ltmOutdateBtn(p, it));
+      if (it.cat === 'pending') {
+        const open = (it.status ?? 'open') === 'open';
+        if (open) {
+          btnRow.appendChild(act('标兑现', { status: 'done' }));
+          btnRow.appendChild(act('标没兑现', { status: 'missed' }));
+        } else {
+          btnRow.appendChild(act('重开', { status: 'open' }));
+        }
+      }
+      del.style.marginLeft = 'auto';
+      btnRow.appendChild(del);
+      item.append(row, btnRow);
+      box.appendChild(item);
+    }
+  }
+}
+
+async function ltmLoadPerson() {
+  const uid = ltmEl('ltmPerson').value;
+  if (!uid) { ltmRenderPerson(null); return; }
+  const r = await api('/api/ltm/person?userId=' + encodeURIComponent(uid));
+  if (!r.ok) { ltmEl('ltmItems').textContent = '读取失败：' + (r.error || ''); return; }
+  ltmRenderPerson(r.person);
+}
+
+async function loadLtmPanel(force = false) {
+  if (ltmUi.loaded && !force) return;
+  const r = await api('/api/ltm/people');
+  if (!r.ok) { ltmEl('ltmItems').textContent = '读取失败：' + (r.error || ''); return; }
+  ltmUi.cats = r.categories || {};
+  ltmUi.people = r.people || [];
+  const sel = ltmEl('ltmPerson');
+  const prev = sel.value;
+  sel.innerHTML = '';
+  for (const p of ltmUi.people) {
+    const o = document.createElement('option');
+    o.value = p.userId;
+    o.textContent = `${p.name || '（未知昵称）'} · ${p.userId} · ${p.items} 条记忆 · ${p.messages || 0} 条消息`;
+    sel.appendChild(o);
+  }
+  if (prev && ltmUi.people.some((p) => p.userId === prev)) sel.value = prev;
+  const catSel = ltmEl('ltmAddCat');
+  catSel.innerHTML = Object.entries(ltmUi.cats).map(([k, v]) => `<option value="${esc(k)}">${esc(v)}</option>`).join('');
+  // LIFE_LOOP_PATCH（规格 §8.4）：选到「约定」才显示到期日 / 谁答应的。
+  const togglePendingFields = () => { ltmEl('ltmAddPendingRow').style.display = catSel.value === 'pending' ? '' : 'none'; };
+  togglePendingFields();
+  const keySel = ltmEl('ltmKey');
+  const prevKey = keySel.value;
+  keySel.innerHTML = (r.keys || []).map((k) => `<option value="${esc(k)}">${esc(LTM_KEY_LABEL(k))}</option>`).join('') || '<option value="">（还没有存档）</option>';
+  if (prevKey) keySel.value = prevKey;
+  ltmUi.loaded = true;
+  await ltmLoadPerson();
+  // RAG_PATCH（P2）：打开长期记忆页时顺带刷一次向量索引状态（loadLtmRagStatus 自带在途去重）。
+  loadLtmRagStatus();
+  // RAG_PATCH（P3）：自动想起（影子）也刷一次（loadLtmRecallShadow 自带在途去重）。
+  loadLtmRecallShadow();
+  // SUGGEST_PATCH：账本建议（loadLtmSuggest 自带在途去重）。
+  loadLtmSuggest();
+}
+
+ltmEl('ltmPerson').addEventListener('change', ltmLoadPerson);
+ltmEl('ltmRefresh').addEventListener('click', () => loadLtmPanel(true));
+// LIFE_LOOP_PATCH（规格 §8.4）：类别切到「约定」时才显示到期日 / 谁答应的（一次性绑定，别跟着 loadLtmPanel 累积）。
+ltmEl('ltmAddCat').addEventListener('change', () => {
+  ltmEl('ltmAddPendingRow').style.display = ltmEl('ltmAddCat').value === 'pending' ? '' : 'none';
+});
+ltmEl('ltmAddBtn').addEventListener('click', async () => {
+  const userId = ltmEl('ltmAddUser').value.trim() || ltmEl('ltmPerson').value;
+  const content = ltmEl('ltmAddText').value.trim();
+  if (!/^\d+$/.test(userId)) { ltmEl('ltmAddMsg').textContent = '请填 QQ 号'; ltmEl('ltmAddMsg').className = 'meta err'; return; }
+  if (!content) { ltmEl('ltmAddMsg').textContent = '内容不能为空'; ltmEl('ltmAddMsg').className = 'meta err'; return; }
+  const category = ltmEl('ltmAddCat').value;
+  const payload = { userId, category, content, scope: ltmEl('ltmAddScope').value };
+  // LIFE_LOOP_PATCH（规格 §8.4）：约定才有到期日 / 谁答应的（不填就不传）。
+  if (category === 'pending') {
+    const due = ltmEl('ltmAddDue').value.trim();
+    const by = ltmEl('ltmAddBy').value;
+    if (due) payload.due = due;
+    if (by) payload.by = by;
+  }
+  const r = await api('/api/ltm/remember', 'POST', payload);
+  if (!r.ok) { ltmEl('ltmAddMsg').textContent = '添加失败：' + (r.error || ''); ltmEl('ltmAddMsg').className = 'meta err'; return; }
+  ltmEl('ltmAddText').value = '';
+  ltmEl('ltmAddDue').value = '';
+  ltmEl('ltmAddBy').value = '';
+  ltmEl('ltmAddMsg').textContent = r.duplicate ? '已存在相同内容' : '✅ 已添加';
+  ltmEl('ltmAddMsg').className = 'meta ok';
+  await loadLtmPanel(true);
+  ltmEl('ltmPerson').value = userId;
+  ltmRenderPerson(r.person);
+});
+ltmEl('ltmSearchBtn').addEventListener('click', async function () {
+  const key = ltmEl('ltmKey').value;
+  if (!key) return;
+  this.disabled = true;
+  const q = new URLSearchParams({ key, query: ltmEl('ltmQuery').value.trim(), from: ltmEl('ltmFrom').value.trim(), to: ltmEl('ltmTo').value.trim(), speaker: ltmEl('ltmSpeaker').value.trim(), limit: '200' });
+  try {
+    const r = await api('/api/ltm/search?' + q.toString());
+    if (!r.ok) throw new Error(r.error || '检索失败');
+    ltmEl('ltmSearchOut').textContent = r.lines.length ? r.lines.join('\n') : '（没有匹配的记录）';
+    ltmEl('ltmSearchMsg').textContent = `共存档 ${r.stats.messages} 条（${r.stats.months.join('、') || '—'}），命中 ${r.matched} 条`;
+    ltmEl('ltmSearchMsg').className = 'meta';
+  } catch (e) {
+    ltmEl('ltmSearchMsg').textContent = '检索失败：' + e.message;
+    ltmEl('ltmSearchMsg').className = 'meta err';
+  } finally { this.disabled = false; }
+});
+// ── RAG_PATCH（P2）：删存档 + 向量索引卡片 ────────────────────────────────
+// 规格：docs/design/RAG_HANDOFF.md §5.3。后端字符串（消息原文、昵称、key、错误信息、model_id）
+// 一律走 textContent / createElement 进 DOM，不拼 innerHTML——它们都可能带尖括号。
+let ltmRagLoading = false;   // 在途去重：进页面时 setConsolePage 与 loadLtmPanel 可能各触发一次
+let ltmRagPollTimer = null;  // 重建轮询：只用 setTimeout 链，同一时间最多一条
+let ltmRagPollMiss = 0;
+
+function ltmSetMsg(id, text, ok) {
+  const el = ltmEl(id);
+  el.textContent = text;
+  el.className = ok === null ? 'meta' : (ok ? 'meta ok' : 'meta err');
+}
+
+// 毫秒时间戳 → 本地 MM-DD HH:MM[:SS]；解析不了显示「—」。
+function ltmRagClock(ms, withSeconds = false) {
+  const n = Number(ms);
+  if (!Number.isFinite(n) || n <= 0) return '—';
+  const d = new Date(n);
+  const p = (x) => String(x).padStart(2, '0');
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}${withSeconds ? ':' + p(d.getSeconds()) : ''}`;
+}
+function ltmRowClock(iso) {
+  const t = Date.parse(iso);
+  return Number.isFinite(t) ? ltmRagClock(t) : String(iso ?? '').slice(0, 16).replace('T', ' ');
+}
+
+// 清空容器、追加一行。后端文本只能这样进 DOM，所以不用 innerHTML。
+function ltmClear(id) {
+  const box = ltmEl(id);
+  while (box.firstChild) box.removeChild(box.firstChild);
+  return box;
+}
+function ltmLine(box, text, isErr = false) {
+  const div = document.createElement('div');
+  div.className = isErr ? 'meta err' : 'meta';
+  div.textContent = text;
+  box.appendChild(div);
+  return div;
+}
+
+// ── 存档删除 ──
+function ltmDeleteResultText(r) {
+  let s = `已删除 ${r.deleted ?? 0} 条`;
+  if (r.forget === 'done') {
+    const n = r.removedChunks;
+    s += `，向量索引已同步清除${n === null || n === undefined ? '' : `（${n} 块）`}，会自动重建`;
+  } else if (r.forget === 'queued') {
+    s += '，向量索引服务暂时不可达，已记下，服务起来后会自动清除';
+  } else if (r.forget === 'off') {
+    s += '，没有配置向量索引';
+  }
+  if (Number(r.skipped) > 0) s += `（跳过 ${r.skipped} 条：可能已被删除或记录有变化）`;
+  return s;
+}
+
+function ltmRenderRows(data) {
+  const box = ltmClear('ltmRows');
+  const rows = data.rows || [];
+  ltmSetMsg('ltmRowsMsg', `范围内共 ${data.total ?? rows.length} 条，显示最新的 ${rows.length} 条`, null);
+  if (!rows.length) return;
+  const table = document.createElement('table');
+  const thead = document.createElement('thead');
+  const htr = document.createElement('tr');
+  for (const label of ['时间', '谁', '内容', '操作']) {
+    const th = document.createElement('th');
+    th.textContent = label;
+    htr.appendChild(th);
+  }
+  thead.appendChild(htr);
+  const tbody = document.createElement('tbody');
+  for (const row of rows) {
+    const tr = document.createElement('tr');
+    const tdTime = document.createElement('td');
+    tdTime.textContent = ltmRowClock(row.t);
+    const tdWho = document.createElement('td');
+    tdWho.textContent = row.dir === 'out' ? '她' : (row.name || row.userId || '');
+    const tdText = document.createElement('td');
+    tdText.textContent = row.text ?? '';
+    const tdAct = document.createElement('td');
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'danger small';
+    del.textContent = '删除';
+    del.addEventListener('click', () => ltmDeleteOne(data.key, row, del));
+    tdAct.appendChild(del);
+    tr.append(tdTime, tdWho, tdText, tdAct);
+    tbody.appendChild(tr);
+  }
+  table.append(thead, tbody);
+  box.appendChild(table);
+}
+
+async function ltmListRows() {
+  const key = ltmEl('ltmKey').value;
+  if (!key) { ltmSetMsg('ltmRowsMsg', '先选择会话', false); return; }
+  const q = new URLSearchParams({ key, from: ltmEl('ltmFrom').value.trim(), to: ltmEl('ltmTo').value.trim(), limit: '200' });
+  try {
+    const r = await api('/api/ltm/archive/rows?' + q.toString());
+    if (!r.ok) throw new Error(r.error || '列出失败');
+    ltmRenderRows(r);
+  } catch (e) {
+    ltmSetMsg('ltmRowsMsg', '列出失败：' + e.message, false);
+  }
+}
+
+async function ltmDeleteOne(key, row, btn) {
+  const who = row.dir === 'out' ? '她' : (row.name || row.userId || '');
+  const raw = String(row.text ?? '');
+  const preview = raw.length > 60 ? raw.slice(0, 60) + '…' : raw;
+  if (!confirm(`删除这条记录？\n${ltmRowClock(row.t)} · ${who}\n${preview}`)) return;
+  btn.disabled = true;
+  try {
+    const r = await api('/api/ltm/archive/delete', 'POST', { key, rows: [{ file: row.file, line: row.line, t: row.t }] });
+    if (!r.ok) throw new Error(r.error || '删除失败');
+    ltmSetMsg('ltmDeleteMsg', ltmDeleteResultText(r), true);
+    await ltmListRows();
+  } catch (e) {
+    ltmSetMsg('ltmDeleteMsg', '删除失败：' + e.message, false);
+  } finally { btn.disabled = false; }
+}
+
+async function ltmDeleteRange() {
+  const key = ltmEl('ltmKey').value;
+  if (!key) { ltmSetMsg('ltmDeleteMsg', '先选择会话', false); return; }
+  const from = ltmEl('ltmFrom').value.trim();
+  const to = ltmEl('ltmTo').value.trim();
+  // 范围两边都空时删不了任何范围，直接提示，别发请求（后端会拿它当全量）。
+  if (!from && !to) { ltmSetMsg('ltmDeleteMsg', '先填日期范围', false); return; }
+  const btn = ltmEl('ltmDeleteRangeBtn');
+  btn.disabled = true;
+  try {
+    const dry = await api('/api/ltm/archive/delete', 'POST', { key, from, to, dryRun: true });
+    if (!dry.ok) throw new Error(dry.error || '预检失败');
+    if (!dry.matched) { ltmSetMsg('ltmDeleteMsg', '没有记录', false); return; }
+    if (!confirm(`将永久删除 ${key} 在 ${from || '最早'} ～ ${to || '现在'} 的 ${dry.matched} 条记录，不可恢复。确定？`)) return;
+    const r = await api('/api/ltm/archive/delete', 'POST', { key, from, to });
+    if (!r.ok) throw new Error(r.error || '删除失败');
+    ltmSetMsg('ltmDeleteMsg', ltmDeleteResultText(r), true);
+    await ltmListRows();
+  } catch (e) {
+    ltmSetMsg('ltmDeleteMsg', '删除失败：' + e.message, false);
+  } finally { btn.disabled = false; }
+}
+
+// ── 向量索引 ──
+// model_id 形如 "Qwen3-Embedding-8B|dim=2048|eos=1|inst=..."：只取模型名、维度和可用性。
+function ltmRagModelText(h) {
+  const emb = h.embedding || {};
+  const modelId = String(emb.model_id || '');
+  const name = modelId.split('|')[0] || '未知模型';
+  const dim = (modelId.match(/dim=(\d+)/) || [])[1] || '未知维度';
+  return `向量模型：${name}，${dim}，${emb.healthy ? '可用' : '不可用（检索只走关键词）'}`;
+}
+
+// RAG_PATCH（P3）：数字兜底。字段缺失 / 非数字一律按 0 显示，避免页面上出现 NaN / undefined。
+function ltmNum(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
+
+// RAG_PATCH（P3）：「重试失败的」按钮只在提炼里有失败块时出现。
+function ltmRagDistillBtn(show) {
+  const btn = ltmEl('ltmRagDistillRetry');
+  if (btn) btn.style.display = show ? '' : 'none';
+}
+
+// RAG_PATCH（P3）：提炼状态。失败数 > 0 时把重试按钮亮出来。
+function ltmRagRenderDistill(box, distill) {
+  if (!distill) {
+    ltmLine(box, '提炼：不可用');
+    ltmRagDistillBtn(false);
+    return;
+  }
+  const keyOk = Boolean(distill.key);
+  ltmLine(
+    box,
+    `提炼：${distill.enabled ? '开' : '关'}，模型 ${distill.model || '—'}，密钥 ${
+      keyOk ? '已配置（复用人格判读那把）' : '未配置——在「人格与情绪 → 判读设置」里填'
+    }`,
+    !keyOk
+  );
+  ltmLine(
+    box,
+    `摘要 ${ltmNum(distill.summaries)} 条：待提炼 ${ltmNum(distill.pending)}、失败 ${ltmNum(distill.failed)}、跳过 ${ltmNum(distill.skipped)}、向量待补 ${ltmNum(distill.vec_pending)}`
+  );
+  ltmLine(box, `关系图：${ltmNum(distill.entities)} 个人 / 物 / 话题，${ltmNum(distill.relations)} 条关系`);
+  const today = distill.today || {};
+  const cost = Number(today.cost);
+  const limit = distill.daily_limit ?? '—';
+  ltmLine(
+    box,
+    `今天：调用 ${ltmNum(today.calls)} 次（成功 ${ltmNum(today.ok)}、失败 ${ltmNum(today.failed)}），花费 ¥${
+      Number.isFinite(cost) ? cost.toFixed(3) : '0.000'
+    }，上限 ${limit} 次/天`
+  );
+  if (distill.last_error) ltmLine(box, `最近错误：${distill.last_error}`, true);
+  ltmRagDistillBtn(ltmNum(distill.failed) > 0);
+}
+
+async function ltmDistillRetry() {
+  const btn = ltmEl('ltmRagDistillRetry');
+  if (btn) btn.disabled = true;
+  ltmSetMsg('ltmRagMsg', '重试中…', null);
+  try {
+    const r = await api('/api/ltm/rag/distill-retry', 'POST', {});
+    if (!r || r.ok === false) { ltmSetMsg('ltmRagMsg', (r && r.error) || '重试失败', false); return; }
+    ltmSetMsg('ltmRagMsg', `已把 ${ltmNum(r.retried)} 块重新排进提炼队列`, true);
+    await loadLtmRagStatus();
+  } catch (e) {
+    ltmSetMsg('ltmRagMsg', '重试失败：' + e.message, false);
+  } finally { if (btn) btn.disabled = false; }
+}
+
+function ltmRagRender(d) {
+  const box = ltmClear('ltmRagStatus');
+  // RAG_PATCH（P3）：失败数为 0 / 读不到状态时都不显示「重试失败的」。
+  ltmRagDistillBtn(false);
+  if (!d || d.ok === false) { ltmLine(box, '读取失败：' + ((d && d.error) || '未知错误'), true); return; }
+  if (d.configured === false) { ltmLine(box, '没有配置向量索引（config.json 的 memoryRag）'); return; }
+  const h = d.health || {};
+  if (d.reachable === false) {
+    // 服务停着也要能看见遗忘请求：删存档时队列里还留着没消化的 key。
+    ltmLine(box, '服务：不可达（没在运行？需要时在远程跑 start-all.sh --rag）');
+  } else {
+    ltmLine(box, '服务：' + (h.ok ? '正常' : '异常'));
+    ltmLine(box, ltmRagModelText(h));
+    if (h.mismatch) ltmLine(box, `索引口径和配置不一致：${h.mismatch}。点『全量重建』修复。`, true);
+    if (h.store) {
+      ltmLine(box, `已索引：${h.store.chunks ?? 0} 块`);
+      for (const [k, n] of Object.entries(h.store.per_key || {})) ltmLine(box, `${k} ${n} 块`);
+    }
+    const lag = h.lag_rows || {};
+    const lagKeys = Object.keys(lag);
+    if (lagKeys.length && lagKeys.every((k) => !lag[k])) {
+      ltmLine(box, '待索引：无（都已入库）');
+    } else if (lagKeys.length) {
+      ltmLine(box, '待索引：');
+      for (const k of lagKeys) ltmLine(box, `${k} ${lag[k]} 条`);
+    }
+    if (h.last_index) {
+      const err = h.last_index.error;
+      ltmLine(box, `最近一次索引：${ltmRagClock(h.last_index.at, true)}，新增 ${h.last_index.chunks ?? 0} 块${err ? `，错误：${err}` : ''}`, Boolean(err));
+    }
+    const job = h.job;
+    if (!job) {
+      ltmLine(box, '重建任务：没跑过');
+    } else if (!job.finished_at) {
+      ltmLine(box, `重建任务：进行中（${ltmRagClock(job.started_at, true)} 开始）`);
+    } else if (job.error) {
+      ltmLine(box, `重建任务：${ltmRagClock(job.finished_at, true)} 失败：${job.error}`, true);
+    } else {
+      ltmLine(box, `重建任务：${ltmRagClock(job.finished_at, true)} 完成，新建 ${job.chunks ?? 0} 块`);
+    }
+    // RAG_PATCH（P3）：提炼状态（memory-rag /health 的 distill；口径不一致时桥接给 null）。
+    ltmRagRenderDistill(box, h.distill);
+  }
+  const pending = d.pendingForget || [];
+  ltmLine(box, pending.length ? `待处理的遗忘请求：${pending.join('、')}` : '待处理的遗忘请求：无');
+}
+
+async function loadLtmRagStatus() {
+  if (ltmRagLoading) return;
+  ltmRagLoading = true;
+  try {
+    const d = await api('/api/ltm/rag/status');
+    ltmRagRender(d);
+  } catch (e) {
+    const box = ltmClear('ltmRagStatus');
+    ltmLine(box, '读取失败：' + e.message, true);
+  } finally { ltmRagLoading = false; }
+}
+
+async function ltmRagIndexNow() {
+  const btn = ltmEl('ltmRagIndex');
+  btn.disabled = true;
+  ltmSetMsg('ltmRagMsg', '索引中…', null);
+  try {
+    const r = await api('/api/ltm/rag/index', 'POST', {});
+    if (!r.ok) throw new Error(r.error || '索引失败');
+    const res = r.result || {};
+    if (res.skipped) ltmSetMsg('ltmRagMsg', String(res.skipped), null);
+    else if (res.error) ltmSetMsg('ltmRagMsg', '索引出错：' + res.error, false);
+    else ltmSetMsg('ltmRagMsg', `已索引，新增 ${res.chunks ?? 0} 块`, true);
+    await loadLtmRagStatus();
+  } catch (e) {
+    ltmSetMsg('ltmRagMsg', '索引失败：' + e.message, false);
+  } finally { btn.disabled = false; }
+}
+
+function ltmRagStopPoll() {
+  if (ltmRagPollTimer) { clearTimeout(ltmRagPollTimer); ltmRagPollTimer = null; }
+  ltmRagPollMiss = 0;
+}
+
+// 全量重建在后台跑：每 3 秒刷一次状态，直到任务结束 / 连续 3 次不可达 / 离开长期记忆页。
+// 用 setTimeout 链而不是 setInterval，避免慢请求叠出多条轮询。
+function ltmRagSchedulePoll() {
+  if (ltmRagPollTimer) return; // 同一时间只允许一条链
+  const tick = async () => {
+    ltmRagPollTimer = null;
+    if (currentConsolePage !== 'ltm') { ltmRagStopPoll(); return; }
+    let d = null;
+    try { d = await api('/api/ltm/rag/status'); } catch { d = null; }
+    const reachable = Boolean(d && d.ok !== false && d.reachable !== false);
+    if (!reachable) {
+      ltmRagPollMiss += 1;
+      if (ltmRagPollMiss >= 3) { ltmRagStopPoll(); return; }
+    } else {
+      ltmRagPollMiss = 0;
+      ltmRagRender(d);
+      const job = (d.health || {}).job;
+      if (job && job.finished_at) {
+        ltmSetMsg('ltmRagMsg', job.error ? ('重建失败：' + job.error) : `重建完成，新建 ${job.chunks ?? 0} 块`, !job.error);
+        ltmRagStopPoll();
+        return;
+      }
+    }
+    ltmRagPollTimer = setTimeout(tick, 3000);
+  };
+  ltmRagPollTimer = setTimeout(tick, 3000);
+}
+
+async function ltmRagRebuildNow() {
+  if (!confirm('全量重建会清空向量索引并从存档重新生成，期间语义检索暂时降级为关键词检索。确定？')) return;
+  const btn = ltmEl('ltmRagRebuild');
+  btn.disabled = true;
+  try {
+    const r = await api('/api/ltm/rag/rebuild', 'POST', {});
+    if (!r.ok) throw new Error(r.error || '重建失败');
+    ltmSetMsg('ltmRagMsg', '已开始全量重建', true);
+    ltmRagSchedulePoll();
+    await loadLtmRagStatus();
+  } catch (e) {
+    ltmSetMsg('ltmRagMsg', '重建失败：' + e.message, false);
+  } finally { btn.disabled = false; }
+}
+
+ltmEl('ltmRowsBtn').addEventListener('click', ltmListRows);
+ltmEl('ltmDeleteRangeBtn').addEventListener('click', ltmDeleteRange);
+ltmEl('ltmRagRefresh').addEventListener('click', loadLtmRagStatus);
+ltmEl('ltmRagIndex').addEventListener('click', ltmRagIndexNow);
+ltmEl('ltmRagRebuild').addEventListener('click', ltmRagRebuildNow);
+ltmEl('ltmRagDistillRetry').addEventListener('click', ltmDistillRetry);
+// ── /RAG_PATCH（P2）────────────────────────────────────────────────────────
+
+// ── RAG_PATCH（P3）：自动想起（影子）卡片 ──────────────────────────────────
+// 规格：docs/design/ASSOCIATION_SPEC.md §11。来信与摘要都是用户数据，一律走 textContent / ltmLine，
+// 绝不拼进 innerHTML；标注按钮点一下打标，再点一次取消（label: null）。
+let ltmRecallLoading = false;   // 在途去重：进页面时 setConsolePage 与 loadLtmPanel 各触发一次
+let ltmRecallEntries = [];      // 已加载的条目（「更早的」往后追加）
+let ltmRecallNext = null;       // 接口给的 nextBefore；null = 没有更早的了
+
+const LTM_RECALL_MODE_LABEL = { shadow: '影子（只记录）', on: '已开启（会放进提示词）', off: '关闭' };
+const LTM_RECALL_SKIP_LABEL = { trivial: '来信太短', unavailable: '服务不可达', no_summaries: '还没有摘要' };
+const LTM_RECALL_SIGNAL_LABEL = { vector: '向量', bm25: '关键词', graph: '关系图', summary: '摘要' };
+
+// 0.714 → "71.4%"；null / 非数字 → "—"。
+function ltmRecallRateText(rate) {
+  if (rate === null || rate === undefined) return '—';
+  const n = Number(rate);
+  if (!Number.isFinite(n)) return '—';
+  return `${(n * 100).toFixed(1).replace(/\.0$/, '')}%`;
+}
+
+// 门槛标定小表：当前 tau 那一行加粗。
+function ltmRecallTauTable(config, rows) {
+  const table = document.createElement('table');
+  const thead = document.createElement('thead');
+  const htr = document.createElement('tr');
+  for (const label of ['门槛 τ', '过门槛', '已标注', '相关', '相关率']) {
+    const th = document.createElement('th');
+    th.textContent = label;
+    htr.appendChild(th);
+  }
+  thead.appendChild(htr);
+  const tbody = document.createElement('tbody');
+  const cur = Number(config?.tau);
+  for (const r of rows) {
+    const tr = document.createElement('tr');
+    const tau = Number(r.tau);
+    const cells = [
+      Number.isFinite(tau) ? tau.toFixed(2) : '—',
+      String(ltmNum(r.pass)),
+      String(ltmNum(r.labeled)),
+      String(ltmNum(r.relevant)),
+      ltmRecallRateText(r.rate),
+    ];
+    for (const v of cells) {
+      const td = document.createElement('td');
+      td.textContent = v;
+      tr.appendChild(td);
+    }
+    if (Number.isFinite(cur) && tau === cur) for (const td of tr.children) td.style.fontWeight = '600';
+    tbody.appendChild(tr);
+  }
+  table.append(thead, tbody);
+  return table;
+}
+
+function ltmRecallRenderStats(config, stats) {
+  const box = ltmClear('ltmRecallStats');
+  const c = config || {};
+  const s = stats || {};
+  const mode = LTM_RECALL_MODE_LABEL[c.mode] || (c.mode ? String(c.mode) : '未知');
+  ltmLine(box, `模式：${mode}；私聊 ${c.private ? '开' : '关'}，群聊 ${c.group ? '开' : '关'}，每次最多 ${ltmNum(c.k)} 条`);
+  const sk = s.skipped || {};
+  ltmLine(
+    box,
+    `最近 ${ltmNum(s.days) || 3} 天：查了 ${ltmNum(s.entries)} 次（来信太短跳过 ${ltmNum(sk.trivial)}、服务不可达 ${ltmNum(sk.unavailable)}、还没有摘要 ${ltmNum(sk.no_summaries)}），有候选 ${ltmNum(s.withCandidates)} 次，有过门槛的 ${ltmNum(s.withPass)} 次`
+  );
+  const labeled = ltmNum(s.labeled);
+  const rate = s.rate === null || s.rate === undefined ? null : Number(s.rate);
+  let line = `已标注 ${labeled} 条，相关 ${ltmNum(s.relevant)} 条，相关率 ${ltmRecallRateText(rate)}`;
+  // 开启门槛：相关率 ≥ 70% 且样本够（已标注 ≥ 10）。
+  if (rate !== null && Number.isFinite(rate) && rate >= 0.7 && labeled >= 10) line += '（达到开启门槛 70%）';
+  ltmLine(box, line);
+  const byTau = Array.isArray(s.byTau) ? s.byTau : [];
+  if (byTau.length) box.appendChild(ltmRecallTauTable(c, byTau));
+}
+
+function ltmRecallPaintLabel(cand, relBtn, irrBtn) {
+  relBtn.classList.toggle('active', cand.label === 'relevant');
+  irrBtn.classList.toggle('active', cand.label === 'irrelevant');
+}
+
+// 再点一次同一个按钮 = 取消（label: null）。
+async function ltmRecallSetLabel(entry, cand, label, relBtn, irrBtn) {
+  const prev = cand.label ?? null;
+  const next = prev === label ? null : label;
+  relBtn.disabled = true;
+  irrBtn.disabled = true;
+  try {
+    const r = await api('/api/ltm/recall-shadow/label', 'POST', { id: entry.id, summary_id: cand.summary_id, label: next });
+    if (!r || r.ok === false) throw new Error((r && r.error) || '标注失败');
+    cand.label = r.label ?? next;
+    ltmRecallPaintLabel(cand, relBtn, irrBtn);
+    const msg = ltmEl('ltmRecallMsg');
+    if (msg) { msg.textContent = ''; msg.className = 'meta'; }
+    // 只刷顶部统计，不重画列表（避免整页闪）。
+    ltmRecallRefreshStats();
+  } catch (e) {
+    ltmSetMsg('ltmRecallMsg', '标注失败：' + e.message, false);
+    ltmRecallPaintLabel(cand, relBtn, irrBtn);
+  } finally {
+    relBtn.disabled = false;
+    irrBtn.disabled = false;
+  }
+}
+
+async function ltmRecallRefreshStats() {
+  try {
+    const d = await api('/api/ltm/recall-shadow?limit=1');
+    if (d && d.ok !== false) ltmRecallRenderStats(d.config, d.stats);
+  } catch { /* 统计刷新失败不影响刚才的标注 */ }
+}
+
+// 一个候选：左边一行文字（过门槛的加粗），右边「相关 / 无关」。
+function ltmRecallRenderCandidate(entry, c) {
+  const row = document.createElement('div');
+  row.className = 'row';
+  row.style.marginTop = '4px';
+  const text = document.createElement('div');
+  text.className = 'meta';
+  text.style.flex = '1 1 320px';
+  if (c.pass) text.style.fontWeight = '600';
+  const day = c.day ? `[${c.day}] ` : '';
+  const title = c.title || '（已删除）';
+  const summary = c.summary || '（已删除）';
+  const signals = (Array.isArray(c.signals) ? c.signals : []).map((s) => LTM_RECALL_SIGNAL_LABEL[s] || s).join('/') || '—';
+  const cos = Number(c.cosine);
+  text.textContent = `${day}${title}：${summary}　余弦 ${Number.isFinite(cos) ? cos.toFixed(2) : '—'} · 命中 ${signals} · ${c.pass ? '过门槛' : '未过'}`;
+  const rel = document.createElement('button');
+  rel.type = 'button';
+  rel.className = 'btn-secondary small';
+  rel.textContent = '相关';
+  const irr = document.createElement('button');
+  irr.type = 'button';
+  irr.className = 'btn-secondary small';
+  irr.textContent = '无关';
+  ltmRecallPaintLabel(c, rel, irr);
+  rel.addEventListener('click', () => ltmRecallSetLabel(entry, c, 'relevant', rel, irr));
+  irr.addEventListener('click', () => ltmRecallSetLabel(entry, c, 'irrelevant', rel, irr));
+  row.append(text, rel, irr);
+  return row;
+}
+
+// 一条唤醒记录。skipped 非空时只显示跳过原因，不列候选（本来就没有）。
+function ltmRecallRenderEntry(e) {
+  const block = document.createElement('div');
+  block.style.marginTop = '12px';
+  block.style.paddingTop = '8px';
+  block.style.borderTop = '1px solid var(--card-border)';
+  const head = ltmLine(block, `${ltmRagClock(e.at)} · ${e.key || '—'} · ${e.mode || '—'} · ${ltmNum(e.ms)} ms`);
+  head.style.fontWeight = '600';
+  if (e.skipped) {
+    ltmLine(block, `跳过：${LTM_RECALL_SKIP_LABEL[e.skipped] || e.skipped}`);
+    return block;
+  }
+  for (const m of Array.isArray(e.msgs) ? e.msgs : []) {
+    ltmLine(block, `来信：${m && typeof m.text === 'string' ? m.text : '（已删除）'}`);
+  }
+  const cands = Array.isArray(e.candidates) ? e.candidates : [];
+  if (!cands.length) ltmLine(block, '候选：无');
+  for (const c of cands) block.appendChild(ltmRecallRenderCandidate(e, c));
+  return block;
+}
+
+function ltmRecallRenderList() {
+  const box = ltmClear('ltmRecallList');
+  if (!ltmRecallEntries.length) {
+    ltmLine(box, '（还没有记录——私聊来信唤醒她之后才会出现）');
+    return;
+  }
+  for (const e of ltmRecallEntries) box.appendChild(ltmRecallRenderEntry(e));
+}
+
+function ltmRecallUpdateMore() {
+  const btn = ltmEl('ltmRecallMore');
+  if (btn) btn.style.display = ltmRecallNext ? '' : 'none';
+}
+
+async function loadLtmRecallShadow({ more = false } = {}) {
+  if (ltmRecallLoading) return;
+  ltmRecallLoading = true;
+  const msg = ltmEl('ltmRecallMsg');
+  if (msg) { msg.textContent = ''; msg.className = 'meta'; }
+  const moreBtn = ltmEl('ltmRecallMore');
+  if (moreBtn) moreBtn.disabled = true;
+  try {
+    const q = new URLSearchParams({ limit: '50' });
+    if (more && ltmRecallNext) q.set('before', ltmRecallNext);
+    const d = await api('/api/ltm/recall-shadow?' + q.toString());
+    if (!d || d.ok === false) throw new Error((d && d.error) || '读取失败');
+    ltmRecallRenderStats(d.config, d.stats);
+    const entries = Array.isArray(d.entries) ? d.entries : [];
+    ltmRecallEntries = more ? ltmRecallEntries.concat(entries) : entries;
+    ltmRecallNext = d.nextBefore ?? null;
+    ltmRecallRenderList();
+    ltmRecallUpdateMore();
+  } catch (e) {
+    const box = ltmClear('ltmRecallStats');
+    ltmLine(box, '读取失败：' + e.message, true);
+  } finally {
+    ltmRecallLoading = false;
+    if (moreBtn) moreBtn.disabled = false;
+  }
+}
+
+ltmEl('ltmRecallRefresh').addEventListener('click', () => loadLtmRecallShadow());
+ltmEl('ltmRecallMore').addEventListener('click', () => loadLtmRecallShadow({ more: true }));
+// ── /RAG_PATCH（P3）────────────────────────────────────────────────────────
+
+// ── SUGGEST_PATCH：账本建议卡片（规格 LEDGER_SUGGEST_SPEC.md §5 / worker-kit/suggest/contract.md §2）──
+// 候选文字、昵称、会话 label、接口报错都可能带尖括号，和这一页其它后端字符串一样只走
+// textContent / createElement 进 DOM，绝不拼 innerHTML。
+let ltmSuggestLoading = false;   // 在途去重：进页面时 setConsolePage 与 loadLtmPanel 各触发一次
+let ltmSuggestData = null;       // 最近一次 GET /api/ltm/suggest 的结果（筛会话在前端做）
+let ltmSuggestKey = '';          // 当前筛选的会话；'' = 全部
+const LTM_SUGGEST_DAYS = 7;      // 顶部计数固定看近 7 天
+const LTM_SUGGEST_CAT_LABEL = { trait: '喜好习惯', fact: '事实', event: '经历', pending: '约定' };
+// [显示文字, .pill 的配色]：采用绿、待处理 / 已在账本蓝、作废红。
+const LTM_SUGGEST_STATUS_LABEL = {
+  open: ['待处理', 'b'],
+  adopted: ['采用', 'g'],
+  duplicate: ['已在账本', 'b'],
+  expired: ['作废', 'r'],
+  dismissed: ['手动作废', 'r']
+};
+
+// 数字字段缺失显示「—」，不当 0（contract §2：memory-rag 不可达时 counts.created 是 null）。
+function ltmSuggestCountText(v) {
+  if (v === null || v === undefined) return '—';
+  const n = Number(v);
+  return Number.isFinite(n) ? String(n) : '—';
+}
+
+function ltmSuggestStatsLine(counts) {
+  const c = counts && typeof counts === 'object' ? counts : {};
+  return `近 ${LTM_SUGGEST_DAYS} 天：产生 ${ltmSuggestCountText(c.created)} · 采用 ${ltmSuggestCountText(c.adopted)}`
+    + ` · 已在账本 ${ltmSuggestCountText(c.duplicate)} · 作废 ${ltmSuggestCountText(c.expired)}`
+    + `（手动 ${ltmSuggestCountText(c.dismissed)}）· 待处理 ${ltmSuggestCountText(c.open)}`;
+}
+
+function ltmSuggestRenderStats(d) {
+  const box = ltmClear('ltmSuggestStats');
+  if (d.mode === 'off') ltmLine(box, '已关闭（config.json 的 memoryRag.suggest.mode）');
+  if (d.rag === false) ltmLine(box, 'memory-rag 不可达，只能显示计数');
+  ltmLine(box, ltmSuggestStatsLine(d.counts));
+}
+
+function ltmSuggestRenderKeys(keys) {
+  const sel = ltmEl('ltmSuggestKey');
+  if (!sel) return;
+  const prev = ltmSuggestKey;
+  while (sel.firstChild) sel.removeChild(sel.firstChild);
+  const all = document.createElement('option');
+  all.value = '';
+  all.textContent = '全部';
+  sel.appendChild(all);
+  for (const k of Array.isArray(keys) ? keys : []) {
+    if (!k || typeof k.key !== 'string' || !k.key) continue;
+    const o = document.createElement('option');
+    o.value = k.key;
+    o.textContent = typeof k.label === 'string' && k.label ? k.label : k.key;
+    sel.appendChild(o);
+  }
+  // 刷新后尽量留住当前选择；那个会话从列表里消失了就退回「全部」。
+  ltmSuggestKey = prev && [...sel.options].some((o) => o.value === prev) ? prev : '';
+  sel.value = ltmSuggestKey;
+}
+
+function ltmSuggestStatusBadge(status) {
+  const [label, tone] = LTM_SUGGEST_STATUS_LABEL[status] || [String(status ?? '未知'), 'b'];
+  const span = document.createElement('span');
+  span.className = 'pill ' + tone;
+  span.textContent = label;
+  return span;
+}
+
+function ltmSuggestMetaSpan(text) {
+  const span = document.createElement('span');
+  span.className = 'meta';
+  span.style.marginTop = '0';
+  span.textContent = text;
+  return span;
+}
+
+// 作废：桥接先向 memory-rag 核对归属，404 / 409 / 503 都会带回 {ok:false, error}，
+// 这里把接口的 error 原样显示（接口文字一律 textContent）。
+function ltmSuggestDismissBtn(it) {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'btn-secondary small';
+  btn.textContent = '作废';
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    try {
+      const r = await api('/api/ltm/suggest/dismiss', 'POST', { id: it.id, key: it.key });
+      if (!r || r.ok === false) throw new Error((r && r.error) || '作废失败');
+      // 先刷新再给提示：loadLtmSuggest 自己会清提示，顺序反过来「已作废」会被立刻抹掉。
+      await loadLtmSuggest();
+      ltmSetMsg('ltmSuggestMsg', '已作废', true);
+    } catch (e) {
+      ltmSetMsg('ltmSuggestMsg', '作废失败：' + e.message, false);
+      btn.disabled = false;
+    }
+  });
+  return btn;
+}
+
+// 一条候选：第一行日期 · 关于谁 · 类别（有到期日才加）；第二行内容；第三行徽标 / 来源 / 出现次数 / 操作。
+// 长文本加 overflow-wrap，375 px 宽也不会横向撑出卡片。
+function ltmSuggestRenderItem(it) {
+  const block = document.createElement('div');
+  block.style.cssText = 'margin-top:10px;padding-top:8px;border-top:1px solid var(--card-border)';
+  const head = document.createElement('div');
+  head.className = 'meta';
+  head.style.cssText = 'margin-top:0;font-weight:600;overflow-wrap:anywhere';
+  const who = typeof it.whoName === 'string' && it.whoName ? it.whoName : (it.who ? String(it.who) : '某人');
+  const cat = LTM_SUGGEST_CAT_LABEL[it.cat] || String(it.cat ?? '—');
+  const parts = [it.day ? String(it.day) : '—', who, cat];
+  if (it.due) parts.push('到期 ' + String(it.due));
+  head.textContent = parts.join(' · ');
+  const text = document.createElement('div');
+  text.style.cssText = 'margin-top:2px;color:var(--text-input);overflow-wrap:anywhere';
+  text.textContent = String(it.text ?? '');
+  const foot = document.createElement('div');
+  foot.className = 'row';
+  foot.style.cssText = 'margin-top:4px;gap:6px';
+  foot.appendChild(ltmSuggestStatusBadge(it.status));
+  if (it.source === 'backfill') foot.appendChild(ltmSuggestMetaSpan('回补'));
+  foot.appendChild(ltmSuggestMetaSpan(`出现 ${ltmSuggestCountText(it.shown)} 次`));
+  if (it.status === 'open') foot.appendChild(ltmSuggestDismissBtn(it));
+  block.append(head, text, foot);
+  return block;
+}
+
+function ltmSuggestRenderList() {
+  const box = ltmClear('ltmSuggestList');
+  const d = ltmSuggestData || {};
+  const all = Array.isArray(d.items) ? d.items : [];
+  const items = all.filter((it) => it && typeof it === 'object' && (!ltmSuggestKey || it.key === ltmSuggestKey));
+  if (d.rag === false) {
+    ltmLine(box, '（memory-rag 不可达，候选读不到）');
+    return;
+  }
+  if (!items.length) {
+    ltmLine(box, ltmSuggestKey ? '（这个会话最近没有候选）' : '（最近没有候选）');
+    return;
+  }
+  for (const it of items) box.appendChild(ltmSuggestRenderItem(it));
+}
+
+async function loadLtmSuggest() {
+  if (ltmSuggestLoading) return;
+  ltmSuggestLoading = true;
+  ltmSetMsg('ltmSuggestMsg', '加载中…', null);
+  try {
+    const d = await api(`/api/ltm/suggest?days=${LTM_SUGGEST_DAYS}`);
+    if (!d || d.ok === false) throw new Error((d && d.error) || '读取失败');
+    ltmSuggestData = d;
+    ltmSuggestRenderStats(d);
+    ltmSuggestRenderKeys(d.keys);
+    ltmSuggestRenderList();
+    ltmSetMsg('ltmSuggestMsg', '', null);
+  } catch (e) {
+    ltmSuggestData = null;
+    ltmSuggestKey = '';
+    const stats = ltmClear('ltmSuggestStats');
+    ltmLine(stats, '读取失败：' + e.message, true);
+    ltmSuggestRenderKeys([]);
+    ltmClear('ltmSuggestList');
+    ltmSetMsg('ltmSuggestMsg', '', null);
+  } finally {
+    ltmSuggestLoading = false;
+  }
+}
+
+ltmEl('ltmSuggestRefresh').addEventListener('click', () => loadLtmSuggest());
+ltmEl('ltmSuggestKey').addEventListener('change', () => {
+  ltmSuggestKey = ltmEl('ltmSuggestKey').value;
+  ltmSuggestRenderList();
+});
+// ── /SUGGEST_PATCH ─────────────────────────────────────────────────────────
+
+if (location.hash === '#ltm') loadLtmPanel();
+
+// ── LIFE_LOOP_PATCH（规格 §8.4）：生活回路卡片 ─────────────────────────────
+const LIFE_SOURCE_LABEL = { ltm: '账本', pub: '别人的账本', msg: '聊天', diary: '日记' };
+function lifeLoopEl(id) { return document.getElementById(id); }
+function lifeLoopClock(ms) {
+  const n = Number(ms);
+  if (!Number.isFinite(n) || n <= 0) return '—';
+  const d = new Date(n);
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+function lifeLoopDateTime(ms) {
+  const n = Number(ms);
+  if (!Number.isFinite(n) || n <= 0) return '—';
+  const d = new Date(n);
+  return `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${lifeLoopClock(n)}`;
+}
+function lifeLoopHistoryLine(h) {
+  if (!h || typeof h !== 'object') return '';
+  const when = lifeLoopDateTime(h.at);
+  if (h.kind === 'promise-wake') return `${when} · 到期唤醒 · QQ ${esc(h.userId || '')}${h.items ? `（${Number(h.items)} 条）` : ''}`;
+  // RAG_PATCH（P3）：联想链带出的那一件。只有编号，没有预览文字。
+  if (h.kind === 'associate') return `${when} 顺着想到 · ${esc(h.candId || '')} ← ${esc(h.from || '')}`;
+  const src = LIFE_SOURCE_LABEL[h.source] || h.source || '回忆';
+  return `${when} · ${esc(src)} · ${esc(h.preview || '')}`;
+}
+function lifeLoopRender(data) {
+  const status = lifeLoopEl('lifeLoopStatus');
+  const history = lifeLoopEl('lifeLoopHistory');
+  const own = data?.ownLife;
+  const loop = data?.lifeLoop;
+  const lines = [];
+  if (own) {
+    const next = own.nextDayFireAt ? `下一次大约 ${lifeLoopClock(own.nextDayFireAt)}` : '今天白天没有下一次了';
+    lines.push(`自己的时间：今天白天第 ${Number(own.firedToday) || 0} 次；半夜那次${own.midnightDoneToday ? '已发' : '还没发'}；${next}`);
+  } else {
+    lines.push('自己的时间：未启动（没有 ownerQQ 或已关闭）');
+  }
+  if (loop) {
+    lines.push(`忽然想起：今天 ${Number(loop.recallToday) || 0} / ${Number(loop.recallPerDay) || 0} 次${loop.recallDay ? `（活动日 ${esc(loop.recallDay)}）` : ''}`);
+    // RAG_PATCH（P3）：联想链带出的次数；老版本桥接没有这个字段时整行不显示。
+    if (loop.associateToday !== undefined && loop.associateToday !== null) {
+      lines.push(`今天顺着想到：${Number(loop.associateToday) || 0} 次`);
+    }
+    const users = Array.isArray(loop.promiseWakes?.users) ? loop.promiseWakes.users : [];
+    const today = loop.promiseWakes?.day || '';
+    const wakes = (loop.history || []).filter((h) => h && h.kind === 'promise-wake' && lifeLoopDateTime(h.at).slice(0, 5) === today.slice(5));
+    lines.push(`今天的到期唤醒：${users.length} 人${wakes.length ? '（' + wakes.map((h) => `QQ ${esc(h.userId || '')} ${Number(h.items) || 0} 条`).join('；') + '）' : ''}`);
+  } else {
+    lines.push('生活回路：未启用（cfg.lifeLoop.enabled=false 或启动失败）');
+  }
+  status.innerHTML = lines.map((l) => `<div>${l}</div>`).join('');
+  const rows = (loop?.history || []).slice(-10).reverse().map(lifeLoopHistoryLine).filter(Boolean);
+  history.innerHTML = rows.length ? rows.map((r) => `<div>${r}</div>`).join('') : '（还没有回忆或到期唤醒）';
+}
+async function loadLifeLoopPanel() {
+  const msg = lifeLoopEl('lifeLoopMsg');
+  if (msg) { msg.textContent = ''; msg.className = 'meta'; }
+  try {
+    const r = await api('/api/life-loop');
+    if (!r.ok) throw new Error(r.error || '读取失败');
+    lifeLoopRender(r);
+    if (msg) msg.textContent = '已刷新 ' + new Date().toLocaleTimeString('zh-CN', { hour12: false });
+  } catch (e) {
+    if (lifeLoopEl('lifeLoopStatus')) lifeLoopEl('lifeLoopStatus').textContent = '读取失败：' + (e?.message || e);
+    if (msg) { msg.textContent = '读取失败：' + (e?.message || e); msg.className = 'meta err'; }
+  }
+}
+document.getElementById('lifeLoopRefresh')?.addEventListener('click', loadLifeLoopPanel);
+// 首次以 #ltm 打开时由 setConsolePage 的微任务统一加载，这里不重复拉一次。
+
+// ── PERSONA_PATCH：人格与情绪页 ────────────────────────────────────────────
+const mindEl = (id) => document.getElementById(id);
+const MIND_TRAITS = { O: '开放', C: '尽责', E: '外向', A: '宜人', N: '神经质' };
+// PERSONA_PATCH（v2 §1.1 B2）：后天性格，6 项，渲染顺序与后端 CHAR_TRAITS 一致。
+// 页面上只出现中文名作为展示 / 解析用的别名，表现文字一律用 status.traitView 的 phrase，前端不复制短语表。
+const MIND_CHAR_TRAITS = { grudge: '记仇', clingy: '黏人', guarded: '嘴硬', playful: '爱玩梗', pride: '自尊', empathy: '共情' };
+const MIND_TRAIT_NAMES = { ...MIND_TRAITS, ...MIND_CHAR_TRAITS };
+const MIND_KEY_BY_NAME = Object.fromEntries(Object.entries(MIND_TRAIT_NAMES).map(([k, n]) => [n, k]));
+const mindUi = { loaded: false, status: null, seed: [] };
+
+// PERSONA_PATCH（v2 §9）：文本框 ↔ 结构化数据的纯函数。单独拿出来便于逐条核对，
+// 也避免把解析逻辑散落进事件回调里。
+// 「每项表现」：一行一项，`开放：……` 或 `O：……`；冒号中英文都认，空行和不认识的键忽略。
+function mindParseManifestsText(text) {
+  const out = {};
+  for (const raw of String(text ?? '').split('\n')) {
+    const line = raw.trim();
+    if (!line) continue;
+    const i = line.search(/[：:]/);
+    if (i <= 0) continue;
+    const name = line.slice(0, i).trim();
+    const key = MIND_TRAIT_NAMES[name] ? name : MIND_KEY_BY_NAME[name];
+    if (!key) continue;
+    const val = line.slice(i + 1).trim();
+    if (val) out[key] = val;
+  }
+  return out;
+}
+
+function mindFormatManifestsText(manifests) {
+  return Object.entries(manifests && typeof manifests === 'object' ? manifests : {})
+    .filter(([k, v]) => MIND_TRAIT_NAMES[k] && typeof v === 'string' && v.trim())
+    .map(([k, v]) => `${MIND_TRAIT_NAMES[k]}：${v.trim()}`)
+    .join('\n');
+}
+
+// 好恶类型：萌点 → like（强度缺省 0.8），雷点 → dislike（缺省 0.9）；strong 只用于挑缺省强度。
+function mindPrefValence(word) {
+  const w = String(word ?? '').trim();
+  if (w === '喜欢' || w === 'like') return { valence: 'like', strong: false };
+  if (w === '讨厌' || w === 'dislike') return { valence: 'dislike', strong: false };
+  if (w === '萌点') return { valence: 'like', strong: true };
+  if (w === '雷点') return { valence: 'dislike', strong: true };
+  return null;
+}
+
+// 「好恶」：一行一条，`喜欢｜被认真夸｜0.6｜夸,厉害`。分隔符认 ｜ 和 |，强度与关键词可省。
+function mindParsePrefsText(text) {
+  const out = [];
+  for (const raw of String(text ?? '').split('\n')) {
+    const line = raw.trim();
+    if (!line) continue;
+    const parts = line.split(/[｜|]/).map((x) => x.trim());
+    const kind = mindPrefValence(parts[0]);
+    if (!kind || !parts[1]) continue;
+    const strength = Number(parts[2]);
+    const def = kind.strong ? (kind.valence === 'dislike' ? 0.9 : 0.8) : 0.6;
+    out.push({
+      text: parts[1],
+      valence: kind.valence,
+      strength: parts[2] && Number.isFinite(strength) ? strength : def,
+      keywords: (parts[3] || '').split(/[,，、]/).map((x) => x.trim()).filter(Boolean)
+    });
+  }
+  return out;
+}
+
+// 显示用的类型名：dislike 且强度 ≥ 0.8 写「雷点」，like 且 ≥ 0.8 写「萌点」。
+function mindPrefLabel(p) {
+  const strong = Number(p?.strength ?? 0.6) >= 0.8;
+  if (p?.valence === 'dislike') return strong ? '雷点' : '讨厌';
+  return strong ? '萌点' : '喜欢';
+}
+
+function mindFormatPrefsText(prefs) {
+  return (Array.isArray(prefs) ? prefs : [])
+    .filter((p) => p && p.text)
+    .map((p) => {
+      const kw = Array.isArray(p.keywords) && p.keywords.length ? `｜${p.keywords.join(',')}` : '';
+      return `${mindPrefLabel(p)}｜${p.text}｜${Number(p.strength ?? 0.6)}${kw}`;
+    })
+    .join('\n');
+}
+
+function mindSparkline(history) {
+  const pts = (history || []).filter((h) => Date.now() - h.at < 86400000);
+  if (pts.length < 2) return '<span class="meta">24 小时心情曲线：数据还不够</span>';
+  const w = 600, h = 80, t0 = pts[0].at, t1 = pts[pts.length - 1].at || t0 + 1;
+  const xy = pts.map((p) => `${((p.at - t0) / Math.max(1, t1 - t0) * w).toFixed(1)},${(h / 2 - p.p * h / 2).toFixed(1)}`).join(' ');
+  return `<div class="meta">24 小时心情（愉悦，core 偏移）</div><svg viewBox="0 0 ${w} ${h}" style="width:100%;max-width:600px;height:80px"><line x1="0" y1="${h / 2}" x2="${w}" y2="${h / 2}" stroke="currentColor" stroke-opacity=".2"/><polyline points="${xy}" fill="none" stroke="currentColor" stroke-width="2"/></svg>`;
+}
+
+function mindRenderStatus(s) {
+  // PERSONA_PATCH（§6-1）：「今日」那一行已经把同一天重启前的几次运行加起来了；后端没给 usage 时退回本次运行的 stats。
+  const today = Array.isArray(s.usage) && s.usage.length ? s.usage[s.usage.length - 1] : null;
+  const st = today || s.stats || {};
+  mindEl('mindStatus').textContent = `角色：${s.role}｜${s.initialized ? '已初始化' : '未初始化（先在下面确认出厂性格）'}｜${s.enabled ? '已启用' : '已停用'}｜${s.inject ? '注入中' : '影子期（不注入）'}｜今日判读 ${st.calls || 0} 次、规则兜底 ${st.rules || 0} 次、失败 ${st.failures || 0} 次、花费约 ¥${st.cost || 0}｜密钥 ${s.apiKeyHint || '未填写'}`;
+  mindEl('mindChart').innerHTML = mindSparkline(s.emotion?.history);
+  mindRenderUsage(s.usage);
+  const lines = [];
+  if (s.rendered) {
+    lines.push(s.rendered.core, '');
+    for (const [key, text] of Object.entries(s.rendered.byKey || {})) lines.push(`── ${key}`, text, '');
+  }
+  mindEl('mindNow').textContent = lines.join('\n') || '（未初始化，没有注入内容）';
+}
+
+// PERSONA_PATCH（§6-1）：近 7 天判读用量表。用量文件按「天 × 每次运行」累加；判读日志按日志文件统计作对照。
+// 只用 textContent / createElement 拼 DOM（表里的日期、错误信息都来自后端）。
+function mindUsagePct(hit, miss) {
+  const h = Number(hit) || 0;
+  const n = h + (Number(miss) || 0);
+  return n > 0 ? `${Math.round((h / n) * 100)}%` : '—';
+}
+
+function mindRenderUsage(rows) {
+  const box = mindEl('mindUsage');
+  box.textContent = '';
+  if (!Array.isArray(rows)) return;
+  const title = document.createElement('div');
+  title.className = 'meta';
+  title.style.fontWeight = '600';
+  title.textContent = '近 7 天判读用量';
+  const table = document.createElement('table');
+  const head = table.createTHead().insertRow();
+  for (const text of ['日期', '模型判读', '规则兜底', '失败', '缓存命中率', '花费（¥）', '判读日志（模型 / 规则）']) {
+    const th = document.createElement('th');
+    th.textContent = text;
+    head.appendChild(th);
+  }
+  const body = table.createTBody();
+  const total = { calls: 0, rules: 0, failures: 0, cacheHit: 0, cacheMiss: 0, cost: 0, model: 0, logRules: 0 };
+  const addRow = (cells) => {
+    const tr = body.insertRow();
+    for (const text of cells) {
+      const td = document.createElement('td');
+      td.textContent = String(text);
+      tr.appendChild(td);
+    }
+  };
+  for (const r of rows) {
+    const log = r?.logged || {};
+    const model = Number(log.model) || 0;
+    const logRules = Number(log.rules) || 0;
+    total.model += model;
+    total.logRules += logRules;
+    // recorded === false：这天的用量文件里没有记录，五个数值列显示「—」；判读日志照常显示。
+    const recorded = r?.recorded !== false;
+    if (recorded) {
+      total.calls += Number(r.calls) || 0;
+      total.rules += Number(r.rules) || 0;
+      total.failures += Number(r.failures) || 0;
+      total.cacheHit += Number(r.cacheHit) || 0;
+      total.cacheMiss += Number(r.cacheMiss) || 0;
+      total.cost += Number(r.cost) || 0;
+    }
+    addRow([
+      r?.day || '',
+      recorded ? Number(r.calls) || 0 : '—',
+      recorded ? Number(r.rules) || 0 : '—',
+      recorded ? Number(r.failures) || 0 : '—',
+      recorded ? mindUsagePct(r.cacheHit, r.cacheMiss) : '—',
+      recorded ? (Number(r.cost) || 0).toFixed(4) : '—',
+      `${model} / ${logRules}`
+    ]);
+  }
+  // 合计只加 recorded 的天；判读日志也加总。
+  addRow(['合计', total.calls, total.rules, total.failures, mindUsagePct(total.cacheHit, total.cacheMiss), total.cost.toFixed(4), `${total.model} / ${total.logRules}`]);
+  const note = document.createElement('div');
+  note.className = 'meta';
+  note.textContent = '— 表示这天还没有用量记录（这个功能上线之前，或桥接没在运行）；判读日志按日志文件统计，任何时候都有，规则一栏也包含『说话没人接』这类系统事件。每日上限按本次运行计，桥接重启后从 0 开始。';
+  box.append(title, table, note);
+}
+
+// PERSONA_PATCH（v2 §3 / §9 B1）：表现文字直接用 traitView 的 phrase，前端不复制短语表。
+// 后端还没返回 traitView 时按 core 自己拼一份（只补名字与数值，不补表现文字）。
+function mindTraitView(s) {
+  if (Array.isArray(s?.traitView) && s.traitView.length) return s.traitView;
+  const core = s?.core || {};
+  const out = [];
+  for (const [key, name] of Object.entries(MIND_TRAITS)) {
+    const src = core.traits?.[key] || {};
+    out.push({ key, name, group: 'big5', factory: src.factory ?? 50, value: src.value ?? 50, locked: !!src.locked, phrase: '', phraseSource: '' });
+  }
+  for (const [key, name] of Object.entries(MIND_CHAR_TRAITS)) {
+    const src = core.character?.[key] || {};
+    out.push({ key, name, group: 'char', factory: src.factory ?? 50, value: src.value ?? 50, locked: !!src.locked, phrase: '', phraseSource: '' });
+  }
+  return out;
+}
+
+function mindTraitRows(view, group) {
+  return view.filter((t) => t.group === group).map((t) => {
+    const factory = Number(t.factory ?? 50);
+    const phrase = t.phrase ? `${esc(t.phrase)}${t.phraseSource === 'generic' ? '（一般表现）' : ''}` : '—';
+    return `<tr><td>${esc(t.name)}（${esc(t.key)}）</td><td>${factory}</td><td><b>${Number(t.value ?? 50)}</b></td><td>${Math.max(0, factory - 15)}～${Math.min(100, factory + 15)}</td><td><label><input type="checkbox" data-mind-lock="${esc(t.key)}" ${t.locked ? 'checked' : ''}> 锁定</label></td></tr>`
+      + `<tr class="meta"><td colspan="5" style="padding-left:16px;border-top:none">${phrase}</td></tr>`;
+  }).join('');
+}
+
+function mindRenderTraits(s) {
+  const core = s.core;
+  if (!core) {
+    // PERSONA_PATCH：未初始化也要先铺好 11 个输入框（默认 50），没密钥/模型不可用时主人能手工填出厂值直接确认；已有输入框说明正在编辑，不覆盖
+    if (!mindEl('mindFactoryInputs').querySelector('[data-mind-factory]')) mindFillFactory({});
+    mindEl('mindTraits').textContent = '还没有确认出厂性格。'; mindEl('mindBeliefs').textContent = ''; mindRenderPrefs([]); return;
+  }
+  const view = mindTraitView(s);
+  const head = '<thead><tr><th>特质</th><th>出厂</th><th>当前</th><th>范围</th><th></th></tr></thead>';
+  // 大五和后天性格之间用小标题分开（v2 §9）
+  const body = `<tr class="meta"><td colspan="5"><b>大五（先天气质）</b></td></tr>${mindTraitRows(view, 'big5')}`
+    + `<tr class="meta"><td colspan="5"><b>相处习惯（后天性格）</b></td></tr>${mindTraitRows(view, 'char')}`;
+  mindEl('mindTraits').innerHTML = `<table>${head}<tbody>${body}</tbody></table>`;
+  const beliefs = (core.beliefs || []).filter((b) => b.status === 'accepted');
+  mindEl('mindBeliefs').innerHTML = beliefs.length ? '她对自己的看法：<br>' + beliefs.map((b) => `· ${esc(b.text)}${b.prior ? '（出厂）' : ''}`).join('<br>') : '她对自己还没有形成看法。';
+  // 锁定框对 11 项都有效（后端 lock 接受大五和后天性格）
+  document.querySelectorAll('[data-mind-lock]').forEach((box) => box.addEventListener('change', async () => {
+    const r = await api('/api/persona/lock', 'POST', { trait: box.dataset.mindLock, locked: box.checked });
+    if (!r.ok) showConsoleToast('锁定失败：' + (r.error || ''));
+  }));
+  mindFillFactory({
+    traits: Object.fromEntries(Object.keys(MIND_TRAITS).map((t) => [t, core.traits?.[t]?.factory])),
+    character: Object.fromEntries(Object.keys(MIND_CHAR_TRAITS).map((t) => [t, core.character?.[t]?.factory])),
+    manifests: core.manifests,
+    prefs: core.prefs,
+    beliefs: (core.beliefs || []).filter((b) => b.prior).map((b) => b.text)
+  });
+  mindRenderPrefs(core.prefs || []);
+}
+
+function mindFillFactory(f = {}) {
+  const traits = f.traits || {};
+  const character = f.character || {};
+  const input = (key, name, val) => `<label class="meta">${name} <input type="number" min="0" max="100" data-mind-factory="${key}" value="${Number(val ?? 50)}" style="width:72px"></label>`;
+  const big5 = Object.entries(MIND_TRAITS).map(([t, n]) => input(t, n, traits[t])).join(' ');
+  const chars = Object.entries(MIND_CHAR_TRAITS).map(([t, n]) => input(t, n, character[t])).join(' ');
+  mindEl('mindFactoryInputs').innerHTML = `${big5} <span class="meta" style="margin:0 6px">｜相处习惯｜</span> ${chars}`;
+  mindEl('mindFactoryManifests').value = mindFormatManifestsText(f.manifests || {});
+  mindEl('mindFactoryPrefs').value = mindFormatPrefsText(f.prefs || []);
+  mindEl('mindFactoryBeliefs').value = (f.beliefs || []).map((x) => (typeof x === 'string' ? x : x?.text)).filter(Boolean).join('\n');
+}
+
+// PERSONA_PATCH（v2 §9 B3）：性格卡片里的好恶小区。类型 / 内容 / 强度 / 关键词 / 命中次数。
+function mindRenderPrefs(prefs) {
+  const list = Array.isArray(prefs) ? prefs.filter((p) => p && p.text) : [];
+  if (!list.length) { mindEl('mindPrefs').textContent = '还没有设定好恶。'; return; }
+  const rows = list.map((p) => `<tr><td>${mindPrefLabel(p)}</td><td>${esc(p.text)}</td><td>${Number(p.strength ?? 0.6)}</td><td>${(Array.isArray(p.keywords) ? p.keywords : []).map((k) => esc(k)).join('、') || '—'}</td><td>${Number(p.hits) || 0}</td></tr>`).join('');
+  mindEl('mindPrefs').innerHTML = `<table><thead><tr><th>类型</th><th>内容</th><th>强度</th><th>关键词</th><th>命中</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+function mindRenderPeople(people) {
+  if (!people.length) { mindEl('mindPeople').textContent = '还没有记录。'; return; }
+  const rows = people.map((p) => `<tr><td>${esc(p.name || p.userId)}<br><span class="meta">${esc(p.userId)}</span></td><td>${esc(p.stage)}</td><td>${p.intimacy}</td><td>${p.trust}</td><td>${p.familiarity}</td><td>${Object.entries(p.offsets || {}).filter(([, v]) => v).map(([t, v]) => `${MIND_TRAITS[t]}${v > 0 ? '+' : ''}${v}`).join(' ') || '—'}</td><td>${(p.beliefs || []).filter((b) => b.status === 'accepted').map((b) => esc(b.text)).join('<br>') || '—'}</td></tr>`).join('');
+  mindEl('mindPeople').innerHTML = `<table><thead><tr><th>人</th><th>阶段</th><th>亲密</th><th>信任</th><th>熟悉</th><th>相处偏移</th><th>对他的看法</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+function mindRenderHistory(h, evidence) {
+  const fill = (sel, items) => { mindEl(sel).innerHTML = items.length ? items.slice().reverse().map((x) => `<option value="${esc(x)}">${esc(x)}</option>`).join('') : '<option value="">（无）</option>'; };
+  fill('mindSnapshot', h.snapshots || []);
+  fill('mindReport', h.reports || []);
+  mindEl('mindEvidence').innerHTML = evidence.length ? evidence.slice(0, 50).map((e) => `· ${new Date(e.at).toLocaleString()} ${esc(e.type)} ${esc(e.userId || e.key || '')}${e.gist ? '：' + esc(e.gist) : ''}`).join('<br>') : '（无）';
+}
+
+function mindRenderSettings(s) {
+  const a = s.settings?.appraisal || {};
+  mindEl('mindEnabled').checked = s.settings?.enabled !== false;
+  mindEl('mindInject').checked = s.settings?.inject !== false;
+  mindEl('mindMode').value = a.mode || 'model';
+  mindEl('mindModel').value = a.model || '';
+  mindEl('mindBaseUrl').value = a.baseUrl || '';
+  mindEl('mindDailyLimit').value = a.dailyLimit ?? '';
+}
+
+// PERSONA_PATCH（v2 §6 / §9 A1）：关系播种预览表。只往上补、不往下压，没变化的人灰掉；
+// 表里没有任何高亮行时「确认写入」保持禁用，避免空提交。
+function mindRenderSeed(list) {
+  const rows = Array.isArray(list) ? list : [];
+  mindUi.seed = rows;
+  const changed = rows.filter((x) => x.changed);
+  mindEl('mindSeedApply').disabled = !changed.length;
+  if (!rows.length) { mindEl('mindSeedPreview').innerHTML = '<span class="meta">聊天记录里还没有可以播种的人。</span>'; return; }
+  const fmt = (before, after) => {
+    const b = before === null || before === undefined ? '—' : before;
+    return `${b} → <b>${after}</b>`;
+  };
+  const body = rows.map((r) => {
+    const style = r.changed ? '' : ' style="opacity:.45"';
+    return `<tr${style}><td>${esc(r.name || r.userId)}<br><span class="meta">${esc(r.userId)}${r.isOwner ? '（主人）' : ''}</span></td><td>${Number(r.messages) || 0}</td><td>${esc(r.stageBefore)} → <b>${esc(r.stageAfter)}</b></td><td>${fmt(r.before?.intimacy, r.after?.intimacy)}</td><td>${fmt(r.before?.trust, r.after?.trust)}</td><td>${fmt(r.before?.familiarity, r.after?.familiarity)}</td></tr>`;
+  }).join('');
+  mindEl('mindSeedPreview').innerHTML = `<table><thead><tr><th>人</th><th>消息数</th><th>阶段</th><th>亲密</th><th>信任</th><th>熟悉</th></tr></thead><tbody>${body}</tbody></table><div class="meta">灰掉的是没有变化的（只往上补，不往下压）。</div>`;
+}
+
+// PERSONA_PATCH（v2 §12.1）：角色卡版本提醒。只在「确认之后改过」和「没记录过版本」两种情况显示；
+// 「不影响性格，忽略」把当前卡的哈希记成已同步。
+function mindRenderCard(s) {
+  const box = mindEl('mindCardNotice');
+  const card = s?.card;
+  const show = !!card && (card.changed === true || card.recorded === false);
+  box.style.display = show ? '' : 'none';
+  if (!show) return;
+  mindEl('mindCardNoticeText').textContent = card.changed === true
+    ? '角色卡在确认出厂性格之后改过。性格档案还是按旧角色卡提取的：建议展开『设置 / 修改出厂性格』重新提议并确认；只是小改（错别字、示例）的话点『不影响性格，忽略』。'
+    : '还没记录角色卡版本（这个功能上线前确认的出厂性格）。';
+  mindEl('mindCardAck').textContent = card.changed === true ? '不影响性格，忽略' : '记录当前角色卡版本';
+}
+
+async function loadMindPanel(force = false) {
+  if (mindUi.loaded && !force) return;
+  const s = await api('/api/persona/status');
+  if (!s.ok) { mindEl('mindStatus').textContent = '读取失败：' + (s.error || ''); return; }
+  mindUi.status = s;
+  mindUi.loaded = true;
+  mindRenderStatus(s);
+  mindRenderCard(s);
+  mindRenderTraits(s);
+  mindRenderSettings(s);
+  const [p, h, e] = await Promise.all([api('/api/persona/people'), api('/api/persona/history'), api('/api/persona/evidence?limit=50')]);
+  mindRenderPeople(p.ok ? p.people : []);
+  mindRenderHistory(h.ok ? h : {}, e.ok ? e.evidence : []);
+}
+
+mindEl('mindRefresh').addEventListener('click', () => loadMindPanel(true));
+// PERSONA_PATCH（v2 §12.1）：把当前角色卡版本记成已同步，然后刷新面板。
+mindEl('mindCardAck').addEventListener('click', async () => {
+  const r = await api('/api/persona/card-ack', 'POST', {});
+  if (!r.ok) { showConsoleToast('记录失败：' + (r.error || '')); return; }
+  showConsoleToast('已记录当前角色卡版本');
+  loadMindPanel(true);
+});
+// 好恶：打开时用同格式文本回填，保存走 /api/persona/prefs（不用重新确认出厂性格）。
+mindEl('mindPrefsEdit').addEventListener('click', () => {
+  const box = mindEl('mindPrefsEditor');
+  const open = box.style.display !== 'none';
+  if (!open) mindEl('mindPrefsText').value = mindFormatPrefsText(mindUi.status?.core?.prefs || []);
+  box.style.display = open ? 'none' : 'block';
+  mindEl('mindPrefsMsg').textContent = '';
+});
+mindEl('mindPrefsSave').addEventListener('click', async () => {
+  const prefs = mindParsePrefsText(mindEl('mindPrefsText').value);
+  const r = await api('/api/persona/prefs', 'POST', { prefs });
+  if (!r.ok) { mindEl('mindPrefsMsg').textContent = '失败：' + (r.error || ''); return; }
+  if (mindUi.status && r.core) mindUi.status.core = r.core;
+  mindRenderPrefs(r.core?.prefs ?? prefs);
+  mindEl('mindPrefsEditor').style.display = 'none';
+  mindEl('mindPrefsMsg').textContent = `已保存 ${prefs.length} 条`;
+});
+// 关系播种：先预览，确认后才写（POST /api/persona/seed 只带高亮的那些 userId）。
+mindEl('mindSeedBtn').addEventListener('click', async () => {
+  mindEl('mindSeedMsg').textContent = '正在统计聊天记录…';
+  const r = await api('/api/persona/seed');
+  if (!r.ok) { mindEl('mindSeedMsg').textContent = '失败：' + (r.error || ''); return; }
+  mindRenderSeed(r.proposals);
+  const n = (r.proposals || []).filter((x) => x.changed).length;
+  mindEl('mindSeedMsg').textContent = n ? `有 ${n} 人会被补上关系，检查后点「确认写入」。` : '大家的关系都已经够了，不需要补。';
+});
+mindEl('mindSeedApply').addEventListener('click', async () => {
+  const userIds = (mindUi.seed || []).filter((x) => x.changed).map((x) => x.userId);
+  if (!userIds.length) return;
+  mindEl('mindSeedApply').disabled = true;
+  const r = await api('/api/persona/seed', 'POST', { userIds });
+  mindEl('mindSeedMsg').textContent = r.ok ? `已写入 ${(r.applied || []).length} 人` : '失败：' + (r.error || '');
+  if (r.ok) { mindEl('mindSeedPreview').innerHTML = ''; mindUi.seed = []; loadMindPanel(true); }
+});
+mindEl('mindPropose').addEventListener('click', async () => {
+  mindEl('mindProposeMsg').textContent = '正在读角色卡并调模型…';
+  const r = await api('/api/persona/factory/propose', 'POST', {});
+  if (!r.ok) { mindEl('mindProposeMsg').textContent = '失败：' + (r.error || ''); return; }
+  mindFillFactory(r.proposal);
+  mindEl('mindProposeMsg').textContent = '已填入，检查后点「确认出厂性格」。';
+});
+mindEl('mindConfirm').addEventListener('click', async () => {
+  // PERSONA_PATCH（v2 §9）：11 个数值 + 每项表现 + 好恶 + 信念一起提交；后天性格走 character 字段。
+  const traits = {};
+  const character = {};
+  document.querySelectorAll('[data-mind-factory]').forEach((i) => {
+    const key = i.dataset.mindFactory;
+    if (key in MIND_CHAR_TRAITS) character[key] = Number(i.value);
+    else traits[key] = Number(i.value);
+  });
+  const manifests = mindParseManifestsText(mindEl('mindFactoryManifests').value);
+  const prefs = mindParsePrefsText(mindEl('mindFactoryPrefs').value);
+  const beliefs = mindEl('mindFactoryBeliefs').value.split('\n').map((x) => x.trim()).filter(Boolean);
+  const r = await api('/api/persona/factory/confirm', 'POST', { traits, character, manifests, prefs, beliefs });
+  mindEl('mindConfirmMsg').textContent = r.ok ? '已确认。' : '失败：' + (r.error || '');
+  if (r.ok) loadMindPanel(true);
+});
+mindEl('mindRollback').addEventListener('click', async () => {
+  const day = mindEl('mindSnapshot').value;
+  if (!day || !confirm(`把性格和关系回滚到 ${day} 的快照？情绪不受影响。`)) return;
+  const r = await api('/api/persona/rollback', 'POST', { day });
+  mindEl('mindHistoryMsg').textContent = r.ok ? `已回滚到 ${day}` : '失败：' + (r.error || '');
+  if (r.ok) loadMindPanel(true);
+});
+mindEl('mindNightly').addEventListener('click', async () => {
+  const r = await api('/api/persona/nightly', 'POST', {});
+  mindEl('mindHistoryMsg').textContent = r.ok ? '已结算' : '失败：' + (r.error || '');
+  if (r.ok) loadMindPanel(true);
+});
+mindEl('mindReportBtn').addEventListener('click', async () => {
+  const name = mindEl('mindReport').value;
+  if (!name) return;
+  const r = await api('/api/persona/report?name=' + encodeURIComponent(name));
+  mindEl('mindReportOut').textContent = r.ok ? r.markdown : '读取失败：' + (r.error || '');
+});
+async function mindSave(extra = {}) {
+  const settings = {
+    enabled: mindEl('mindEnabled').checked,
+    inject: mindEl('mindInject').checked,
+    appraisal: { mode: mindEl('mindMode').value, model: mindEl('mindModel').value.trim(), baseUrl: mindEl('mindBaseUrl').value.trim(), dailyLimit: Number(mindEl('mindDailyLimit').value) || 400 }
+  };
+  const key = mindEl('mindApiKey').value.trim();
+  const r = await api('/api/persona/config', 'POST', { settings, ...(key ? { apiKey: key } : {}), ...extra });
+  mindEl('mindApiKey').value = '';
+  mindEl('mindSaveMsg').textContent = r.ok ? `已保存（密钥 ${r.apiKeyHint || '未填写'}）` : '失败：' + (r.error || '');
+  if (r.ok) loadMindPanel(true);
+}
+mindEl('mindSave').addEventListener('click', () => mindSave());
+mindEl('mindClearKey').addEventListener('click', () => { if (confirm('清除判读密钥？之后只用规则判读。')) mindSave({ clearApiKey: true }); });
+if (location.hash === '#mind') loadMindPanel();
+
+// ── 每日报表（REPORT_PATCH，规格 DAILY_REPORT_SPEC.md §2 / worker-kit/report/contract.md） ──
+// 数据只来自 GET /api/report/daily 与 GET /api/report/series；所有来自接口的字符串都要经 esc() 再进 DOM。
+// 状态对象声明在脚本末尾，页面切换逻辑通过 queueMicrotask 延后调用，直接以 #report 打开也不会撞暂时性死区。
+let reportCurrentDay = '';   // '' = 今天
+let reportSnapshots = [];    // 有快照的日期（升序）
+let reportLoading = false;
+let reportReloadQueued = null;   // null / 'reset'（切回今天）/ 'keep'（保留当前选择的日期）
+
+const REPORT_MEMORY_GROUPS = [
+  ['账本', [['新记', 'ltmRemember'], ['更新', 'ltmUpdate'], ['删除', 'ltmForget'], ['查记忆', 'queries']]],
+  ['账本现状', [['共', 'ltmTotal'], ['已淡忘', 'ltmFaded'], ['已过时', 'ltmOutdated']]],
+  ['own-life 投递', [['白天', 'ownLifeDay'], ['半夜', 'ownLifeMidnight']]],
+  ['回忆', [['忽然想起', 'recalls'], ['顺着想到', 'associations'], ['到期提醒', 'promiseWakes']]],
+  ['自动想起（影子）', [['记录', 'shadow'], ['过门槛', 'shadowPass'], ['跳过', 'shadowSkipped']]],
+  ['联想提炼', [['调用', 'distillCalls'], ['成功', 'distillOk'], ['失败', 'distillFailed']]]
+];
+
+function reportEl(id) { return document.getElementById(id); }
+
+function reportNum(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+function reportInt(n) { return String(Math.round(n * 10) / 10).replace(/\.0$/, ''); }
+function reportDec2(n) { return n.toFixed(2); }
+function reportMoney(n) { return n.toFixed(4); }
+function reportPct(n) { return Math.round(n * 100) + '%'; }
+function reportSum(values) {
+  const nums = (values || []).map(reportNum).filter((n) => n !== null);
+  return nums.length ? nums.reduce((a, b) => a + b, 0) : null;
+}
+function reportTruncate(text, max) {
+  const s = String(text ?? '');
+  return s.length > max ? s.slice(0, max) + '…' : s;
+}
+function reportClock(ms) {
+  const d = new Date(ms); const p = (n) => String(n).padStart(2, '0');
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+function reportTime(ms) {
+  const d = new Date(ms); const p = (n) => String(n).padStart(2, '0');
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+function reportDuration(ms) {
+  const n = Number(ms);
+  if (!Number.isFinite(n) || n < 0) return '未知';
+  if (n < 60_000) return Math.max(1, Math.round(n / 1000)) + ' 秒';
+  if (n < 3_600_000) return Math.round(n / 60_000) + ' 分钟';
+  if (n < 86_400_000) {
+    const h = Math.floor(n / 3_600_000); const m = Math.round((n % 3_600_000) / 60_000);
+    return m ? `${h} 小时 ${m} 分钟` : `${h} 小时`;
+  }
+  const d = Math.floor(n / 86_400_000); const h = Math.round((n % 86_400_000) / 3_600_000);
+  return h ? `${d} 天 ${h} 小时` : `${d} 天`;
+}
+function reportAgo(ms) {
+  const n = Number(ms);
+  if (!Number.isFinite(n) || n < 0) return '未知';
+  if (n < 60_000) return '刚刚';
+  return reportDuration(n) + '前';
+}
+function reportNullText(partial) { return partial ? '补算的快照里没有这项' : '暂无数据'; }
+function reportNullSpan(partial) {
+  return `<span class="report-null" title="${esc(reportNullText(partial))}">—</span>`;
+}
+function reportKv(label, valueHtml) {
+  return `<div class="report-kv"><span>${esc(label)}</span><span>${valueHtml}</span></div>`;
+}
+// 「比昨天 ±n」：任一边为 null 就不显示；金额 4 位、比例用百分点、其它最多 1 位小数。
+function reportDelta(cur, prev, mode = 'int') {
+  const c = reportNum(cur); const p = reportNum(prev);
+  if (c === null || p === null) return '';   // 昨天没有这项就不标
+  const diff = c - p;
+  let rounded;
+  let magnitude;
+  if (mode === 'money') {
+    rounded = Math.round(diff * 10000) / 10000;
+    magnitude = Math.abs(rounded).toFixed(4);
+  } else if (mode === 'pt') {
+    rounded = Math.round(diff * 100);
+    magnitude = String(Math.abs(rounded)) + 'pt';
+  } else if (mode === 'dec2') {
+    rounded = Math.round(diff * 100) / 100;
+    magnitude = Math.abs(rounded).toFixed(2);
+  } else {
+    rounded = Math.round(diff * 10) / 10;
+    magnitude = String(Math.abs(rounded));
+  }
+  const sign = rounded > 0 ? '+' : (rounded < 0 ? '−' : '+');
+  return `<span class="report-delta" title="比昨天">${sign}${magnitude}</span>`;
+}
+function reportValueCell(cur, prevVal, { partial = false, mode = 'int', fmt = reportInt } = {}) {
+  const n = reportNum(cur);
+  if (n === null) return reportNullSpan(partial);
+  return `<b>${esc(fmt(n))}</b>${reportDelta(n, prevVal, mode)}`;
+}
+function reportSessionKeys(rep) {
+  const sessions = rep?.sessions || {};
+  return Object.keys(sessions).sort((a, b) => {
+    const sa = sessions[a] || {}; const sb = sessions[b] || {};
+    return ((Number(sb.in) || 0) + (Number(sb.out) || 0)) - ((Number(sa.in) || 0) + (Number(sa.out) || 0));
+  });
+}
+
+// §2.1 收发
+function reportRenderTraffic(data) {
+  const box = reportEl('reportTraffic');
+  if (!box) return;
+  const rep = data.report || {};
+  const prev = data.prev || null;
+  const labels = data.labels || {};
+  const partial = !!data.partial;
+  const fields = [['in', '收到'], ['out', '她发出'], ['turns', '被唤醒'], ['toolCalls', '工具调用']];
+  const keys = reportSessionKeys(rep);
+  const sums = fields.map(() => []);
+  const prevSums = fields.map(() => []);
+  let html = '<table class="report-table"><thead><tr><th class="report-key">会话</th>';
+  for (const [, label] of fields) html += `<th class="num">${esc(label)}</th>`;
+  html += '</tr></thead><tbody>';
+  if (!keys.length) html += `<tr><td colspan="${fields.length + 1}" class="meta">这天没有记录</td></tr>`;
+  for (const key of keys) {
+    const s = rep.sessions?.[key] || {};
+    const p = prev?.sessions?.[key] || null;
+    html += `<tr><td class="report-key" title="${esc(key)}">${esc(labels[key] || key)}</td>`;
+    fields.forEach(([field], i) => {
+      sums[i].push(s[field]);
+      if (p) prevSums[i].push(p[field]);
+      html += `<td class="num">${reportValueCell(s[field], p ? p[field] : null, { partial })}</td>`;
+    });
+    html += '</tr>';
+  }
+  html += '<tr class="report-total"><td class="report-key">合计</td>';
+  fields.forEach(([, label], i) => {
+    const total = reportSum(sums[i]);
+    const prevTotal = prev ? reportSum(prevSums[i]) : null;
+    html += `<td class="num">${reportValueCell(total, prevTotal, { partial })}</td>`;
+  });
+  html += '</tr></tbody></table>';
+  box.innerHTML = html;
+}
+
+// §2.2 记忆
+function reportRenderMemory(data) {
+  const box = reportEl('reportMemory');
+  if (!box) return;
+  const mem = data.report?.memory || {};
+  const prev = data.prev?.memory || null;
+  const partial = !!data.partial;
+  let html = '';
+  for (const [title, items] of REPORT_MEMORY_GROUPS) {
+    html += `<div class="report-group-title">${esc(title)}</div>`;
+    for (const [label, key] of items) {
+      html += `<div class="report-kv"><span>${esc(label)}</span><span>${reportValueCell(mem[key], prev ? prev[key] : null, { partial })}</span></div>`;
+    }
+  }
+  // SUGGEST_PATCH：账本建议——与上面各组同一种写法：小标题 + 一格一项（名称 / 数字、比昨天）。
+  // 作废 = 过期 + 手动作废，两者都读不到时为 null；某一格是 null（老快照 / 来源读不到）时
+  // 该格沿用报表统一的「—」显示，不是 0。四格放不下同一行时按 .report-grid 的现有样式自然换行。
+  const sug = [mem.suggestCreated, mem.suggestAdopted, mem.suggestDuplicate, mem.suggestExpired, mem.suggestDismissed].map(reportNum);
+  const sugPrev = [prev?.suggestCreated, prev?.suggestAdopted, prev?.suggestDuplicate, prev?.suggestExpired, prev?.suggestDismissed].map(reportNum);
+  const sugSum = (a, b) => (a === null && b === null ? null : (a ?? 0) + (b ?? 0));
+  const sugCells = [
+    ['产生', sug[0], sugPrev[0]],
+    ['采用', sug[1], sugPrev[1]],
+    ['已在账本', sug[2], sugPrev[2]],
+    ['作废', sugSum(sug[3], sug[4]), sugSum(sugPrev[3], sugPrev[4])]
+  ];
+  html += '<div class="report-group-title">账本建议</div>';
+  for (const [label, value, prevValue] of sugCells) {
+    html += `<div class="report-kv"><span>${esc(label)}</span><span>${reportValueCell(value, prevValue, { partial })}</span></div>`;
+  }
+  box.innerHTML = html;
+}
+
+// §2.3 花费
+function reportPersonaNote(cost) {
+  const calls = reportNum(cost?.personaCalls);
+  const rules = reportNum(cost?.personaRules);
+  const failures = reportNum(cost?.personaFailures);
+  if (calls === null && rules === null && failures === null) return '';
+  return `<span class="meta">（${calls ?? 0} 次，规则兜底 ${rules ?? 0} 次，失败 ${failures ?? 0} 次）</span>`;
+}
+function reportRenderCost(data) {
+  const box = reportEl('reportCost');
+  if (!box) return;
+  const cost = data.report?.cost || {};
+  const prev = data.prev?.cost || null;
+  const partial = !!data.partial;
+  const items = [['她聊天（DSH）', 'dsh'], ['人格判读', 'persona'], ['联想提炼', 'distill']];
+  let html = '<table class="report-table"><thead><tr><th class="report-key">项目</th><th class="num">元</th></tr></thead><tbody>';
+  for (const [label, key] of items) {
+    const note = key === 'persona' ? reportPersonaNote(cost) : '';
+    html += `<tr><td class="report-key">${esc(label)}${note}</td><td class="num">${reportValueCell(cost[key], prev ? prev[key] : null, { partial, mode: 'money', fmt: reportMoney })}</td></tr>`;
+  }
+  const total = reportNum(cost.total) ?? reportSum([cost.dsh, cost.persona, cost.distill]);
+  const prevTotal = prev ? (reportNum(prev.total) ?? reportSum([prev.dsh, prev.persona, prev.distill])) : null;
+  html += `<tr class="report-total"><td class="report-key">合计</td><td class="num">${reportValueCell(total, prevTotal, { partial, mode: 'money', fmt: reportMoney })}</td></tr>`;
+  html += '</tbody></table>';
+  box.innerHTML = html;
+}
+
+// §2.4 服务状态：只在「今天」显示实时部分；过去的日子只有当天报错与最长中断。
+function reportRenderService(data) {
+  const box = reportEl('reportService');
+  if (!box) return;
+  const svc = data.report?.service || {};
+  const partial = !!data.partial;
+  const errors = reportNum(svc.errors);
+  const gap = reportNum(svc.longestGapMin);
+  const errorsHtml = errors === null
+    ? reportNullSpan(partial)
+    : `<b class="${errors > 20 ? 'report-bad' : ''}">${errors}</b> 次`;
+  const gapHtml = gap === null ? reportNullSpan(partial) : `<b>${esc(reportInt(gap))}</b> 分钟`;
+  const live = data.report?.live && typeof data.report.live === 'object' ? data.report.live : null;
+  if (data.today !== true || !live) {
+    box.innerHTML = reportKv('当天报错', errorsHtml) + reportKv('最长中断', gapHtml);
+    return;
+  }
+
+  const now = Date.now();
+  const startedAt = reportNum(live.startedAt);
+  let html = startedAt === null
+    ? reportKv('桥接', '<span class="report-null">—</span>')
+    : reportKv('桥接', `启动于 ${esc(reportClock(startedAt))}<span class="report-muted"> ｜ 已运行 ${esc(reportDuration(now - startedAt))}</span>`);
+
+  const lastIncoming = reportNum(live.lastIncomingAt);
+  if (lastIncoming === null) {
+    html += reportKv('最后收到消息', '<span class="report-null" title="还没有收到过消息">—</span>');
+  } else {
+    const age = now - lastIncoming;
+    const hour = new Date(now).getHours();
+    const quiet = age > 2 * 3_600_000 && hour >= 8 && hour <= 23;
+    html += reportKv('最后收到消息', `${esc(reportAgo(age))}${quiet ? '<span class="report-muted"> ｜ 很久没人说话</span>' : ''}`);
+  }
+
+  const snow = live.snowluma || {};
+  // downSinceMs 是「从什么时候开始断开」的时间戳，时长要拿 now 相减；时钟回拨时按 0 算。
+  const snowSince = reportNum(snow.downSinceMs);
+  const snowDown = snowSince === null ? null : Math.max(0, now - snowSince);
+  if (snow.connected) {
+    html += reportKv('SnowLuma', '<span class="report-good">已连接</span>');
+  } else if (snowDown !== null) {
+    html += reportKv('SnowLuma', `<span class="${snowDown > 120_000 ? 'report-bad' : 'report-muted'}">已断开 ${esc(reportDuration(snowDown))}</span>`);
+  } else {
+    html += reportKv('SnowLuma', '<span class="report-bad">未连接</span>');
+  }
+
+  const dsh = live.dsh || {};
+  // 同上：downSinceMs 是时间戳不是时长。
+  const dshSince = reportNum(dsh.downSinceMs);
+  const dshDown = dshSince === null ? null : Math.max(0, now - dshSince);
+  if (dsh.ready) {
+    html += reportKv('DSH', '<span class="report-good">已就绪</span>');
+  } else if (dshDown !== null) {
+    html += reportKv('DSH', `<span class="${dshDown > 120_000 ? 'report-bad' : 'report-muted'}">未就绪 ${esc(reportDuration(dshDown))}</span>`);
+  } else {
+    html += reportKv('DSH', '<span class="report-bad">未就绪</span>');
+  }
+
+  if (live.ragConfigured === false) {
+    html += reportKv('memory-rag', '<span class="report-muted">未配置</span>');
+  } else if (!live.rag) {
+    html += reportKv('memory-rag', '<span class="report-bad">连不上</span>');
+  } else {
+    const rag = live.rag;
+    const parts = [];
+    parts.push(rag.ok === false ? '<span class="report-bad">不可达</span>' : '<span class="report-good">已连接</span>');
+    if (rag.embedding === false) parts.push('<span class="report-bad">embedding 未就绪</span>');
+    const distill = rag.distill || {};
+    const failed = reportNum(distill.failed);
+    const pending = reportNum(distill.pending);
+    const lastError = typeof distill.lastError === 'string' ? distill.lastError : (typeof distill.last_error === 'string' ? distill.last_error : '');
+    if ((failed !== null && failed > 0) || lastError) {
+      parts.push(`<span class="report-bad">提炼失败 ${failed ?? 0}</span>`);
+      if (lastError) parts.push(`<span class="report-muted" title="${esc(lastError)}">${esc(reportTruncate(lastError, 40))}</span>`);
+    } else if (pending !== null && pending > 0) {
+      parts.push(`<span class="report-muted">提炼排队 ${pending}</span>`);
+    }
+    html += reportKv('memory-rag', parts.join(' ｜ '));
+  }
+
+  html += reportKv('今天报错', errorsHtml);
+  if (gap !== null) html += reportKv('最长中断', gapHtml);
+
+  const recent = Array.isArray(live.recentErrors) ? live.recentErrors.filter((e) => e && typeof e.text === 'string').slice(0, 5) : [];
+  if (recent.length) {
+    html += `<details class="report-errors"><summary>最近 ${recent.length} 条报错</summary>`;
+    for (const item of recent) {
+      const at = reportNum(item.at);
+      html += `<div class="report-error-line"><time>${at === null ? '—' : esc(reportTime(at))}</time><span>${esc(reportTruncate(item.text, 120))}</span></div>`;
+    }
+    html += '</details>';
+  }
+  box.innerHTML = html;
+}
+
+// §2.5 她的说话
+function reportSpeechValue(value, prevValue, { fmt, mode, tooFewTitle }) {
+  const n = reportNum(value);
+  if (n === null) return `<span class="report-null" title="${esc(tooFewTitle)}">—（太少）</span>`;
+  return `<b>${esc(fmt(n))}</b>${reportDelta(n, prevValue, mode)}`;
+}
+function reportSpeechPair(her, their, prevHer, prevTheir, { fmt, mode, tooFewTitle }) {
+  const h = reportNum(her); const t = reportNum(their);
+  if (h === null && t === null) return `<span class="report-null" title="${esc(tooFewTitle)}">—（太少）</span>`;
+  const left = h === null ? `<span class="report-null" title="${esc(tooFewTitle)}">—</span>` : `<b>${esc(fmt(h))}</b>${reportDelta(h, prevHer, mode)}`;
+  const right = t === null ? `<span class="report-null" title="${esc(tooFewTitle)}">—</span>` : `<b>${esc(fmt(t))}</b>${reportDelta(t, prevTheir, mode)}`;
+  return `${left}<span class="report-pair-sep">/</span>${right}`;
+}
+function reportStickerCell(stickers) {
+  const list = Array.isArray(stickers) ? stickers.filter((x) => Array.isArray(x) && typeof x[0] === 'string' && x[0]).slice(0, 5) : [];
+  if (!list.length) return '<span class="report-null" title="这天没有重复两次以上的表情包">—</span>';
+  return list.map(([name, count]) => `<span class="report-sticker">${esc(name)}×${Number(count) || 0}</span>`).join('、');
+}
+function reportMergeStickers(rep) {
+  const map = new Map();
+  for (const session of Object.values(rep?.sessions || {})) {
+    for (const pair of session?.speech?.stickers || []) {
+      if (!Array.isArray(pair) || typeof pair[0] !== 'string' || !pair[0]) continue;
+      map.set(pair[0], (map.get(pair[0]) || 0) + (Number(pair[1]) || 0));
+    }
+  }
+  return [...map.entries()].filter(([, n]) => n >= 2).sort((a, b) => b[1] - a[1]).slice(0, 5);
+}
+function reportMergeOpeners(openers) {
+  const map = new Map();
+  for (const list of Object.values(openers || {})) {
+    if (!Array.isArray(list)) continue;
+    for (const pair of list) {
+      if (!Array.isArray(pair) || typeof pair[0] !== 'string' || !pair[0]) continue;
+      map.set(pair[0], (map.get(pair[0]) || 0) + (Number(pair[1]) || 0));
+    }
+  }
+  return [...map.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3);
+}
+function reportOpenerCell(list, isToday) {
+  if (!isToday) return '<span class="report-null" title="常用开头只在今天的视图里算，历史快照不保存">—</span>';
+  const items = Array.isArray(list) ? list.filter((x) => Array.isArray(x) && typeof x[0] === 'string' && x[0]) : [];
+  if (!items.length) return '<span class="report-null" title="今天没有她的文字消息">—</span>';
+  return items.slice(0, 3).map(([word, count]) => `${esc(word)}<span class="report-muted">×${Number(count) || 0}</span>`).join('、');
+}
+function reportSpeechRow(label, key, speech, prevSpeech, { isToday, openers, stickers }) {
+  const tooFew = '当天这个方向的文字消息不足 5 条，样本太少';
+  // 「全部」行不合计逗号与语气词收尾（speechAll 里没有这两项），显示 — 而不是「—（太少）」。
+  const allRow = key === '__all__';
+  const allNull = `<span class="report-null" title="${esc('全部会话不合计这一项，看上面各会话的数字')}">—</span>`;
+  const lens = reportSpeechPair(speech.herMedianLen, speech.theirMedianLen, prevSpeech?.herMedianLen, prevSpeech?.theirMedianLen, { fmt: reportInt, mode: 'int', tooFewTitle: tooFew });
+  const commas = allRow ? allNull : reportSpeechPair(speech.herCommas, speech.theirCommas, prevSpeech?.herCommas, prevSpeech?.theirCommas, { fmt: reportDec2, mode: 'dec2', tooFewTitle: tooFew });
+  const particle = allRow ? allNull : reportSpeechPair(speech.herParticleEnd, speech.theirParticleEnd, prevSpeech?.herParticleEnd, prevSpeech?.theirParticleEnd, { fmt: reportPct, mode: 'pt', tooFewTitle: tooFew });
+  const xing = reportSpeechValue(speech.xingOpen, prevSpeech?.xingOpen, { fmt: reportPct, mode: 'pt', tooFewTitle: tooFew });
+  const care = reportSpeechValue(speech.care, prevSpeech?.care, { fmt: reportPct, mode: 'pt', tooFewTitle: tooFew });
+  const stickerHtml = reportStickerCell(stickers || speech.stickers);
+  const openerHtml = reportOpenerCell(openers, isToday);
+  return `<tr><td class="report-key" title="${esc(key === '__all__' ? '全部会话' : key)}">${esc(label)}</td>`
+    + `<td>${lens}</td><td>${commas}</td><td>${particle}</td><td>${xing}</td><td>${care}</td>`
+    + `<td>${stickerHtml}</td><td>${openerHtml}</td></tr>`;
+}
+function reportRenderSpeech(data) {
+  const box = reportEl('reportSpeech');
+  if (!box) return;
+  const rep = data.report || {};
+  const labels = data.labels || {};
+  const prev = data.prev || null;
+  const isToday = data.today === true;
+  const live = rep.live && typeof rep.live === 'object' ? rep.live : null;
+  const keys = reportSessionKeys(rep).filter((key) => rep.sessions?.[key]?.speech && typeof rep.sessions[key].speech === 'object');
+  let html = '<table class="report-table"><thead><tr><th class="report-key">会话</th>'
+    + '<th>一句几个字<span class="report-muted">（她 / 对方）</span></th>'
+    + '<th>每条逗号<span class="report-muted">（她 / 对方）</span></th>'
+    + '<th>语气词收尾<span class="report-muted">（她 / 对方）</span></th>'
+    + '<th>「行」开头</th><th>劝睡劝吃</th><th>重复表情包</th><th>常用开头</th></tr></thead><tbody>';
+  if (!keys.length) html += '<tr><td colspan="8" class="meta">这天没有可统计的会话</td></tr>';
+  for (const key of keys) {
+    const speech = rep.sessions[key].speech || {};
+    const prevSpeech = prev?.sessions?.[key]?.speech || null;
+    html += reportSpeechRow(labels[key] || key, key, speech, prevSpeech, {
+      isToday,
+      openers: live?.openers?.[key],
+      stickers: null
+    });
+  }
+  html += reportSpeechRow('全部', '__all__', rep.speechAll || {}, prev?.speechAll || null, {
+    isToday,
+    openers: reportMergeOpeners(live?.openers),
+    stickers: reportMergeStickers(rep)
+  });
+  html += '</tbody></table>';
+  box.innerHTML = html;
+}
+
+// 近 14 天折线（SVG + createElementNS，参照控制台现有用量图的画法）
+function reportNiceCeil(value) {
+  const v = Number(value);
+  if (!Number.isFinite(v) || v <= 0) return 1;
+  const mag = 10 ** Math.floor(Math.log10(v));
+  const norm = v / mag;
+  const step = norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 5 ? 5 : 10;
+  return step * mag;
+}
+function reportLineChart({ title, days, events, lines, yFormat, minTop = 0 }) {
+  const wrap = document.createElement('div');
+  wrap.className = 'report-chart';
+  const heading = document.createElement('div');
+  heading.className = 'report-chart-title';
+  heading.textContent = title;
+  wrap.appendChild(heading);
+
+  const n = days.length;
+  const all = [];
+  for (const line of lines) for (const v of line.values) if (v !== null) all.push(v);
+  if (!all.length) {
+    const empty = document.createElement('div');
+    empty.className = 'meta';
+    empty.textContent = '近 14 天还没有可用的数据';
+    wrap.appendChild(empty);
+    return wrap;
+  }
+  const top = reportNiceCeil(Math.max(minTop || 0, ...all));
+  const W = 560; const H = 190; const padL = 46; const padR = 14; const padT = 22; const padB = 30;
+  const plotW = W - padL - padR;
+  const plotH = H - padT - padB;
+  const xOf = (i) => (n <= 1 ? padL + plotW / 2 : padL + (i / (n - 1)) * plotW);
+  const yOf = (v) => padT + plotH - (Math.min(top, Math.max(0, v)) / top) * plotH;
+  const svg = svgEl('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': title });
+
+  for (let i = 0; i <= 2; i += 1) {
+    const y = yOf((top * i) / 2);
+    svg.appendChild(svgEl('line', { class: 'rg-grid', x1: padL, y1: y, x2: W - padR, y2: y }));
+    const label = svgEl('text', { class: 'rg-axis', x: padL - 8, y: y + 3, 'text-anchor': 'end' });
+    label.textContent = yFormat((top * i) / 2);
+    svg.appendChild(label);
+  }
+
+  const dayIndex = new Map(days.map((d, i) => [d, i]));
+  const seen = new Set();
+  for (const event of events) {
+    const i = dayIndex.get(event?.day);
+    if (i === undefined) continue;
+    const eventKey = event.day + '|' + (event.kind || '');
+    if (seen.has(eventKey)) continue;
+    seen.add(eventKey);
+    const x = xOf(i);
+    const line = svgEl('line', { class: 'rg-event', x1: x, y1: padT, x2: x, y2: padT + plotH });
+    const tip = svgEl('title');
+    tip.textContent = `${event.day} ${event.label || event.kind || ''}`;
+    line.appendChild(tip);
+    svg.appendChild(line);
+    const text = svgEl('text', { class: 'rg-event-label', x: x + 3, y: padT - 6, 'text-anchor': x > W - padR - 70 ? 'end' : 'start' });
+    text.textContent = event.label || event.kind || '';
+    svg.appendChild(text);
+  }
+
+  for (const line of lines) {
+    let d = '';
+    let open = false;
+    line.values.forEach((v, i) => {
+      if (v === null) { open = false; return; }
+      const x = xOf(i).toFixed(1);
+      const y = yOf(v).toFixed(1);
+      d += open ? ` L ${x} ${y}` : ` M ${x} ${y}`;
+      open = true;
+    });
+    if (d) svg.appendChild(svgEl('path', { class: `rg-line ${line.key}`, d }));
+    line.values.forEach((v, i) => {
+      if (v === null) return;
+      const dot = svgEl('circle', { class: `rg-dot ${line.key}`, cx: xOf(i).toFixed(1), cy: yOf(v).toFixed(1), r: 2.6 });
+      const tip = svgEl('title');
+      tip.textContent = `${days[i]} ${line.label}：${yFormat(v)}`;
+      dot.appendChild(tip);
+      svg.appendChild(dot);
+    });
+  }
+
+  const tickEvery = Math.max(1, Math.ceil(n / 6));
+  for (let i = 0; i < n; i += tickEvery) {
+    const anchor = i === 0 ? 'start' : (i + tickEvery >= n ? 'end' : 'middle');
+    const label = svgEl('text', { class: 'rg-axis', x: xOf(i), y: H - padB + 16, 'text-anchor': anchor });
+    label.textContent = days[i].slice(5);
+    svg.appendChild(label);
+  }
+  wrap.appendChild(svg);
+
+  const legend = document.createElement('div');
+  legend.className = 'report-legend';
+  for (const line of lines) {
+    const item = document.createElement('span');
+    const swatch = document.createElement('i');
+    swatch.className = line.key;
+    item.append(swatch, document.createTextNode(line.label));
+    legend.appendChild(item);
+  }
+  wrap.appendChild(legend);
+  return wrap;
+}
+function reportRenderSeries(series) {
+  const box = reportEl('reportCharts');
+  if (!box) return;
+  box.replaceChildren();
+  const days = Array.isArray(series?.days) ? series.days.filter((d) => typeof d === 'string') : [];
+  const rows = Array.isArray(series?.speechAll) ? series.speechAll : [];
+  const events = Array.isArray(series?.events) ? series.events : [];
+  if (!days.length || days.length !== rows.length) {
+    const empty = document.createElement('div');
+    empty.className = 'meta';
+    empty.textContent = '近 14 天还没有折线数据';
+    box.appendChild(empty);
+    return;
+  }
+  const values = rows.map((r) => (r && typeof r === 'object' ? r : null));
+  box.append(
+    reportLineChart({
+      title: '她的字数 vs 对方的字数（中位数）',
+      days, events, minTop: 10,
+      yFormat: (v) => String(Math.round(v)),
+      lines: [
+        { key: 'her', label: '她的字数中位数', values: values.map((r) => reportNum(r?.herMedianLen)) },
+        { key: 'their', label: '对方的字数中位数', values: values.map((r) => reportNum(r?.theirMedianLen)) }
+      ]
+    }),
+    reportLineChart({
+      title: '「行」开头 vs 劝睡劝吃（比例）',
+      days, events, minTop: 0.2,
+      yFormat: (v) => Math.round(v * 100) + '%',
+      lines: [
+        { key: 'xing', label: '「行」开头', values: values.map((r) => reportNum(r?.xingOpen)) },
+        { key: 'care', label: '劝睡劝吃', values: values.map((r) => reportNum(r?.care)) }
+      ]
+    })
+  );
+}
+function reportRenderSeriesError(error) {
+  const box = reportEl('reportCharts');
+  if (!box) return;
+  box.replaceChildren();
+  const p = document.createElement('div');
+  p.className = 'meta';
+  p.textContent = '近 14 天折线读取失败：' + (error?.message || '未知错误');
+  box.appendChild(p);
+}
+
+// 日期选择：今天 + 有快照的日期（倒序）
+function reportFillDayOptions(selected) {
+  const sel = reportEl('reportDay');
+  if (!sel) return;
+  const days = reportSnapshots.filter((d) => typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d));
+  sel.replaceChildren();
+  const todayOption = document.createElement('option');
+  todayOption.value = '';
+  todayOption.textContent = '今天';
+  sel.appendChild(todayOption);
+  for (const day of days.slice().reverse()) {
+    const option = document.createElement('option');
+    option.value = day;
+    option.textContent = day;
+    sel.appendChild(option);
+  }
+  const want = selected || '';
+  if (want && ![...sel.options].some((option) => option.value === want)) {
+    const option = document.createElement('option');
+    option.value = want;
+    option.textContent = want;
+    sel.insertBefore(option, sel.options[1] || null);
+  }
+  sel.value = [...sel.options].some((option) => option.value === want) ? want : '';
+}
+
+function reportShowError(text) {
+  const box = reportEl('reportError');
+  if (!box) return;
+  box.textContent = text;
+  box.hidden = false;
+}
+async function reportGet(url) {
+  const r = await api(url);
+  if (!r || typeof r !== 'object') throw new Error('接口没有返回数据');
+  if (r.ok !== true) throw new Error(r.error || '接口返回失败');
+  return r;
+}
+
+function reportRenderAll(data) {
+  const rep = data.report || {};
+  reportCurrentDay = data.today === true ? '' : (data.day || '');
+  reportSnapshots = Array.isArray(data.snapshotDays) ? data.snapshotDays.slice() : reportSnapshots;
+  reportFillDayOptions(reportCurrentDay);
+  const tag = reportEl('reportPartialTag');
+  if (tag) tag.hidden = !(data.today === false && data.partial === true);
+  reportRenderTraffic(data);
+  reportRenderMemory(data);
+  reportRenderCost(data);
+  reportRenderService(data);
+  reportRenderSpeech(data);
+}
+
+async function refreshReportPanel() {
+  const msg = reportEl('reportMsg');
+  if (msg) msg.textContent = '加载中…';
+  const errorBox = reportEl('reportError');
+  if (errorBox) { errorBox.hidden = true; errorBox.textContent = ''; }
+  const day = reportCurrentDay;
+  const dailyUrl = '/api/report/daily' + (day ? '?day=' + encodeURIComponent(day) : '');
+  const [dailyResult, seriesResult] = await Promise.allSettled([
+    reportGet(dailyUrl),
+    reportGet('/api/report/series?days=14')
+  ]);
+  if (dailyResult.status === 'fulfilled') {
+    try {
+      reportRenderAll(dailyResult.value);
+      if (msg) msg.textContent = '更新于 ' + new Date().toLocaleTimeString('zh-CN', { hour12: false });
+    } catch (error) {
+      reportShowError('报表渲染失败：' + (error?.message || '未知错误'));
+      if (msg) msg.textContent = '';
+    }
+  } else {
+    reportShowError('报表读取失败：' + (dailyResult.reason?.message || '未知错误'));
+    if (msg) msg.textContent = '';
+  }
+  if (seriesResult.status === 'fulfilled') {
+    try { reportRenderSeries(seriesResult.value); } catch (error) { reportRenderSeriesError(error); }
+  } else {
+    reportRenderSeriesError(seriesResult.reason);
+  }
+}
+
+// 每次切到这一页都重新请求「今天」；离开再回来也一样（规格 §2）。
+async function loadReportPanel(options) {
+  const reset = !options || options.reset !== false;
+  if (!reportEl('reportDay')) return;
+  if (reset) { reportCurrentDay = ''; reportEl('reportDay').value = ''; }
+  if (reportLoading) { reportReloadQueued = (reset || reportReloadQueued === 'reset') ? 'reset' : 'keep'; return; }
+  reportLoading = true;
+  try {
+    await refreshReportPanel();
+  } finally {
+    reportLoading = false;
+    const queued = reportReloadQueued;
+    reportReloadQueued = null;
+    if (queued) loadReportPanel({ reset: queued === 'reset' });
+  }
+}
+
+reportEl('reportDay')?.addEventListener('change', () => {
+  reportCurrentDay = reportEl('reportDay').value;
+  loadReportPanel({ reset: false });
+});
+reportEl('reportRefresh')?.addEventListener('click', () => loadReportPanel({ reset: false }));
 </script>
 </body>
 </html>

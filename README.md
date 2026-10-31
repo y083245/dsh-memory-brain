@@ -1,5 +1,7 @@
 # QQ ↔ DeepSeek Harness 桥接
 
+> 本仓库是基于 [Derpyu520/qq-bridge](https://github.com/Derpyu520/qq-bridge)（MIT）的分支，在上游之上增加了长期记忆、向量记忆、人格与情绪、记忆代谢、主动想起等能力；详见 [docs/FORK_FEATURES.md](docs/FORK_FEATURES.md)。
+
 **English**: [README.en.md](README.en.md) | **中文**: [README.md](README.md)
 
 > 🗂️ 文档索引（全部文档一句话说明 + 是否仍然有效）见 **[docs/README.md](docs/README.md)**；仓库目录/脚本命名约定见 **[docs/FOLDER_MAP.md](docs/FOLDER_MAP.md)**。

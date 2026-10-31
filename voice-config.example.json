@@ -1,0 +1,51 @@
+{
+  "gptSovits": {
+    "baseUrl": "http://127.0.0.1:9880",
+    "timeoutMs": 180000,
+    "defaultVoice": "default",
+    "voices": {
+      "default": {
+        "refAudioPath": "~/gpt-sovits/ref/your_voice.wav",
+        "promptText": "这里填参考音频里说的那段话。",
+        "promptLang": "zh",
+        "textLang": "zh",
+        "description": "示例音色：换成你自己的参考音频与对应文本"
+      }
+    },
+    "params": {
+      "topK": 15,
+      "topP": 1,
+      "temperature": 1,
+      "repetitionPenalty": 1.35,
+      "textSplitMethod": "cut5",
+      "useCudaGraph": false,
+      "shortChars": 60,
+      "textSplitMethodShort": "cut0",
+      "parallelInfer": false
+    }
+  },
+  "rvc": {
+    "enabled": false,
+    "command": [
+      "~/rvc/infer_wrapper.sh",
+      "{model}",
+      "{input}",
+      "{output}",
+      "{pitch}",
+      "{f0Method}",
+      "{index}",
+      "{indexRate}"
+    ],
+    "modelPath": "",
+    "indexPath": "",
+    "pitch": 0,
+    "f0Method": "rmvpe",
+    "indexRate": 0.75,
+    "timeoutMs": 180000
+  },
+  "audioDir": "~/qq-bridge/audio",
+  "maxChars": 160,
+  "maxSeconds": 60,
+  "maxBytes": 15000000,
+  "ffprobe": "/usr/bin/ffprobe"
+}

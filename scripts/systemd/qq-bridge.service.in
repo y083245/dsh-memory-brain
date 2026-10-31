@@ -1,0 +1,32 @@
+# SYSTEMD_PATCH：qq-bridge 桥接（node src/bridge.js，控制台 :3100）
+# 模板 scripts/systemd/qq-bridge.service.in，由 scripts/systemd/install.sh 渲染后装到 ~/.config/systemd/user/。
+# 改这里再重跑 install.sh，别直接改装好的文件（下次安装会被覆盖）。
+[Unit]
+Description=qq-bridge (QQ <-> DSH bridge, console :3100)
+# 不依赖 SnowLuma / DSH：它们不归 systemd 管，而且 QQ 要扫码登录；桥接先起来也只是自己重连等着。
+# 限制重启频率：5 分钟内最多起 5 次，超了就停在 failed，start-all.sh 会先 reset-failed 再起。
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory={{BRIDGE_DIR}}
+# 非交互环境没有 nvm / pnpm 的 PATH（坑 18），这里写死成和 start-all.sh 补出来的一样。
+Environment=PATH={{PATH}}
+Environment=PNPM_HOME={{PNPM_HOME}}
+# 直接起 node（不经 npm start）：主进程就是桥接本身，退出码和信号不被 npm 转手。
+# 开头的 @ 让 argv[0] 是 node，命令行仍是「node src/bridge.js」，pgrep -f '^node src/bridge.js$' 照旧找得到。
+ExecStart=@{{NODE_BIN}} node src/bridge.js
+# 日志沿用 ~/.ai-companion-run/bridge.log；追加而不是清空，崩溃前的输出留得住。
+StandardOutput=append:{{RUN_DIR}}/bridge.log
+StandardError=inherit
+# 为什么是 always 而不是 on-failure：桥接收到 SIGTERM 会落盘后 exit 0，控制台「重启桥接」也是 exit 0、
+# 等守护进程 5 秒后拉起 —— on-failure 下这两种都不会重启。systemctl stop 是主动停，不会被拉起。
+# exit 2 是「已有实例在跑 / 控制台端口被占」，重试也没用，不重启。
+Restart=always
+RestartSec=5
+RestartPreventExitStatus=2
+TimeoutStopSec=20
+
+[Install]
+WantedBy=default.target

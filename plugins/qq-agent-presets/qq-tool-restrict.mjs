@@ -216,6 +216,11 @@ const SAFE_PREFIXES = [
   'mcp__snowluma__',
   'mcp__snowluma-host__',
   'mcp__web-search-safe__',
+  // 本地额外接入（ai-companion-kit）：QQ 空间 + 日记 + 语音生成。
+  // 三者都只操作 QQ/本地文本/语音库，不含 shell/文件读写能力。
+  'mcp__qzone__',
+  'mcp__diary__',
+  'mcp__voice__',
 ]
 
 // 无害模型侧工具：ask_user_question 用于把问题转给管理员/用户，

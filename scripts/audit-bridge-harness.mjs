@@ -22,6 +22,23 @@ import * as voiceLib from '../src/send-voice-lib.js';
 import * as presetPrompt from '../src/preset-prompt.js';
 import * as stateAcl from '../src/state-acl.mjs';
 import { unwrap, createTurnCollector } from '../src/dsh-client.js';
+// 本地新增模块（OWN_LIFE_PATCH / TTS_API_PATCH / LTM_PATCH）：bridge.js 的顶层 import 会被剥掉，必须在这里注入。
+import { createOwnLife } from '../src/own-life.js';
+// LIFE_LOOP_PATCH：生活回路（bridge.js 顶层 import，同样要注入）。
+import { createLifeLoop } from '../src/life-loop.js';
+import { createTtsApi, readJsonBody as readLargeJsonBody } from '../src/tts-api.js';
+import { createLongMemory } from '../src/long-memory.js';
+// RAG_PATCH：memory-rag 客户端 / 日期与关键词归一（bridge.js 顶层 import，同样要注入）。
+import { createMemoryRagClient, normalizeDateRange, normalizeKeywords } from '../src/memory-rag-client.js';
+// SUGGEST_PATCH：账本建议（bridge.js 顶层 import，同样要注入；坑 12）。
+import { createLedgerSuggest } from '../src/ledger-suggest.js';
+// PERSONA_PATCH：人格与情绪（bridge.js 顶层 import，同样要注入）。
+import { createPersona } from '../src/persona.js';
+// DECAY_PATCH：记忆代谢（遗忘曲线；bridge.js 顶层 import，同样要注入）。
+import { createMemoryDecay } from '../src/memory-decay.js';
+// REPORT_PATCH：每日报表（bridge.js 顶层 import，同样要注入；坑 12）。
+// dayOf 也要注入：桥接用 W1 导出的 dayOf 判断「今天」，剥离 import 后必须由这里提供。
+import { createDailyReport, isErrorLine, dayOf } from '../src/daily-report.js';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 export async function bridgeHarness({ config = {}, savedState, files = {}, globals = {} } = {}) {
@@ -157,6 +174,15 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     isConversationBusyV2, v2TurnStartAt, turnLeaseNoted, TURN_BUSY_LEASE_MS,
     settingFromDshNamespace, selfIdentityTextV2, buildWakeReminderPromptV2,
     getMode() { return currentMode; },
+    // LIFE_LOOP_PATCH：测试要直接拿到实例，调 snapshot() / tick()（harness 的 setInterval 是桩，定时器不会跑）。
+    getOwnLife() { return ownLife; },
+    getLifeLoop() { return lifeLoop; },
+    // DECAY_PATCH：测试要直接拿到遗忘模块实例（看 snapshot、或确认它有没有创建失败）。
+    getDecay() { return decay; },
+    // REPORT_PATCH：测试要直接拿到报表实例（计数、快照），并验证创建失败时是 null。
+    getDailyReport() { return dailyReport; },
+    // SUGGEST_PATCH：账本建议实例（验证候选 / 计次 / 采用；创建失败时是 null）。
+    getLedgerSuggest() { return ledgerSuggest; },
     setSelfIdentity(display, id) {
       selfDisplayName = String(display ?? '');
       selfUserId = String(id ?? '');
@@ -186,6 +212,13 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     NodeApiClient: class { constructor() { return api; } },
     SnowLumaWebSocketClient: FakeBot, text: (s) => s,
     discoverDshLaunchToken: () => '', unwrap, createTurnCollector,
+    createOwnLife, createTtsApi, readLargeJsonBody, createLongMemory,
+    createLifeLoop,
+    createMemoryRagClient, normalizeDateRange, normalizeKeywords,
+    createLedgerSuggest,
+    createPersona,
+    createMemoryDecay,
+    createDailyReport, isErrorLine, dayOf,
     ...markdown, ...sensitive, ...wait, ...safeFetch, ...forward, ...slang, ...sticker,
     ...modelPrices, ...tokenLedger, ...voiceLib, ...stateAcl, ...presetPrompt,
     // 桥接的出图出口会调归一化（体积/动图抽帧）：VM 里必须能拿到这几个函数。

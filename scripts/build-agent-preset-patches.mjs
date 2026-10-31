@@ -45,6 +45,8 @@ export const GUARD_SPECIFIER = 'qq-agent-presets/qq-tool-restrict.mjs';
 /** 源里允许出现的相对行名 → 新机制下的等价引用。其它相对名一律报错（避免静默装不上）。 */
 const RELATIVE_ROW_REWRITES = new Map([
   ['./qq-tool-restrict.mjs', GUARD_SPECIFIER],
+  // PERSONA_PATCH：人格与情绪的读快照插件，与守卫同在 qq-agent-presets bundle 里
+  ['./qq-persona-context.mjs', 'qq-agent-presets/qq-persona-context.mjs'],
 ]);
 
 export const BUNDLE_DIR = path.join(REPO_ROOT, 'plugins', 'qq-agent-presets');

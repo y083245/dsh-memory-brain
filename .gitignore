@@ -66,3 +66,20 @@ docs/guides/VOICE.md
 # 语音库（用户个人音频素材，config.json 的 socialV2.voice.dir 指向此处）
 audio/
 
+# 本机部署说明（含本机路径、QQ 号等个人信息）—— 不发布
+/CLAUDE.md
+
+# ── 运行时 / 本地环境 / 个人配置（开源发布时不该入库）────────────────────────
+# Python 虚拟环境、字节码与测试缓存：都是本机生成物。
+# 不带斜杠：发布目录里的 .venv 可能是指回本机仓库的符号链接，带斜杠匹配不到符号链接本身。
+.venv
+__pycache__/
+.pytest_cache/
+*.pyc
+
+# 语音工具的个人配置（真实参考音频路径与音色），只发布 voice-config.example.json
+voice-config.json
+
+# 依赖目录。不带斜杠：发布目录里的 node_modules 可能是指回本机仓库的符号链接，
+# 带斜杠的 node_modules/ 匹配不到符号链接本身。
+node_modules

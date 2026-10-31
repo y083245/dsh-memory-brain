@@ -52,6 +52,8 @@ for (const name of PRESETS) {
   const source = load(path.join(REPO_ROOT, 'dsh', 'agent-presets', name, 'agent.cordis.yml'));
   const expected = structuredClone(source);
   for (const r of expected) if (r.name === './qq-tool-restrict.mjs') r.name = GUARD_SPECIFIER;
+  // PERSONA_PATCH：人格与情绪的读快照插件同样改写成 bundle 裸说明符
+  for (const r of expected) if (r.name === './qq-persona-context.mjs') r.name = 'qq-agent-presets/qq-persona-context.mjs';
   assert.deepEqual(row.config.plugins, expected, `${name}: config.plugins 必须与 agent.cordis.yml 完全一致（守卫名除外）`);
   ok(true, `${name}: config.plugins 与 agent.cordis.yml 逐字一致（${expected.length} 行）`);
 

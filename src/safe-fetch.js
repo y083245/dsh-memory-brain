@@ -132,6 +132,33 @@ function orderAddresses(addresses) {
   return ordered;
 }
 
+// FAKEIP_PATCH：本机开着 Clash/mihomo 的 fake-ip 模式时，所有域名都解析到 198.18.0.0/15 的假地址，
+// 流量由代理按**域名**转发。上面的 isPrivateIp 会把这个段当内网拦掉，于是 QQ 图片/表情 CDN 全部下载失败。
+//
+// 这里只对**写死的** QQ 媒体域名放行假地址：这些域名由腾讯控制，代理按域名转发时不会被引到内网。
+// 不做成可配置、也不放开任意域名 —— 任意域名放行等于把 SSRF 防护交给代理的规则，
+// 攻击者的域名在代理那边可以解析到 192.168.x.x。
+const FAKE_IP_TRUSTED_SUFFIXES = ['qq.com', 'qq.com.cn', 'qpic.cn', 'gtimg.cn'];
+
+// mihomo 的 fake-ip 默认段：IPv4 198.18.0.0/15、IPv6 2001:2::/48（都是测试保留段，公网不可达）。
+function isFakeIpAddress(ip) {
+  const s = String(ip ?? '').toLowerCase().replace(/^\[|\]$/g, '');
+  const family = net.isIP(s);
+  if (family === 4) {
+    const [a, b] = s.split('.').map(Number);
+    return a === 198 && (b === 18 || b === 19);
+  }
+  if (family === 6) {
+    const norm = new URL(`http://[${s}]/`).hostname.slice(1, -1);
+    return /^2001:2:(?:0?:|[0-9a-f]{1,4}:|:)/.test(norm) || norm.startsWith('2001:2::');
+  }
+  return false;
+}
+
+function isFakeIpTrustedHost(h) {
+  return FAKE_IP_TRUSTED_SUFFIXES.some((s) => h === s || h.endsWith(`.${s}`));
+}
+
 /** 解析主机名并校验**全部**解析结果，返回可尝试的地址列表（IPv4 优先）。 */
 export async function resolveSafeAddresses(hostname) {
   const h = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
@@ -150,9 +177,13 @@ export async function resolveSafeAddresses(hostname) {
     throw new Error(`域名解析失败：${error?.message ?? error}`);
   }
   if (!addresses.length) throw new Error('域名没有解析结果');
+  const fakeIpOk = isFakeIpTrustedHost(h);
   for (const { address } of addresses) {
+    if (fakeIpOk && isFakeIpAddress(address)) continue;
     if (isPrivateIp(address)) {
-      throw new Error('域名解析到内网/本机地址，已阻止');
+      throw new Error(isFakeIpAddress(address)
+        ? '域名解析到代理的 fake-ip 地址（198.18.x.x），已阻止；在代理里把该域名加入 fake-ip-filter 可解决'
+        : '域名解析到内网/本机地址，已阻止');
     }
   }
   const ordered = orderAddresses(addresses);

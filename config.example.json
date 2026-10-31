@@ -54,6 +54,50 @@
   "security": {
     "interceptNotify": true
   },
+  "memoryRag": {
+    "_comment": "向量记忆 sidecar（sidecars/memory-rag，缺省 :8093）。不填或连不上会自动退回关键词检索；只允许回环地址。",
+    "url": "http://127.0.0.1:8093",
+    "timeoutMs": 3000,
+    "recall": {
+      "_comment": "唤醒时自动想起：mode 取 off / shadow / on；shadow 只记录、不注入。timeoutMs 是唤醒路径上的上限，超时当作没想起。",
+      "mode": "shadow",
+      "timeoutMs": 400
+    },
+    "suggest": {
+      "_comment": "账本建议：mode 取 off / on；每次唤醒最多 perWake 条，每条最多出现 maxShows 次，生成 ttlHours 小时后作废。",
+      "mode": "on",
+      "perWake": 3,
+      "maxShows": 2,
+      "ttlHours": 72,
+      "timeoutMs": 300
+    }
+  },
+  "decay": {
+    "_comment": "记忆代谢（FSRS 遗忘曲线）：可提取度低于 freezeBelow 时冻结（不再自动想起/注入，工具仍可查）；reviewCooldownMs 内重复想起只算一次。",
+    "freezeBelow": 0.5,
+    "reviewCooldownMs": 3600000
+  },
+  "lifeLoop": {
+    "_comment": "生活回路：到点提醒约定、闲时从旧事里想起一条。quiet 是活动时段 [起, 止]（小时），associate 是联想链的开关与门槛。",
+    "enabled": true,
+    "recallPerDay": 2,
+    "cooldownDays": 7,
+    "promiseWake": {
+      "enabled": true,
+      "at": "10:00",
+      "maxPerDay": 5
+    },
+    "quiet": [
+      3,
+      8
+    ],
+    "associate": {
+      "enabled": true,
+      "cooldownDays": 7,
+      "minAgeDays": 2,
+      "timeoutMs": 1500
+    }
+  },
   "slang": {
     "enabled": true,
     "extractMinMessages": 10,

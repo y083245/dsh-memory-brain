@@ -1,0 +1,73 @@
+# memory-rag 配置。路径都相对本文件所在目录（sidecars/memory-rag/）。
+# 改 embedding 的 model / dim / instruct / append_eos 任意一项，向量库都必须全量重建：
+# 这几项会写进 Chroma 集合的 metadata，启动时不一致直接拒绝服务（见 memory_rag/store.py）。
+
+state_dir: ../../state
+
+embedding:
+  provider: local           # local = 本机 llama-server；api = OpenAI 兼容的 embedding API
+  base_url: http://127.0.0.1:8091
+  model: Qwen3-Embedding-8B-Q8_0
+  dim: 2048                 # 原生 4096，取前 2048 维后重新 L2 归一化
+  instruct: 给定一个关于过往聊天的问题，检索能回答它的聊天记录片段
+  append_eos: true          # 冒烟实测：末尾补 <|endoftext|> 后三组查询的区分度都更好
+  batch: 32
+  timeout_s: 30
+  # EMBED_API_PATCH：只有 provider: api 时才读这一段（本地模式完全忽略）。
+  # api:
+  #   base_url: https://api.example.com/v1   # 请求 {base_url}/embeddings；必须是 https（本机回环地址除外）
+  #   model: your-embedding-model
+  #   dim: 1024                 # 存进向量库的维度；返回更长就截断后重新归一化，更短就报错
+  #   send_dimensions: false    # true 时请求里带 "dimensions": dim（支持该参数的模型才开）
+  #   instruct: ''              # 查询前缀（Qwen3 系列可以填和本地一样的指令；其它模型留空）
+  #   append_eos: false
+  #   batch: 32
+  #   timeout_s: 30
+  #   key_file: long-memory/rag/embedding-api.json   # 相对 state_dir；内容 {"apiKey": "..."}，权限建议 600
+
+segmenter:
+  gap_minutes: 30           # 相邻两条超过这个间隔就断成新段；最后一段也要等这么久没人说话才算结束
+  pause_minutes: 10         # 段内停顿超过这个值，该处切分门槛降低
+  window: 3                 # 判断话题边界时，边界两侧各取 3 条消息比较
+  min_msgs: 3
+  max_msgs: 15
+  max_chars: 800
+  depth_std_k: 0.5          # 门槛 = 该段低谷深度的均值 + 0.5 个标准差
+  min_depth: 0.05           # 深度低于这个值不切，避免话题一致的长段被硬切
+  cue_factor: 0.6           # 转折词或长停顿处，门槛乘以这个系数
+  cue_words: [对了, 话说, 说起来, 换个话题, 另外, 诶你知道, 诶对了, 还有个事]
+  llm: false
+
+search:
+  route_top: 20             # 每一路取前 20
+  rrf_k: 60
+  top_chunks: 5             # 合并后返回几块
+  expand: 3                 # 每块前后各扩几条（不跨段）
+  max_chars: 1500
+
+server:
+  host: 127.0.0.1
+  port: 8093
+  index_interval_s: 60
+
+# RAG_PATCH（P3）：提炼层（联想 v1）。话题块结束后用 DeepSeek 写摘要、抽实体与关系。
+distill:
+  enabled: true
+  key_file: persona/config.json   # 相对 state_dir；复用人格判读那把（只读）。测试的 state 是临时目录，天然读不到真密钥
+  self_names: [小鲸鱼]   # 她在聊天里可能被叫的名字（机器人昵称、角色名），模型给出这些名字时也归到 self
+  model: null                # null = 跟人格判读同一个模型
+  daily_limit: 300           # 每天最多调多少次模型（按本地日期，跨重启累加）
+  per_round: 20              # 一轮最多处理几块
+  timeout_s: 30
+  max_tokens: 1500           # RAG_PATCH（P3）输出上限：deepseek-flash 先「思考」，思考 token 也计入 completion，600 时 JSON 会被截断
+  min_chars: 10              # 去掉表情和标点后不足这么多字的块不提炼
+  price: { cache_hit: 0.02, cache_miss: 1, output: 4 }   # 元 / 百万 token（deepseek-flash）
+# 唤醒时自动想起（P2 worker 用；这里先放好默认值）
+recall:
+  tau: 0.4                   # RAG_PATCH（P3）：端到端实测（Qwen3-Embedding-8B + 查询指令前缀）相关旧事 0.40～0.43、无关 0.25～0.39，0.55 会一条都过不了
+  exclude_recent_hours: 12
+  min_chars: 4
+  stopwords: [在吗, 嗯, 嗯嗯, 哈哈, 哈哈哈, 晚安, 早, 早安, 好的, 好, 收到, ok, 行]
+# 联想链（P2 worker 用）
+associate:
+  min_age_days: 2

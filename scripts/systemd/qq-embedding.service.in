@@ -1,0 +1,27 @@
+# SYSTEMD_PATCH：向量记忆的 embedding 服务（llama-server + Qwen3-Embedding-8B Q8，:8091，约 9 GB 显存）
+# 模板 scripts/systemd/qq-embedding.service.in，由 scripts/systemd/install.sh 渲染后装到 ~/.config/systemd/user/。
+[Unit]
+Description=qq-bridge embedding (llama-server Qwen3-Embedding-8B, :8091)
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory={{HOME}}
+Environment=PATH={{PATH}}
+# 和 start-all.sh 一样：空闲显存 < 10 GB（ComfyUI 在生图）、找不到程序或模型、8091 已被占 → 不起。
+# 这是 ExecCondition：不满足时单元回到 inactive、不算失败、不重试；崩溃后自动重启前也会再判一次。
+ExecCondition={{BRIDGE_DIR}}/scripts/systemd/qqb-helper.sh embed-check {{EMBED_BIN}} {{EMBED_MODEL}}
+ExecStart={{EMBED_BIN}} -m {{EMBED_MODEL}} --embedding --pooling last --host 127.0.0.1 --port 8091 -ngl 99 -c 8192 -ub 8192
+# 等 /health 就绪才算启动完成，After= 它的 memory-rag 才接着起；等不到也不算失败（开头的 -）。
+ExecStartPost=-{{BRIDGE_DIR}}/scripts/systemd/qqb-helper.sh wait-health embed 90
+TimeoutStartSec=150
+StandardOutput=append:{{RUN_DIR}}/embed.log
+StandardError=inherit
+# on-failure：崩溃、被 OOM 杀掉会重启；有人手动 kill（多半是想腾显存）就不拉起。
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+
+[Install]
+WantedBy=default.target

@@ -330,6 +330,12 @@ const TOOL_CONFIG_FLAGS = {
   qq_slang_submit: 'slangSubmit',
   qq_send_voice: 'sendVoice',
   qq_list_voices: 'sendVoice',
+  qq_tts_voice: 'ttsVoice',
+  qq_ltm_remember: 'longMemory',
+  qq_ltm_recall: 'longMemory',
+  qq_ltm_update: 'longMemory',
+  qq_ltm_forget: 'longMemory',
+  qq_history_search: 'longMemory',
   // 下面这些曾经漏登记。漏一个不是"多注册一个工具"那么轻：桥接那边按 `v2ToolEnabled(flag)`
   // 在**调用期**一律 403，而这里不登记就等于"控制台显示已关闭、模型每次请求仍收到它的完整
   // 描述与参数 schema，然后调用它、再拿到 403"——既白烧 token（本文件开头 176 行起就是为省这份
@@ -1244,6 +1250,144 @@ if (cfg.socialV2?.voice?.enabled !== false && cfg.socialV2?.tools?.sendVoice !==
         return { content: [{ type: 'text', text: serializeModelData(data) }] };
       } catch (error) {
         return { content: [{ type: 'text', text: `获取语音库失败：${error?.message ?? error}` }], isError: true };
+      }
+    }
+  );
+}
+
+// LTM_PATCH：长期记忆 —— 人物账本（按 QQ 号永久保存）+ 当前会话的聊天存档检索。
+{
+  const ltmCall = async (pathname, token, payload, errLabel) => {
+    try {
+      const data = await agentApi(pathname, {
+        method: 'POST',
+        body: JSON.stringify({ ...payload, token }),
+        headers: { 'x-agent-token': token },
+        timeoutMs: 60000
+      });
+      return { content: [{ type: 'text', text: serializeModelData(data) }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `${errLabel}：${error?.message ?? error}` }], isError: true };
+    }
+  };
+  const CAT = z.enum(['trait', 'fact', 'event', 'pending', 'note']);
+  // LIFE_LOOP_PATCH：约定要能「到点想起」——记的时候填到期日与谁答应的，桥接负责把
+  // 明天 / 周五 / 11月3日 换算成日期；兑现由 AI 看聊天后用 qq_ltm_update 标 status。
+  const DUE_DESC = '约定（pending）的到期日：YYYY-MM-DD，或 今天/明天/后天/周五/下周三/3天后/11月3日（桥接换算）。到期当天你会被提醒';
+  const BY_DESC = '约定是谁答应的：me=你答应的，them=对方答应的';
+  server.tool(
+    'qq_ltm_remember',
+    '把值得长期记住的事记进「人物账本」（按 QQ 号永久保存，会话重建、上下文压缩都不会丢；以后每次唤醒会自动带给你）。category：trait=性格/习惯/喜好，fact=他告诉过你的事（家人、宠物、工作、住哪…），event=一起经历的事/聊过的要紧事，pending=约定、答应过的事、没聊完的话题，note=其它。一件事一条，写具体（带上时间/细节），别记空泛评价，也别逐句记流水账。私聊里记的默认只在这个私聊可见；scope=public 才会在群里也带出来（只对不介意被别人知道的事用）。约定类记得填 due 和 by。',
+    {
+      key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
+      token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
+      userId: z.string().optional().describe('这件事是关于谁的（QQ 号，从消息的 userId 取）；私聊里可省略，默认是对方'),
+      name: z.string().optional().describe('可选：他的称呼/昵称'),
+      category: CAT.describe('类别'),
+      content: z.string().describe('要记住的内容（一句话，具体）'),
+      scope: z.enum(['private', 'public']).optional().describe('可选：private=只在当前会话可见（私聊默认），public=各处可见'),
+      // LIFE_LOOP_PATCH
+      due: z.string().optional().describe(DUE_DESC),
+      by: z.enum(['me', 'them']).optional().describe(BY_DESC),
+      core: z.boolean().optional().describe('true=核心条目（这个人最重要的几件事之一，每次唤醒必带、不会被归档；每人最多 8 条）'),
+      // DECAY_PATCH：新旧事实冲突（子项目 2 · M5）
+      replaces: z.string().optional().describe('这条是在更新一件旧事（比如搬家、换工作、改了主意）时，填旧条目〔〕里的编号；旧的会标成过时，不再带给你')
+    },
+    async ({ key, token, userId, name, category, content, scope, due, by, core, replaces }) => ltmCall('/api/socialV2/ltm-remember', token, { key, userId, name, category, content, scope, due, by, core, replaces }, '记忆写入失败')
+  );
+  server.tool(
+    'qq_ltm_recall',
+    '查看人物账本：传 userId 看这个人的全部长期记忆（含条目编号，可用于修改/删除）；不传 userId 列出账本里有哪些人。唤醒提示里只带了一部分，想确认细节时用它。每条记忆带 memory：清楚 / 有点模糊 / 已淡忘 / 以前（已过时）——模糊和淡忘的，说起来可以带点不确定，别说得像刚发生。',
+    {
+      key: z.string().describe('会话 key'),
+      token: z.string().describe('会话令牌'),
+      userId: z.string().optional().describe('QQ 号；私聊里不传就是对方，群聊里不传则列出所有人'),
+      // DECAY_PATCH：带 query 查到的条目才算「费劲想起」（子项目 2 · M2-a）
+      query: z.string().optional().describe('只想找某件事时填关键词（空格分开，如「猫 生日」），只返回相关条目')
+    },
+    async ({ key, token, userId, query }) => ltmCall('/api/socialV2/ltm-recall', token, { key, userId, query }, '读取记忆失败')
+  );
+  server.tool(
+    'qq_ltm_update',
+    '修改人物账本里的一条记忆（记错了、情况变了）。itemId 是记忆后面〔〕里的编号。约定到期后，看聊天确认结果：兑现了 status=done，没兑现 status=missed，不做了 status=cancelled；没确认前别标。',
+    {
+      key: z.string().describe('会话 key'),
+      token: z.string().describe('会话令牌'),
+      userId: z.string().optional().describe('QQ 号；私聊里可省略'),
+      itemId: z.string().describe('条目编号'),
+      content: z.string().optional().describe('新内容'),
+      category: CAT.optional().describe('可选：改类别'),
+      scope: z.enum(['private', 'public']).optional().describe('可选：改可见范围'),
+      // LIFE_LOOP_PATCH：到期日 / 谁答应的 / 状态 / 核心 / 归档
+      due: z.string().optional().describe(`${DUE_DESC}。传空字符串清除`),
+      // by 带上 '' 才能真正「传空字符串清除」：描述这么写、枚举里却没有空串的话，模型照做会被 zod 拒掉整个调用
+      by: z.enum(['me', 'them', '']).optional().describe(`${BY_DESC}。传空字符串清除`),
+      status: z.enum(['open', 'done', 'missed', 'cancelled']).optional().describe('约定状态：open=还没兑现，done=兑现了，missed=没兑现，cancelled=不做了'),
+      core: z.boolean().optional().describe('true=设为核心条目（每次唤醒必带、不会被归档；每人最多 8 条），false=取消核心'),
+      archived: z.boolean().optional().describe('true=归档（不再出现在唤醒提示里，仍能查到），false=从归档恢复'),
+      // DECAY_PATCH：情况变了 —— 旧的其实已经过时，但不用记新的一条
+      outdated: z.boolean().optional().describe('true=这条已经过时（情况变了），false=取消过时')
+    },
+    async ({ key, token, userId, itemId, content, category, scope, due, by, status, core, archived, outdated }) => ltmCall('/api/socialV2/ltm-update', token, { key, userId, itemId, content, category, scope, due, by, status, core, archived, outdated }, '修改记忆失败')
+  );
+  server.tool(
+    'qq_ltm_forget',
+    '删除人物账本里的一条记忆（过时了、记错了、对方要你忘掉）。itemId 是〔〕里的编号。',
+    {
+      key: z.string().describe('会话 key'),
+      token: z.string().describe('会话令牌'),
+      userId: z.string().optional().describe('QQ 号；私聊里可省略'),
+      itemId: z.string().describe('条目编号')
+    },
+    async ({ key, token, userId, itemId }) => ltmCall('/api/socialV2/ltm-forget', token, { key, userId, itemId }, '删除记忆失败')
+  );
+  // RAG_PATCH：新增 keywords / mode，检索从「所有关键词都要命中」升级为混合检索（语义 + BM25）。
+  // 描述按方案 §3.4 重写：这些要点（query 写整句、keywords 覆盖不同说法、相对时间先换算成日期、
+  // 引用说清日期、查不到不编造）就是「由 AI 在调用时自己改写查询」这一设计的全部约束 ——
+  // 写在参数描述里会被模型忽略，必须放进工具描述。
+  server.tool(
+    'qq_history_search',
+    '翻当前这个会话以前的聊天记录（永久存档，不受会话重建和上下文压缩影响）。想不起之前聊过什么、他哪天说过什么时用它，别凭印象编；只能查当前会话。query 写一句完整的自然语言描述要找的内容；keywords 给 3~8 个原话里可能出现的说法、近义词、人名、关键名词，尽量覆盖不同说法。对方的话里提到时间就**必须**填 from（必要时也填 to）：可以写具体日期 YYYY-MM-DD，也可以直接照写「今天 / 昨天 / 前天 / 大前天 / 本周 / 上周 / 本月 / 上个月」，桥接会自动换算成日期区间；「那天晚上」「上次」这种说不清是哪段时间的不填。返回的是聊天原文片段：引用时说清是哪天说的；查不到就说不记得，不编造；结果很少时可以换个说法或放宽日期再查一次，别反复查。mode 一般不用填（默认 auto，混合检索；keyword 只按关键词匹配）。',
+    {
+      key: z.string().describe('会话 key'),
+      token: z.string().describe('会话令牌'),
+      query: z.string().optional().describe('用一句完整的自然语言描述要找的内容（用于语义检索）'),
+      keywords: z.array(z.string()).max(12).optional().describe('可选：3~8 个原话里可能出现的说法、近义词、人名、关键名词（尽量覆盖不同说法）'),
+      from: z.string().optional().describe('起始日期：YYYY-MM-DD，或直接写 今天/昨天/前天/上周/上个月 等（会自动换算）；问题里提到时间就要填'),
+      to: z.string().optional().describe('结束日期：YYYY-MM-DD，或直接写 今天/昨天/前天/上周/上个月 等（会自动换算）；问题里提到时间就要填'),
+      speaker: z.string().optional().describe('只看某人说的（名字/QQ 号/「我」）'),
+      limit: z.number().int().min(1).max(100).optional().describe('最多返回几条（默认 30，从最近往前）'),
+      context: z.number().int().min(0).max(5).optional().describe('每条命中带上前后几句（默认 0）'),
+      mode: z.enum(['auto', 'keyword', 'semantic']).optional().describe('可选：检索方式，一般不用填')
+    },
+    async ({ key, token, query, keywords, from, to, speaker, limit, context, mode }) => ltmCall('/api/socialV2/history-search', token, { key, query, keywords, from, to, speaker, limit, context, mode }, '检索聊天记录失败')
+  );
+}
+
+// TTS_API_PATCH：文字 → 远程语音合成（控制台「语音合成 API」里配置的模型/音色）→ 当 QQ 语音发出。
+if (cfg.socialV2?.voice?.enabled !== false && cfg.socialV2?.tools?.sendVoice !== false) {
+  server.tool(
+    'qq_tts_voice',
+    '用你的声音说一句话：把 text 用控制台配置好的语音合成模型（音色已由管理员选好）合成，并直接作为 QQ 语音发到指定会话，一步完成。注意：① 只适合 1~3 句口语短句（晚安、撒娇、情绪化的一句话），不要念长段落、不要 Markdown、不要列表；② style 可选，用一句自然语言描述这次的语气（如「困得迷迷糊糊、慢吞吞地」「憋着笑」），也可以在 text 开头写 (风格) 标签或在句中插 [笑]、[叹气] 这类音频标签；③ 受语音频率上限约束，超限会被拒绝；④ 只有返回 verified=true 才能说你发了语音；⑤ 语音是强表达，闲聊里偶尔用一次即可，别每句都发。',
+    {
+      key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
+      token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
+      text: z.string().describe('要说的话（口语、第一人称、1~3 句）'),
+      style: z.string().optional().describe('可选：这次说话的语气/情绪，一句自然语言'),
+      label: z.string().optional().describe('可选：写进会话记录里的说明'),
+      verify: z.boolean().optional().describe('是否回读校验语音已落地（默认 true）')
+    },
+    async ({ key, token, text, style, label, verify }) => {
+      try {
+        const data = await agentApi('/api/socialV2/tts-voice', {
+          method: 'POST',
+          body: JSON.stringify({ key, token, text: String(text), style: style || '', label: label || '', verify: verify !== false }),
+          headers: { 'x-agent-token': token },
+          timeoutMs: 300000
+        });
+        return { content: [{ type: 'text', text: serializeModelData(data) }] };
+      } catch (error) {
+        return { content: [{ type: 'text', text: `语音合成发送失败：${error?.message ?? error}` }], isError: true };
       }
     }
   );

@@ -54,6 +54,34 @@ import {
   applyStickerNote,
   markStickerUsed
 } from './sticker-lib.js';
+// OWN_LIFE_PATCH：她自己的生活（定时静默唤醒）
+import { createOwnLife } from './own-life.js';
+// LIFE_LOOP_PATCH：生活回路（到期约定主动提醒 + own-life 里的日记与「忽然想起」；docs/design/LIFE_LOOP_SPEC.md §6）
+import { createLifeLoop } from './life-loop.js';
+// TTS_API_PATCH：远程语音合成接口（默认小米 MiMo，兼容 OpenAI 风格接口）
+import { createTtsApi, readJsonBody as readLargeJsonBody } from './tts-api.js';
+// LTM_PATCH：长期记忆（人物账本 + 聊天存档）
+import { createLongMemory } from './long-memory.js';
+// DECAY_PATCH：记忆代谢（遗忘曲线，docs/design/MEMORY_DECAY_SPEC.md）
+import { createMemoryDecay } from './memory-decay.js';
+// RAG_PATCH：memory-rag 索引服务客户端（语义 + BM25 混合检索；失败自动降级为本地关键词检索）
+import { createMemoryRagClient, normalizeDateRange, normalizeKeywords } from './memory-rag-client.js';
+// SUGGEST_PATCH：账本建议（候选挑选 / 计次 / 采用 / 控制台；docs/design/LEDGER_SUGGEST_SPEC.md §4）
+import { createLedgerSuggest } from './ledger-suggest.js';
+// PERSONA_PATCH：人格与情绪（性格养成 + 实时情绪；docs/design/PERSONA_MIND_PLAN.md §5）
+import { createPersona } from './persona.js';
+// REPORT_PATCH：每日报表（docs/design/DAILY_REPORT_SPEC.md；接口约定见 docs/design/worker-kit/report/contract.md）
+import { createDailyReport, isErrorLine, dayOf } from './daily-report.js';
+
+// LIFE_LOOP_PATCH（规格 §8.1）：这三种唤醒本来就是桥接自己产出的「本地文案」——own-life 的
+// 自己的时间、到期的约定、每周周报。以前它们会被通用唤醒分支整段替换掉（F1），现在有文案时
+// 走专门的分支；没有文案（例如重试/补发的旧队列项）时仍按原来的分支走。
+// 放在模块顶层而不是 main() 里：唤醒可能由定时器在任何时刻触发，常量必须已经就绪。
+const LOCAL_TEXT_WAKES = new Map([
+  ['own-life', '这是你自己的时间，不是有人找你'],
+  ['promise-due', '今天有到期的约定'],
+  ['persona-weekly', '这周的你'],
+]);
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -72,6 +100,11 @@ const TOOL_LOG_FILE = path.join(STATE_DIR, 'tool-calls.jsonl');
 const TOKEN_USAGE_FILE = path.join(STATE_DIR, 'token-usage.jsonl');
 const ACTIVITY_LOG = path.join(STATE_DIR, 'qq-activity.log');
 const BRIDGE_LOG = path.join(STATE_DIR, 'bridge.log');
+// RAG_PATCH（P3）：唤醒时自动想起的影子日志（docs/design/ASSOCIATION_SPEC.md §9.2）。
+// 只存消息编号、摘要编号与分数 —— 不存任何原文；控制台显示时现查存档与摘要，
+// 所以删存档不用回头改日志（删过的自然显示「（已删除）」）。
+const RECALL_SHADOW_DIR = path.join(STATE_DIR, 'long-memory', 'recall-shadow');
+const RECALL_SHADOW_DAYS = 3;
 
 /**
  * 模式拼写的**唯一**归一入口（输入边界）。
@@ -502,7 +535,9 @@ function isSilentMarker(text) {
 
 // DSH MCP 发送类工具：一旦 AI 在回合里调用过这些工具，说明消息已经由工具发出，
 // 桥接应跳过该回合的自动转发，避免“工具发一条 + 自动转发一条”的重复。
-const SEND_TOOL_RE = /^mcp__snowluma__qq_(send_group_message|send_private_message|reply|send_burst|send_message)$/;
+// 语音 / 表情 / 戳一戳也算「已经开口」：只发了一条语音的回合，结尾那段文字是 AI 的内部小结
+// （常带工具返回的路径、令牌），不能再被当成回复自动转发出去。
+const SEND_TOOL_RE = /^mcp__snowluma__qq_(send_group_message|send_private_message|reply|send_burst|send_message|send_voice|tts_voice|send_sticker|send_poke)$/;
 function isSendToolName(name) {
   return SEND_TOOL_RE.test(String(name ?? ''));
 }
@@ -872,6 +907,17 @@ function loadConfig() {
         maxCount: 5
       },
       ...(file.socialV2 ?? {})
+    },
+    // LIFE_LOOP_PATCH（规格 §8.2）：生活回路的开关与参数，可缺省。
+    // 默认值在这里写一份，是为了让控制台/运维在 config.json 里一眼能看到有哪些可调项；
+    // 真正的兜底仍在 src/life-loop.js（它自己会把非法/缺失的值收敛成安全默认）。
+    lifeLoop: {
+      enabled: true,
+      recallPerDay: 2,
+      cooldownDays: 7,
+      promiseWake: { enabled: true, at: '10:00', maxPerDay: 5 },
+      quiet: [3, 8],
+      ...(file.lifeLoop ?? {})
     }
   };
 
@@ -908,6 +954,10 @@ function loadConfig() {
     collectSticker: true,
     getSelfImage: true,
     sendVoice: false,
+    // TTS_API_PATCH：qq_tts_voice（文字 → 远程 TTS → 语音）。同时受 sendVoice 总闸约束。
+    ttsVoice: true,
+    // LTM_PATCH：qq_ltm_* / qq_history_search（长期记忆）
+    longMemory: true,
     ...(cfg.socialV2.tools ?? {})
   };
 
@@ -1199,6 +1249,15 @@ function localClock(atMs = Date.now()) {
 
 const appendBridgeLog = createCappedLogger(BRIDGE_LOG, 2000);
 
+// REPORT_PATCH：每日报表的模块级状态（docs/design/DAILY_REPORT_SPEC.md §4.2、§4.3）。
+// 报表实例在 main() 里创建；但 log() 定义在 main 之外，报错计数钩子只能走模块级变量。
+// recentErrors 只在内存里：给今天的视图看最近 5 行报错原文，绝不落盘（快照只存次数）。
+let dailyReport = null;
+let reportHook = null;
+const recentErrors = [];
+// 桥接进程启动时间（模块加载时记一次），报表的「已运行多久」用它。
+const bridgeStartedAt = Date.now();
+
 function log(...args) {
   let line;
   try {
@@ -1214,6 +1273,9 @@ function log(...args) {
   // 而 log() 是从 socket 事件回调里被调用的 —— 一旦抛出就会变成未捕获异常把进程带走。
   try { console.log(line); } catch {}
   appendBridgeLog(`${line}\n`);
+  // REPORT_PATCH：报错行计数钩子。必须同步、O(1)、绝不抛出 —— log() 会从 socket
+  // 回调里被调用，一旦抛出就会变成未捕获异常把进程带走。
+  try { reportHook?.(line); } catch {}
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const convKey = (kind, id) => `${kind}:${id}`;
@@ -1552,6 +1614,391 @@ async function main() {
     }
   }
 
+  // TTS_API_PATCH：配置、两段模板原文、克隆样本、试听缓存都放在 state/tts-api/ 下。
+  const ttsApi = createTtsApi({ stateDir: path.join(STATE_DIR, 'tts-api'), log });
+  // DECAY_PATCH：记忆代谢（遗忘曲线，docs/design/MEMORY_DECAY_SPEC.md）。
+  // loadConfig 只保留已知顶层键，decay 不在其中，所以和 memoryRag 一样从 config.json 补读。
+  // 创建失败只告警：遗忘只影响「先带谁、会不会自己冒出来」，不能把桥接带崩。
+  let decay = null;
+  try {
+    const decayFileCfg = readJsonSafe(path.join(ROOT, 'config.json'), null)?.decay ?? {};
+    decay = createMemoryDecay({ statePath: path.join(STATE_DIR, 'memory-decay.json'), options: decayFileCfg, log });
+  } catch (error) {
+    log(`⚠️ 遗忘模块未启用：${error?.message ?? error}`);
+  }
+  // LTM_PATCH：长期记忆。存档与账本写入前都去掉已知会话令牌。
+  const ltm = createLongMemory({
+    stateDir: path.join(STATE_DIR, 'long-memory'),
+    redact: (t) => redactKnownTokensOnly(t),
+    log,
+    // LIFE_LOOP_PATCH（规格 §8.2）：约定从「还没兑现」变成 done / missed 时，让她的情绪跟着变。
+    // 走规则来源（persona.onPromise 里 source='rules'），影子期内不改判读管线。日志不写约定原文。
+    onPromiseClosed: (info) => {
+      persona?.onPromise?.({ key: info.viewerKey || info.item.sourceKey, userId: info.userId, name: info.name, by: info.item.by, outcome: info.to });
+      log(`[ltm] 约定结果 ${info.userId}·${info.to}（${info.item.by ?? '未填'}）`);
+    },
+    // DECAY_PATCH（规格 §7.4）：注入时按牢固度挑「先带哪几条」，冻结的不带。
+    // persona 在 ltm 之后才创建，但 decayOf 只在唤醒时被调用，那时已经初始化（onPromiseClosed 同理）。
+    decayOf: decay
+      ? (item, uid) => {
+        const st = ltmDecayState(item, uid);
+        return st ? { R: st.R, frozen: st.frozen } : null;
+      }
+      : null,
+  });
+  // RAG_PATCH：memory-rag 客户端。loadConfig 只保留已知顶层键，memoryRag 不在其中，
+  // 这里从同一份 config.json 补读（用户不配就用客户端默认的 127.0.0.1:8093）。
+  // 配成非回环地址时客户端会拒绝创建：只告警、不把整个桥接带崩，检索退回关键词。
+  let rag = null;
+  try {
+    const ragFileCfg = readJsonSafe(path.join(ROOT, 'config.json'), null)?.memoryRag ?? {};
+    // RAG_PATCH（P3）：自动想起的 /recall 走唤醒路径，超时单独配（memoryRag.recall.timeoutMs）。
+    rag = createMemoryRagClient({
+      url: ragFileCfg.url,
+      timeoutMs: ragFileCfg.timeoutMs,
+      recallTimeoutMs: ragFileCfg.recall?.timeoutMs,
+      log
+    });
+  } catch (error) {
+    log(`⚠️ memory-rag 客户端未启用：${error?.message ?? error}`);
+  }
+
+  // SUGGEST_PATCH：账本建议（docs/design/LEDGER_SUGGEST_SPEC.md §4；接口约定见
+  // docs/design/worker-kit/suggest/contract.md）。提炼器写进 memory-rag 的候选，在来源会话
+  // 下次唤醒时给她看，记不记由她自己定。创建失败只告警：唤醒与记账本照常。
+  // mode=off / 没配 memory-rag 时模块照样创建，plan() 直接返回 null（不发请求）。
+  // 配置和 memoryRag 一样从 config.json 补读（loadConfig 只保留已知顶层键）。
+  let ledgerSuggest = null;
+  try {
+    const suggestFileCfg = readJsonSafe(path.join(ROOT, 'config.json'), null)?.memoryRag?.suggest ?? {};
+    ledgerSuggest = createLedgerSuggest({
+      rag,
+      ltm,
+      statePath: path.join(STATE_DIR, 'long-memory', 'suggest-state.json'),
+      config: suggestFileCfg,
+      log
+    });
+  } catch (error) {
+    log(`⚠️ 账本建议模块未启用：${error?.message ?? error}`);
+    ledgerSuggest = null;
+  }
+
+  // ── REPORT_PATCH：每日报表接线（docs/design/DAILY_REPORT_SPEC.md §4.3；
+  //    接口约定见 docs/design/worker-kit/report/contract.md §2～§4） ──
+  // 报表不调模型、不花钱：全部从存档 / 用量文件 / 计数文件现算。
+  // 创建失败只告警，桥接照常启动（控制台的报表接口会回 503）。
+  // 今天的 live 状态（SnowLuma / DSH / 最后收信）由桥接在内存里维护。
+  const reportLive = {
+    snowluma: { connected: false, downSinceMs: bridgeStartedAt },
+    dsh: { downSinceMs: bridgeStartedAt },
+    lastIncomingAt: null
+  };
+  /** 账本现状：与 GET /api/memory-decay 同口径（未归档条目总数、其中冻结（不含已过时）、已过时）。拿不到就 null。 */
+  function ltmTotalsForReport() {
+    if (!ltm) return null;
+    try {
+      let total = 0;
+      let faded = 0;
+      let outdated = 0;
+      for (const p of ltm.listPeople()) {
+        const active = (ltm.personView(p.userId)?.items ?? []).filter((x) => !x.archivedAt);
+        total += active.length;
+        faded += active.filter((x) => !x.outdatedAt && ltmDecayState(x, p.userId)?.frozen).length;
+        outdated += active.filter((x) => x.outdatedAt).length;
+      }
+      return { total, faded, outdated };
+    } catch { return null; }
+  }
+  /** 报表接口用：`YYYY-MM-DD` 且真实存在（2026-13-40 不算）。 */
+  function reportIsValidDay(value) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(value ?? ''))) return false;
+    const [y, m, d] = String(value).split('-').map(Number);
+    const dt = new Date(y, m - 1, d);
+    return dt.getFullYear() === y && dt.getMonth() === m - 1 && dt.getDate() === d;
+  }
+  /** 报表接口用：按本机时区加减天数（跨月 / 跨年交给 Date）。 */
+  function reportShiftDay(value, delta) {
+    const [y, m, d] = String(value).split('-').map(Number);
+    const dt = new Date(y, m - 1, d + delta);
+    const p = (n) => String(n).padStart(2, '0');
+    return `${dt.getFullYear()}-${p(dt.getMonth() + 1)}-${p(dt.getDate())}`;
+  }
+  /** 报表接口用：尽力而为的显示名（私聊用账本里的名字，群用群号）。任何异常都只是少一个 label。 */
+  function reportLabels(keys) {
+    const labels = {};
+    for (const key of keys) {
+      try {
+        const m = /^(private|group):(\d+)$/.exec(String(key));
+        if (!m) continue;
+        const id = m[2];
+        if (m[1] === 'group') { labels[key] = `群 ${id}`; continue; }
+        const name = ltm.listPeople().find((p) => String(p.userId) === id)?.name
+          || ltm.personView(id)?.name
+          || '';
+        if (name) labels[key] = `${name}（私聊）`;
+      } catch { /* 少一个显示名不影响页面（页面回退显示原始 key） */ }
+    }
+    return labels;
+  }
+  /** 今天的 live（contract §1）。只在这里组装；W1 的 compute 把它原样挂到 report.live，快照里不会出现。 */  async function buildReportLive() {
+    const live = {
+      startedAt: bridgeStartedAt,
+      lastIncomingAt: reportLive.lastIncomingAt,
+      snowluma: { connected: !!reportLive.snowluma.connected, downSinceMs: reportLive.snowluma.downSinceMs ?? null },
+      dsh: { ready: !!dshReady, downSinceMs: reportLive.dsh.downSinceMs ?? null },
+      ragConfigured: !!rag,
+      rag: null,
+      recentErrors: recentErrors.slice(),
+      ltmTotals: ltmTotalsForReport()
+    };
+    if (rag) {
+      // health() 自带 3 秒超时、失败返回 null；这里不再重试。
+      try {
+        const h = await rag.health();
+        if (h && typeof h === 'object') {
+          live.rag = {
+            ok: !!h.ok,
+            embedding: !!h.embedding?.healthy,
+            distill: h.distill && typeof h.distill === 'object'
+              ? { pending: h.distill.pending ?? null, failed: h.distill.failed ?? null, lastError: h.distill.last_error ?? null }
+              : null
+          };
+        }
+      } catch { live.rag = null; }
+    }
+    return live;
+  }
+  /**
+   * 启动时用当前月 / 上个月存档文件的**末尾 64 KB** 找最后一条 dir=in 的时间。
+   * 只读尾巴：几个月的存档可能有几十 MB，启动时不该整份读。
+   */
+  function initLastIncomingAt() {
+    const archiveRoot = path.join(STATE_DIR, 'long-memory', 'archive');
+    const nowDate = new Date();
+    nowDate.setDate(1);
+    nowDate.setMonth(nowDate.getMonth() - 1);
+    const prevMonth = `${nowDate.getFullYear()}-${String(nowDate.getMonth() + 1).padStart(2, '0')}`;
+    const months = [dayOf(Date.now()).slice(0, 7), prevMonth];
+    const tailOf = (file) => {
+      const st = fs.statSync(file);
+      const len = Math.min(st.size, 64 * 1024);
+      const buf = Buffer.alloc(len);
+      const fd = fs.openSync(file, 'r');
+      try { fs.readSync(fd, buf, 0, len, st.size - len); } finally { fs.closeSync(fd); }
+      return buf.toString('utf8');
+    };
+    let latest = null;
+    for (const entry of fs.readdirSync(archiveRoot, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      for (const month of months) {
+        const file = path.join(archiveRoot, entry.name, `${month}.jsonl`);
+        if (!fs.existsSync(file)) continue;
+        // 被 64 KB 截断的第一行多半是半行：JSON.parse 失败跳过即可。
+        for (const line of tailOf(file).split('\n')) {
+          if (!line.trim()) continue;
+          let row;
+          try { row = JSON.parse(line); } catch { continue; }
+          if (row?.deleted === true || row?.dir !== 'in') continue;
+          // REPORT_PATCH：存档行的 t 是 ISO 字符串，Number() 会得到 NaN（旧代码因此永远读到 null）。
+          const t = typeof row.t === 'number' ? row.t : Date.parse(row.t);
+          if (!Number.isFinite(t)) continue;
+          if (latest == null || t > latest) latest = t;
+        }
+      }
+    }
+    return latest;
+  }
+  try { reportLive.lastIncomingAt = initLastIncomingAt(); } catch { reportLive.lastIncomingAt = null; }
+  try {
+    dailyReport = createDailyReport({
+      stateDir: STATE_DIR,
+      // W1 只在写「昨天」的完整快照时取一次账本现状（contract §4）。
+      getLive: () => ({ ltmTotals: ltmTotalsForReport() }),
+      log
+    });
+    reportHook = (line) => {
+      if (!isErrorLine(line)) return;
+      dailyReport?.count('error');
+      recentErrors.unshift({ at: Date.now(), text: String(line).slice(0, 120) });
+      if (recentErrors.length > 5) recentErrors.length = 5;
+    };
+    // 每分钟一次心跳（service.longestGapMin 靠它算）；启动 30 秒后补一次快照，之后每 10 分钟一次。
+    setInterval(() => { try { dailyReport?.heartbeat(); } catch {} }, 60 * 1000).unref?.();
+    const runSnapshotDue = () => {
+      Promise.resolve(dailyReport?.snapshotDue?.()).then((days) => {
+        for (const day of Array.isArray(days) ? days : []) log(`[report] 已写快照：${day}`);
+      }).catch(() => {});
+    };
+    setTimeout(runSnapshotDue, 30 * 1000).unref?.();
+    setInterval(runSnapshotDue, 10 * 60 * 1000).unref?.();
+  } catch (error) {
+    dailyReport = null;
+    reportHook = null;
+    log(`⚠️ 每日报表模块未启用：${error?.message ?? error}`);
+  }
+
+  // PERSONA_PATCH：人格与情绪（docs/design/PERSONA_MIND_PLAN.md §5、PERSONA_IMPL_PLAN.md）。
+  // 设置与判读密钥放 state/persona/config.json（控制台「人格与情绪」页维护），不进 config.json。
+  // 出厂值在控制台确认之前它什么都不做；创建失败只告警，不影响桥接。
+  let persona = null;
+  try {
+    persona = createPersona({
+      stateDir: path.join(STATE_DIR, 'persona'),
+      roleName: () => readRoleState().role || 'default',
+      roleCard: (name) => { try { return fs.readFileSync(path.join(ROOT, 'roles', `${path.basename(String(name))}.md`), 'utf8'); } catch { return ''; } },
+      sessions: () => state.sessions,
+      ownerQQ: () => String(cfg.ownerQQ ?? ''),
+      // PERSONA_PATCH（v2 §8 A1）：关系冷启动用聊天存档的人物统计（消息数、首末次时间）。
+      peopleStats: () => ltm.listPeople(),
+      redact: (t) => redactKnownTokensOnly(t),
+      log,
+      onWeeklyReport: (report) => {
+        if (!cfg.ownerQQ || currentMode !== 'reserved2' || socialV2.paused) return;
+        const text = `【这周的你】下面是你这一周性格和关系的变化（桥接根据聊天自动统计）。想的话，用 diary_write 以自己的口吻写一段「这周的我」；不想写就算了，不用回复，也别发到 QQ。\n\n${report.markdown}`;
+        Promise.resolve(deliverPrompt('private:' + String(cfg.ownerQQ), text, { silent: true, wakeReason: 'persona-weekly' })).catch(() => {});
+      }
+    });
+    persona.start();
+  } catch (error) {
+    log(`⚠️ 人格与情绪模块未启用：${error?.message ?? error}`);
+  }
+
+  // ── DECAY_PATCH：记忆代谢的记账助手（子项目 2 · docs/design/MEMORY_DECAY_SPEC.md） ──
+  // ownerId 每次现取（主人号和白名单都能热重载）；亲密度取人格模块的关系，没有就是 undefined。
+  function ownerId() { return String(cfg.ownerQQ ?? ''); }
+  function intimacyOf(uid) {
+    try { return persona?.relationOf?.(uid)?.intimacy; } catch { return undefined; }
+  }
+  /** 一条账本条目此刻的遗忘状态；遗忘模块没启用 / 算不出来时返回 null。 */
+  function ltmDecayState(item, uid) {
+    if (!decay) return null;
+    try {
+      return decay.state('ltm:' + item.id, decay.ltmMeta(item, { ownerQQ: ownerId(), userId: String(uid), intimacy: intimacyOf(uid) }));
+    } catch { return null; }
+  }
+  /**
+   * 她想起一条账本（good = 顺利 / hard = 费劲）：返回是否真的记了一次。
+   * 已过时的条目不复习（它不该再被加固）；遗忘模块出错只当没记过，不影响工具本身的成功响应。
+   */
+  function ltmReview(item, uid, rating) {
+    if (!decay) return false;
+    if (item?.outdatedAt) return false;
+    try {
+      const meta = decay.ltmMeta(item, { ownerQQ: ownerId(), userId: String(uid), intimacy: intimacyOf(uid) });
+      return decay.review('ltm:' + item.id, meta, rating) !== false;
+    } catch { return false; }
+  }
+  /** 给 AI 看的「记得有多清楚」（规格 §10.2）。已过时的优先；豁免（核心 / 未了结约定）一律清楚。 */
+  function ltmMemoryLabel(item, uid) {
+    if (item?.outdatedAt) return '以前（已过时）';
+    const st = ltmDecayState(item, uid);
+    if (!st) return null;
+    if (st.exempt) return '清楚';
+    if (st.frozen) return '已淡忘';
+    return st.R >= 0.8 ? '清楚' : '有点模糊';
+  }
+  /** 控制台的 person：每条带上遗忘状态（R 保留 3 位、S 保留 1 位；算不出来为 null）。 */
+  function ltmPersonForConsole(uid) {
+    const v = ltm.personView(uid);
+    if (!v) return null;
+    return {
+      ...v,
+      items: v.items.map((it) => {
+        const st = ltmDecayState(it, uid);
+        return {
+          ...it,
+          decay: st
+            ? { R: Math.round(st.R * 1000) / 1000, S: Math.round(st.S * 10) / 10, frozen: !!st.frozen, exempt: !!st.exempt }
+            : null
+        };
+      })
+    };
+  }
+  /**
+   * DECAY_PATCH（规格 M2-c）：检索命中的存档消息只在**主人私聊**里算「费劲想起」。
+   * refs 是桥接内部的行号，不外发；返回给 AI 的 JSON 在调用处逐字段拼，与接入前逐字相同。
+   * 整段自己 try/catch：遗忘模块坏了也不能让检索失败。
+   */
+  function reviewHistoryHits(key, refs) {
+    try {
+      if (!decay) return;
+      if (String(key) !== `private:${ownerId()}`) return;
+      if (!Array.isArray(refs) || !refs.length) return;
+      const rows = ltm.rowsAt(key, refs);
+      if (!rows.length) return;
+      const stripBrackets = (s) => String(s ?? '').replace(/\[[^\]\n]*\]/g, '').trim();
+      // 消息单元的素材规则与 life-loop.js 一致：对方发来的、去掉 [图片] 这类占位符后 ≥ 12 字。
+      const picked = [];
+      const seen = new Set();
+      for (const row of rows) {
+        if (picked.length >= 5) break;
+        if (row.dir !== 'in') continue;
+        if ([...stripBrackets(row.text)].length < 12) continue;
+        const id = `msg:${row.msgId ? String(row.msgId) : row.t}`;
+        if (seen.has(id)) continue;
+        seen.add(id);
+        picked.push({ row, id });
+      }
+      if (!picked.length) return;
+      // 判读明细按「这批行里最早的时间」往前一分钟起读（和 life-loop 的取法一致）。
+      const times = rows.map((r) => Date.parse(r.t)).filter((t) => Number.isFinite(t));
+      const sinceMs = (times.length ? Math.min(...times) : Date.now()) - 60000;
+      let appraisals = null;
+      try {
+        const m = persona?.appraisalByMsg?.(key, { sinceMs });
+        appraisals = m instanceof Map ? m : null;
+      } catch { appraisals = null; }
+      for (const { row, id } of picked) {
+        const a = appraisals && row.msgId ? appraisals.get(String(row.msgId)) : undefined;
+        const meta = decay.msgMeta(row, { salience: a?.salience, intensity: a?.intensity, intimacy: intimacyOf(ownerId()) });
+        decay.review(id, meta, 'hard');
+      }
+      log(`[decay] history-search 复习 ${picked.length} 条消息`);
+    } catch (e) {
+      log(`[decay] history-search 复习失败：${e?.message ?? e}`);
+    }
+  }
+
+  /** 这个会话此刻相关的人：私聊就是对方；群聊取最近说过话的人（最多 6 个）。 */
+  function ltmPeopleFor(key, st) {
+    const m = /^(group|private):(\d+)$/.exec(String(key));
+    if (!m) return [];
+    if (m[1] === 'private') return [m[2]];
+    const ids = [];
+    const msgs = [...(Array.isArray(st?.unread) ? st.unread : []), ...(Array.isArray(st?.recentMessages) ? st.recentMessages.slice(-30) : [])];
+    for (let i = msgs.length - 1; i >= 0 && ids.length < 6; i -= 1) {
+      const uid = msgs[i] && !msgs[i].isSelf ? String(msgs[i].userId ?? '') : '';
+      if (/^\d+$/.test(uid) && !ids.includes(uid)) ids.push(uid);
+    }
+    return ids;
+  }
+
+  // LTM_PATCH：一次性回填 —— 某会话还没有存档时，把桥接缓存里的最近消息先写进去（只做一次）。
+  setTimeout(() => {
+    try {
+      for (const [k, st] of socialV2.conversations.entries()) {
+        if (!/^(group|private):\d+$/.test(k) || ltm.hasArchive(k)) continue;
+        const msgs = (Array.isArray(st?.recentMessages) ? st.recentMessages : []).filter((m) => m && (m.text || m.plain));
+        for (const m of msgs) {
+          ltm.archive(k, {
+            dir: m.isSelf ? 'out' : 'in',
+            userId: m.isSelf ? null : (m.userId ?? (k.startsWith('private:') ? k.slice(8) : null)),
+            name: m.isSelf ? '' : (m.sender === '私聊' ? '' : m.sender),
+            text: m.plain || m.text,
+            msgId: m.messageId ?? null,
+            at: m.time ?? m.at ?? null
+          });
+        }
+        if (msgs.length) log(`[ltm] ${k} 已从缓存回填 ${msgs.length} 条历史消息到存档`);
+      }
+    } catch (e) { log(`[ltm] 回填失败：${e?.message ?? e}`); }
+  }, 8000).unref?.();
+
+  function ltmBlockFor(key, st) {
+    if (cfg.socialV2?.tools?.longMemory === false) return '';
+    try { return ltm.renderFor(ltmPeopleFor(key, st), key); } catch { return ''; }
+  }
+
   function voiceCfg() {
     const v = cfg.socialV2?.voice ?? {};
     return {
@@ -1809,6 +2256,8 @@ async function main() {
   function recordVoiceSentV2(key, sent, label) {
     const st = getSocialV2State(key);
     const display = label || `[语音 ${sent.detail}]`;
+    ltm.archive(key, { dir: 'out', text: display.startsWith('[语音') ? display : `[语音] ${display}`, msgId: sent.messageId ?? null });
+    persona?.onOutgoing({ key }); // PERSONA_PATCH
     const entry = {
       messageId: sent.messageId ? String(sent.messageId) : null,
       sender: '我',
@@ -2902,6 +3351,7 @@ async function main() {
       reconcileSessionPolicies();
       if (!dshReady) {
         dshReady = true;
+        reportLive.dsh.downSinceMs = null; // REPORT_PATCH：DSH 恢复，清掉中断起点
         lastMode = currentMode;
         log(`DSH 已就绪（模式: ${currentMode}）`);
         if (currentMode === 'reserved2') {
@@ -2938,6 +3388,7 @@ async function main() {
       }
     } else if (dshReady) {
       dshReady = false;
+      reportLive.dsh.downSinceMs = Date.now(); // REPORT_PATCH：记下 DSH 从什么时候开始不可用
       log('⚠️ DSH 不可用（重启中？），QQ 消息将入队等待');
     }
   };
@@ -3410,6 +3861,448 @@ async function main() {
             res.end(fs.readFileSync(path.join(ROOT, 'public', 'console.html'), 'utf8'));
           } catch {
             res.end('控制台页面缺失：qq-bridge/public/console.html');
+          }
+          return;
+        }
+        // ── PERSONA_PATCH：人格与情绪管理接口（仅控制台；AI 的工具调用一律拒绝，她改不了自己的数值） ──
+        if (url.pathname.startsWith('/api/persona/')) {
+          if (req.headers['x-agent-call'] !== undefined || req.headers['x-agent-token'] !== undefined) { sendJson({ ok: false, error: '人格接口只对控制台开放' }, 403); return; }
+          if (!persona) { sendJson({ ok: false, error: '人格与情绪模块未启用（看 bridge.log）' }, 503); return; }
+          try {
+            const pc = persona.console;
+            if (req.method === 'GET') {
+              if (url.pathname === '/api/persona/status') { sendJson({ ok: true, ...pc.status() }); return; }
+              if (url.pathname === '/api/persona/people') { sendJson({ ok: true, people: pc.people() }); return; }
+              if (url.pathname === '/api/persona/evidence') { sendJson({ ok: true, evidence: pc.evidence(url.searchParams.get('limit')) }); return; }
+              if (url.pathname === '/api/persona/history') { sendJson({ ok: true, snapshots: pc.snapshots(), reports: pc.reports() }); return; }
+              if (url.pathname === '/api/persona/report') { sendJson({ ok: true, markdown: pc.report(url.searchParams.get('name')) }); return; }
+              // PERSONA_PATCH（v2 §8 A1）：关系冷启动预览（只读，不写盘）。
+              if (url.pathname === '/api/persona/seed') { sendJson({ ok: true, ...pc.seedPreview() }); return; }
+              sendJson({ ok: false, error: '未知接口' }, 404);
+              return;
+            }
+            if (req.method !== 'POST') { sendJson({ ok: false, error: '不支持的方法' }, 405); return; }
+            const body = await readBody();
+            if (url.pathname === '/api/persona/config') {
+              // REPORT_PATCH：人格开注入的日期标记（只记 false → true 那一次；保存失败不记）。
+              const injectBefore = (() => { try { return pc.status()?.inject === true; } catch { return false; } })();
+              const saved = pc.saveConfig(body);
+              if (!injectBefore && saved?.settings?.inject === true) dailyReport?.count('injectOn');
+              sendJson({ ok: true, ...saved });
+              return;
+            }
+            if (url.pathname === '/api/persona/factory/propose') { sendJson({ ok: true, proposal: await pc.proposeFactory() }); return; }
+            if (url.pathname === '/api/persona/factory/confirm') { sendJson({ ok: true, core: pc.confirmFactory(body) }); return; }
+            if (url.pathname === '/api/persona/lock') { sendJson({ ok: true, core: pc.lock(String(body.trait ?? ''), body.locked === true) }); return; }
+            if (url.pathname === '/api/persona/rollback') { sendJson({ ok: true, ...pc.rollback(String(body.day ?? '')) }); return; }
+            if (url.pathname === '/api/persona/nightly') { sendJson({ ok: true, result: await pc.runNightly() }); return; }
+            // PERSONA_PATCH（v2 §8）：关系冷启动写入（body.userIds 可选，再按它过滤）；好恶保存不重提出厂。
+            if (url.pathname === '/api/persona/seed') { sendJson({ ok: true, ...pc.seedApply(body.userIds) }); return; }
+            if (url.pathname === '/api/persona/prefs') { sendJson({ ok: true, core: pc.savePrefs(body.prefs) }); return; }
+            // PERSONA_PATCH（v2 §12.1）：角色卡只是小改时，把当前版本记成已同步。
+            if (url.pathname === '/api/persona/card-ack') { sendJson({ ok: true, card: pc.ackCard() }); return; }
+            sendJson({ ok: false, error: '未知接口' }, 404);
+          } catch (error) {
+            sendJson({ ok: false, error: String(error?.message ?? error) }, 400);
+          }
+          return;
+        }
+        // ── LTM_PATCH：长期记忆管理接口（仅控制台） ──
+        if (url.pathname.startsWith('/api/ltm/')) {
+          try {
+            if (req.method === 'GET' && url.pathname === '/api/ltm/people') {
+              sendJson({ ok: true, people: ltm.listPeople(), keys: ltm.archiveKeys(), categories: ltm.CATEGORIES });
+              return;
+            }
+            if (req.method === 'GET' && url.pathname === '/api/ltm/person') {
+              // DECAY_PATCH：每个条目附遗忘状态（R / S / frozen / exempt）。
+              sendJson({ ok: true, person: ltmPersonForConsole(url.searchParams.get('userId')) });
+              return;
+            }
+            if (req.method === 'GET' && url.pathname === '/api/ltm/search') {
+              const key = String(url.searchParams.get('key') ?? '');
+              const q = Object.fromEntries(url.searchParams);
+              sendJson({ ok: true, key, stats: ltm.archiveStats(key), ...ltm.search(key, { ...q, limit: q.limit || 50 }) });
+              return;
+            }
+            // ── RAG_PATCH（P2）：存档浏览 —— 控制台按日期翻、挑要删的行 ──
+            if (req.method === 'GET' && url.pathname === '/api/ltm/archive/rows') {
+              const key = String(url.searchParams.get('key') ?? '');
+              // key 必须合法且真的有存档：控制台不该能凭猜出来的 key 翻别人的会话。
+              if (!/^(group|private):\d+$/.test(key) || !ltm.archiveKeys().includes(key)) {
+                throw new Error('会话 key 不合法或没有存档');
+              }
+              const r = ltm.listArchiveRows(key, {
+                from: url.searchParams.get('from') ?? '',
+                to: url.searchParams.get('to') ?? '',
+                limit: url.searchParams.get('limit') ?? 200
+              });
+              sendJson({ ok: true, key, ...r });
+              return;
+            }
+            // ── RAG_PATCH（P2）：向量索引状态（memory-rag 停着也能看到待处理的遗忘请求） ──
+            if (req.method === 'GET' && url.pathname === '/api/ltm/rag/status') {
+              // RAG_PATCH（P3）：health 原样透传 memory-rag 的 /health（P2 起多了 distill 字段）。
+              const health = rag ? await rag.health() : null;
+              sendJson({ ok: true, configured: !!rag, reachable: !!health, health, pendingForget: ltm.pendingForgetKeys() });
+              return;
+            }
+            // ── SUGGEST_PATCH：账本建议列表（仅控制台；接口约定 contract §2）──
+            // 候选原文从 memory-rag 现取，状态与次数合并状态文件；memory-rag 不可达时
+            // 回 rag:false、items:[]，计数按状态文件给（控制台照样能看状态）。
+            if (req.method === 'GET' && url.pathname === '/api/ltm/suggest') {
+              if (!ledgerSuggest) { sendJson({ ok: false, error: '账本建议模块没有启用' }, 503); return; }
+              const rawDays = String(url.searchParams.get('days') ?? '').trim();
+              const days = rawDays === '' ? 7 : Number(rawDays);
+              if (!Number.isInteger(days) || days < 1 || days > 30) {
+                sendJson({ ok: false, error: 'days 要是 1～30 的整数' }, 400);
+                return;
+              }
+              // 显示名复用报表的 labels（私聊用账本名字、群用群号），拿不到就用 key。
+              const body = await ledgerSuggest.list({ days, labelFor: (k) => reportLabels([k])[k] ?? k });
+              if (!body) { sendJson({ ok: false, error: '账本建议统计失败' }, 500); return; }
+              sendJson(body);
+              return;
+            }
+            // ── RAG_PATCH（P3）：自动想起（影子）日志（接口约定 C3）──
+            // 日志本身不存原文：来信原文现查存档、候选摘要现问 memory-rag，删过的都显示「（已删除）」。
+            if (req.method === 'GET' && url.pathname === '/api/ltm/recall-shadow') {
+              const settings = recallSettings();
+              const limit = recallClampInt(url.searchParams.get('limit'), 1, 200, 50);
+              const before = String(url.searchParams.get('before') ?? '').trim();
+              const all = readRecallShadowEntries();
+              let start = 0;
+              if (before) {
+                const at = all.findIndex((e) => e.id === before);
+                start = at >= 0 ? at + 1 : 0;
+              }
+              const page = all.slice(start, start + limit);
+              const labels = readRecallLabels();
+              const found = await resolveRecallSummaries(page);
+              const entries = page.map((e) => {
+                const key = String(e.key ?? '');
+                return {
+                  id: e.id,
+                  at: Number(e.at) || 0,
+                  key,
+                  reason: String(e.reason ?? ''),
+                  mode: e.mode === 'on' ? 'on' : 'shadow',
+                  skipped: typeof e.skipped === 'string' ? e.skipped : null,
+                  tau: Number.isFinite(Number(e.tau)) && e.tau !== null ? Number(e.tau) : null,
+                  ms: Number.isFinite(Number(e.ms)) ? Number(e.ms) : null,
+                  msgs: (Array.isArray(e.msgs) ? e.msgs : []).map((m) => ({
+                    t: Number(m?.t) || 0,
+                    msgId: m?.msgId == null || m.msgId === '' ? null : String(m.msgId),
+                    text: recallMessageText(key, m)
+                  })),
+                  candidates: (Array.isArray(e.candidates) ? e.candidates : []).filter((c) => c && typeof c === 'object').map((c) => {
+                    const summaryId = String(c.summary_id ?? '');
+                    const hit = summaryId ? found.get(`${key}:${summaryId}`) : null;
+                    const cosine = c.cosine === null || c.cosine === undefined ? null : Number(c.cosine);
+                    return {
+                      summary_id: summaryId,
+                      chunk_id: typeof c.chunk_id === 'string' ? c.chunk_id : '',
+                      day: typeof c.day === 'string' ? c.day : '',
+                      cosine: Number.isFinite(cosine) ? cosine : null,
+                      signals: Array.isArray(c.signals) ? c.signals.filter((s) => typeof s === 'string') : [],
+                      pass: c.pass === true,
+                      title: hit ? hit.title : '',
+                      summary: hit ? hit.summary : RECALL_DELETED_TEXT,
+                      label: labels[`${e.id}:${summaryId}`] ?? null
+                    };
+                  }),
+                  inject: Array.isArray(e.inject) ? e.inject.filter((id) => typeof id === 'string') : []
+                };
+              });
+              const nextBefore = start + limit < all.length ? all[start + limit].id : null;
+              // RAG_PATCH（P3）：控制台的 τ 标定表要把「当前门槛」那一行加粗，读的是 config.tau。
+              // 取全部日志里最新一条带数字 tau 的条目（all 按时间倒序）；一条都没有时为 null。
+              const latestTau = all.find((e) => e.tau !== null && e.tau !== undefined && Number.isFinite(Number(e.tau)));
+              const config = { ...settings, tau: latestTau ? Number(latestTau.tau) : null };
+              sendJson({ ok: true, config, entries, nextBefore, stats: recallShadowStats(all, labels, Date.now()) });
+              return;
+            }
+            if (req.method !== 'POST') { sendJson({ ok: false, error: '不支持的方法' }, 405); return; }
+            const body = await readBody();
+            // ── SUGGEST_PATCH：手动作废一条候选（仅控制台；接口约定 contract §2）──
+            // 先向 memory-rag 核对这条确实属于这个会话；404 / 409 / 503 原样回给页面。
+            if (url.pathname === '/api/ltm/suggest/dismiss') {
+              if (!ledgerSuggest) { sendJson({ ok: false, error: '账本建议模块没有启用' }, 503); return; }
+              const r = await ledgerSuggest.dismiss({ id: body.id, key: body.key });
+              if (!r) { sendJson({ ok: false, error: '作废失败' }, 500); return; }
+              sendJson(r.body, r.code);
+              return;
+            }
+            if (url.pathname === '/api/ltm/remember') {
+              // LIFE_LOOP_PATCH（规格 §8.3）：约定可以带到期日 / 谁答应的 / 核心标记，原样透传。
+              const r = ltm.remember({ userId: body.userId, name: body.name, cat: String(body.category ?? ''), text: body.content, sourceKey: body.sourceKey || `private:${String(body.userId ?? '')}`, scope: body.scope === 'private' ? 'private' : 'public', due: body.due, by: body.by, core: body.core });
+              // DECAY_PATCH：person 里的条目都带遗忘状态（控制台的修改不算她想起，不复习）。
+              sendJson({ ok: true, ...r, person: ltmPersonForConsole(body.userId) });
+              return;
+            }
+            if (url.pathname === '/api/ltm/update') {
+              // LIFE_LOOP_PATCH（规格 §8.3）：状态 / 核心 / 归档 / 到期日也走同一个接口。
+              // DECAY_PATCH：outdated = 这条已经过时 / 取消过时。
+              ltm.update({ userId: body.userId, itemId: body.itemId, text: body.content, cat: body.category, scope: body.scope, due: body.due, by: body.by, status: body.status, core: body.core, archived: body.archived, outdated: body.outdated });
+              sendJson({ ok: true, person: ltmPersonForConsole(body.userId) });
+              return;
+            }
+            if (url.pathname === '/api/ltm/forget') {
+              const it = ltm.forget({ userId: body.userId, itemId: body.itemId });
+              // DECAY_PATCH：条目删了，遗忘记录跟着删（失败只忽略）。
+              try { decay?.drop('ltm:' + it.id); } catch { /* 遗忘模块的问题不影响删除 */ }
+              sendJson({ ok: true, person: ltmPersonForConsole(body.userId) });
+              return;
+            }
+            // ── DECAY_PATCH：手动「唤醒」一条已淡忘的记忆（控制台；1 小时内重复唤醒不算） ──
+            if (url.pathname === '/api/ltm/review') {
+              if (!decay) { sendJson({ ok: false, error: '遗忘模块没有启用' }, 503); return; }
+              const uid = String(body.userId ?? '').trim();
+              const itemId = String(body.itemId ?? '').trim();
+              const it = (ltm.personView(uid)?.items ?? []).find((x) => x.id === itemId);
+              if (!it) throw new Error(`找不到记忆条目：${body.itemId ?? ''}`);
+              if (it.outdatedAt) throw new Error('已过时的条目先取消过时');
+              const meta = decay.ltmMeta(it, { ownerQQ: ownerId(), userId: uid, intimacy: intimacyOf(uid) });
+              // false = 1 小时内已经想起过，没有再加固 —— 不是错误。
+              const reviewed = decay.review('ltm:' + it.id, meta, 'good') !== false;
+              sendJson({ ok: true, reviewed, person: ltmPersonForConsole(uid) });
+              return;
+            }
+            // ── RAG_PATCH（P2）：删存档（墓碑），删完顺手让 memory-rag 遗忘这个会话 ──
+            if (url.pathname === '/api/ltm/archive/delete') {
+              const key = String(body.key ?? '');
+              if (!/^(group|private):\d+$/.test(key) || !ltm.archiveKeys().includes(key)) {
+                throw new Error('会话 key 不合法或没有存档');
+              }
+              const r = ltm.deleteArchiveRows(key, {
+                rows: body.rows,
+                from: body.from,
+                to: body.to,
+                dryRun: body.dryRun === true
+              });
+              // deleted=0（dryRun 或全被跳过）时不会写遗忘请求，所以 forget 报 none。
+              let forget = 'none';
+              let removedChunks = null;
+              if (r.deleted > 0) {
+                if (!rag) forget = 'off';
+                else {
+                  const fr = await rag.forget(key);
+                  if (fr && fr.ok) {
+                    forget = 'done';
+                    removedChunks = fr.data?.removed_chunks ?? null;
+                  } else {
+                    // 请求文件已经写好了：memory-rag 起来/闲下来后会自己处理。
+                    forget = 'queued';
+                  }
+                }
+              }
+              sendJson({ ok: true, matched: r.matched, deleted: r.deleted, skipped: r.skipped, forget, removedChunks });
+              return;
+            }
+            // ── RAG_PATCH（P3）：给影子日志里的候选打标注（「相关 / 无关」，再点一次取消） ──
+            if (url.pathname === '/api/ltm/recall-shadow/label') {
+              const id = String(body.id ?? '').trim();
+              const summaryId = String(body.summary_id ?? '').trim();
+              const raw = body.label;
+              const label = raw === 'relevant' || raw === 'irrelevant' ? raw
+                : (raw === null || raw === undefined || raw === '' ? null : undefined);
+              if (label === undefined) throw new Error('label 只能是 relevant / irrelevant，或传 null 取消标注');
+              if (!id || !summaryId) throw new Error('缺少 id 或 summary_id');
+              const entry = readRecallShadowEntries().find((e) => e.id === id);
+              if (!entry) throw new Error('找不到这条影子记录');
+              const isCandidate = (Array.isArray(entry.candidates) ? entry.candidates : [])
+                .some((c) => String(c?.summary_id ?? '') === summaryId);
+              if (!isCandidate) throw new Error('这个摘要不是这条记录的候选');
+              const labels = readRecallLabels();
+              const mapKey = `${id}:${summaryId}`;
+              if (label) labels[mapKey] = label;
+              else delete labels[mapKey];
+              writeRecallLabels(labels);
+              sendJson({ ok: true, label });
+              return;
+            }
+            // ── RAG_PATCH（P3）：重试提炼失败的摘要（转发 memory-rag 的 POST /distill/retry） ──
+            if (url.pathname === '/api/ltm/rag/distill-retry') {
+              if (!rag) { sendJson({ ok: false, error: '向量索引没有配置' }, 503); return; }
+              const r = await rag.distillRetry();
+              if (!r) { sendJson({ ok: false, error: '向量索引服务不可达' }, 503); return; }
+              if (!r.ok) { sendJson({ ok: false, error: `重试失败（HTTP ${r.status}）` }, r.status); return; }
+              const retried = Number(r.data?.retried);
+              sendJson({ ok: true, retried: Number.isFinite(retried) ? retried : 0 });
+              return;
+            }
+            // ── RAG_PATCH（P2）：手动增量索引 / 全量重建（状态码原样透传） ──
+            if (url.pathname === '/api/ltm/rag/index') {
+              if (!rag) { sendJson({ ok: false, error: '向量索引没有配置' }, 503); return; }
+              const r = await rag.indexRun();
+              if (!r) { sendJson({ ok: false, error: '向量索引服务不可达' }, 503); return; }
+              if (!r.ok) { sendJson({ ok: false, error: r.data?.detail || `向量索引服务返回 ${r.status}` }, r.status); return; }
+              sendJson({ ok: true, result: r.data });
+              return;
+            }
+            if (url.pathname === '/api/ltm/rag/rebuild') {
+              if (!rag) { sendJson({ ok: false, error: '向量索引没有配置' }, 503); return; }
+              const r = await rag.rebuild();
+              if (!r) { sendJson({ ok: false, error: '向量索引服务不可达' }, 503); return; }
+              if (!r.ok) { sendJson({ ok: false, error: r.data?.detail || `向量索引服务返回 ${r.status}` }, r.status); return; }
+              sendJson({ ok: true, job: r.data?.job ?? null });
+              return;
+            }
+            sendJson({ ok: false, error: '未知接口' }, 404);
+          } catch (error) {
+            sendJson({ ok: false, error: error?.message ?? String(error) }, 400);
+          }
+          return;
+        }
+        // ── LIFE_LOOP_PATCH（规格 §8.3）：生活回路状态（仅控制台；全局的令牌校验在上面） ──
+        if (req.method === 'GET' && url.pathname === '/api/life-loop') {
+          sendJson({ ok: true, ownLife: ownLife?.snapshot() ?? null, lifeLoop: lifeLoop?.snapshot() ?? null });
+          return;
+        }
+        // ── DECAY_PATCH：记忆代谢总览（仅控制台；带 agent 令牌的请求已被上面的白名单拒绝） ──
+        if (req.method === 'GET' && url.pathname === '/api/memory-decay') {
+          if (!decay) { sendJson({ ok: true, enabled: false }); return; }
+          // 每个人：未归档的条目里，冻结 / 已过时各多少条（冻结的不含已过时）。
+          let people = [];
+          try {
+            people = ltm.listPeople().map((p) => {
+              const v = ltm.personView(p.userId);
+              const active = (v?.items ?? []).filter((x) => !x.archivedAt);
+              return {
+                userId: p.userId,
+                name: p.name,
+                total: active.length,
+                frozen: active.filter((x) => !x.outdatedAt && ltmDecayState(x, p.userId)?.frozen).length,
+                outdated: active.filter((x) => x.outdatedAt).length,
+              };
+            });
+          } catch (e) {
+            log(`[decay] 汇总失败：${e?.message ?? e}`);
+          }
+          sendJson({ ok: true, ...decay.snapshot(), people });
+          return;
+        }
+        // ── REPORT_PATCH：每日报表（docs/design/DAILY_REPORT_SPEC.md §4.3 第 5 条） ──
+        // 只认控制台令牌：MCP 的会话令牌（x-agent-token）与无令牌的智能体调用一律 403。
+        if (url.pathname.startsWith('/api/report/')) {
+          if (req.headers['x-agent-call'] !== undefined || req.headers['x-agent-token'] !== undefined) {
+            sendJson({ ok: false, error: '报表接口只对控制台开放' }, 403);
+            return;
+          }
+          if (!dailyReport) { sendJson({ ok: false, error: '每日报表模块没有启动' }, 503); return; }
+          if (req.method !== 'GET') { sendJson({ ok: false, error: '不支持的方法' }, 405); return; }
+          try {
+            if (url.pathname === '/api/report/daily') {
+              const today = dayOf(Date.now());
+              const requested = String(url.searchParams.get('day') ?? '').trim();
+              const day = requested || today;
+              if (!reportIsValidDay(day) || day > today) {
+                sendJson({ ok: false, error: '日期不合法（要 YYYY-MM-DD，且不能晚于今天）' }, 400);
+                return;
+              }
+              const isToday = day === today;
+              // 今天现算并带 live；过去的日期优先读快照，没有就现算（不写盘）。
+              const report = isToday
+                ? await dailyReport.compute(day, { live: await buildReportLive() })
+                : (dailyReport.read(day) ?? await dailyReport.compute(day));
+              const prevDay = reportShiftDay(day, -1);
+              const prev = dailyReport.read(prevDay) ?? await dailyReport.compute(prevDay);
+              sendJson({
+                ok: true,
+                day,
+                today: isToday,
+                partial: report?.partial === true,
+                labels: reportLabels(Object.keys(report?.sessions ?? {})),
+                report,
+                prev,
+                snapshotDays: dailyReport.days()
+              });
+              return;
+            }
+            if (url.pathname === '/api/report/series') {
+              const raw = String(url.searchParams.get('days') ?? '').trim();
+              const days = raw === '' ? 14 : Number(raw);
+              if (!Number.isInteger(days) || days < 1 || days > 60) {
+                sendJson({ ok: false, error: 'days 要是 1～60 的整数' }, 400);
+                return;
+              }
+              sendJson({ ok: true, ...(await dailyReport.series(days)) });
+              return;
+            }
+            sendJson({ ok: false, error: '未知接口' }, 404);
+          } catch (error) {
+            // 不回显栈或原文：错误信息里可能带本机路径。
+            log(`[report] 接口出错（${error?.code ?? 'error'}）`);
+            sendJson({ ok: false, error: '每日报表统计失败' }, 500);
+          }
+          return;
+        }
+        // ── TTS_API_PATCH：语音合成 API 管理接口（仅控制台；带 agent token 的请求已在上面被白名单拒绝） ──
+        if (url.pathname.startsWith('/api/tts/')) {
+          try {
+            if (req.method === 'GET' && url.pathname === '/api/tts/config') {
+              sendJson({ ok: true, ...ttsApi.overview() });
+              return;
+            }
+            if (req.method === 'GET' && url.pathname === '/api/tts/file') {
+              const f = ttsApi.audioFile(url.searchParams.get('kind'), url.searchParams.get('name'));
+              res.writeHead(200, { 'content-type': f.mime, 'content-length': f.buf.length, ...SECURITY_HEADERS });
+              res.end(f.buf);
+              return;
+            }
+            if (req.method === 'POST' && url.pathname === '/api/tts/clone/upload') {
+              // 样本可能有数 MB，不走 1MB 上限的通用 readBody
+              const body = await readLargeJsonBody(req, 15 * 1024 * 1024);
+              const buf = Buffer.from(String(body.dataBase64 ?? '').replace(/^data:[^,]*;base64,/i, ''), 'base64');
+              const saved = ttsApi.saveCloneSample(String(body.filename ?? 'sample'), buf);
+              if (body.select !== false) ttsApi.saveConfig({ clone: { file: saved.name } });
+              log(`[tts] 已上传克隆样本 ${saved.name}（${formatBytes(saved.bytes)}）`);
+              sendJson({ ok: true, sample: saved, ...ttsApi.overview() });
+              return;
+            }
+            if (req.method !== 'POST') { sendJson({ ok: false, error: '不支持的方法' }, 405); return; }
+            const body = await readBody();
+            if (url.pathname === '/api/tts/config') {
+              const config = ttsApi.saveConfig(body);
+              log('[tts] 语音合成 API 配置已保存');
+              sendJson({ ok: true, config });
+              return;
+            }
+            if (url.pathname === '/api/tts/template') {
+              const which = String(body.which ?? '');
+              if (body.reset === true) { sendJson({ ok: true, which, ...ttsApi.resetTemplate(which) }); return; }
+              const r = ttsApi.saveTemplate(which, body.text);
+              log(`[tts] 已保存${which === 'headers' ? '请求头' : '请求体'}模板（${r.bytes} 字节）`);
+              sendJson({ ok: true, which, ...r });
+              return;
+            }
+            if (url.pathname === '/api/tts/models') {
+              const r = await ttsApi.fetchModels({ endpoint: body.endpoint, apiKey: body.apiKey, modelsUrl: body.modelsUrl });
+              sendJson({ ok: true, ...r });
+              return;
+            }
+            if (url.pathname === '/api/tts/check') {
+              sendJson({ ok: true, ...(await ttsApi.check()) });
+              return;
+            }
+            if (url.pathname === '/api/tts/test') {
+              const r = await ttsApi.testSynthesize({ text: body.text, style: body.style });
+              let detail = '';
+              try { const p = await inspectAudio(r.file, { maxBytes: 50 * 1024 * 1024, maxSeconds: 3600 }); if (p.ok) detail = describeAudio(p); } catch {}
+              sendJson({ ok: true, name: r.name, bytes: r.bytes, mime: r.mime, mode: r.mode, model: r.model, voice: r.voice, ms: r.ms, detail });
+              return;
+            }
+            if (url.pathname === '/api/tts/preview') {
+              sendJson({ ok: true, ...(await ttsApi.previewVoice(String(body.voice ?? ''), { force: body.force === true })) });
+              return;
+            }
+            if (url.pathname === '/api/tts/clone/delete') {
+              sendJson({ ok: true, ...ttsApi.deleteCloneSample(body.name), ...ttsApi.overview() });
+              return;
+            }
+            sendJson({ ok: false, error: '未知接口' }, 404);
+          } catch (error) {
+            sendJson({ ok: false, error: error?.message ?? String(error) }, error?.statusCode ?? 400);
           }
           return;
         }
@@ -4424,7 +5317,7 @@ async function main() {
             merged.autoReplyCheckMs = Number.isFinite(n) ? Math.max(1000, Math.round(n)) : (current.autoReplyCheckMs ?? 30000);
           }
           // tools：只接受布尔开关
-          const toolFlags = ['getPrompt', 'getUnread', 'getRecent', 'socialState', 'sendGroup', 'sendPrivate', 'reply', 'sendBurst', 'sendMessage', 'waitMessages', 'feedback', 'getMyRecent', 'getMessageDetail', 'getActiveMembers', 'setWakeConfig', 'markRead', 'memory', 'slangQuery', 'slangSubmit', 'getImages', 'getForwardMsg', 'sendPoke', 'listStickers', 'getStickerImage', 'sendSticker', 'setStickerRemark', 'stickerNote', 'collectSticker', 'getSelfImage', 'sendVoice'];
+          const toolFlags = ['getPrompt', 'getUnread', 'getRecent', 'socialState', 'sendGroup', 'sendPrivate', 'reply', 'sendBurst', 'sendMessage', 'waitMessages', 'feedback', 'getMyRecent', 'getMessageDetail', 'getActiveMembers', 'setWakeConfig', 'markRead', 'memory', 'slangQuery', 'slangSubmit', 'getImages', 'getForwardMsg', 'sendPoke', 'listStickers', 'getStickerImage', 'sendSticker', 'setStickerRemark', 'stickerNote', 'collectSticker', 'getSelfImage', 'sendVoice', 'ttsVoice', 'longMemory'];
           if (body.tools && typeof body.tools === 'object') {
             merged.tools = { ...(current.tools ?? {}), ...body.tools };
             for (const k of toolFlags) {
@@ -4686,7 +5579,9 @@ async function main() {
             stickerNote: 'qq_sticker_note',
             collectSticker: 'qq_collect_sticker',
             getSelfImage: 'qq_get_self_image',
-            sendVoice: 'qq_send_voice / qq_list_voices'
+            sendVoice: 'qq_send_voice / qq_list_voices',
+            ttsVoice: 'qq_tts_voice',
+            longMemory: 'qq_ltm_remember / qq_ltm_recall / qq_ltm_update / qq_ltm_forget / qq_history_search'
           };
           const tools = cfg.socialV2?.tools ?? {};
           const stickerToolFlags = new Set(['listStickers', 'getStickerImage', 'sendSticker', 'setStickerRemark', 'stickerNote', 'collectSticker']);
@@ -4718,6 +5613,8 @@ async function main() {
             currentWakeConfig: st.wakeConfig,
             wakeSafety: computeWakeSafetyV2(st.wakeConfig),
             memory: formatMemoryV2(st),
+            // LTM_PATCH
+            longMemory: cfg.socialV2?.tools?.longMemory === false ? null : (ltmBlockFor(key, st) || '（还没有记下什么）'),
             participation: formatParticipationV2(st),
             slang: {
               enabled: cfg.slang?.enabled !== false,
@@ -5413,6 +6310,7 @@ async function main() {
             const pokeText = kind === 'group'
               ? `[拍一拍] 我拍了拍 ${targetUserId}`
               : '[拍一拍] 我拍了拍你';
+            ltm.archive(key, { dir: 'out', text: pokeText });
             st.recentMessages.push({
               messageId: null,
               sender: '我',
@@ -5660,6 +6558,204 @@ async function main() {
           return;
         }
 
+        // ── LTM_PATCH：长期记忆（AI 通道）：账本读写 + 本会话聊天记录检索 ────
+        if (url.pathname.startsWith('/api/socialV2/ltm-') || url.pathname === '/api/socialV2/history-search') {
+          const body = req.method === 'GET' ? Object.fromEntries(url.searchParams) : await readBody();
+          const key = String(body.key ?? '').trim();
+          const token = String(body.token ?? req.headers['x-agent-token'] ?? '').trim();
+          if (!/^(group|private):\d+$/.test(key)) { sendJson({ ok: false, error: 'key 格式应为 group:群号 或 private:QQ号' }, 400); return; }
+          if (req.headers['x-agent-token']) {
+            if (!agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
+            if (!v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
+            if (!v2ToolEnabled('longMemory')) { sendJson({ ok: false, error: '工具未启用：长期记忆' }, 403); return; }
+          } else if (!token && req.headers['x-agent-call'] !== undefined) {
+            sendJson({ ok: false, error: '缺少会话令牌' }, 403); return;
+          }
+          // 私聊会话里不指定 userId 时，默认说的就是对方
+          const privateId = key.startsWith('private:') ? key.slice(8) : '';
+          const userId = String(body.userId ?? '').trim() || privateId;
+          try {
+            if (url.pathname === '/api/socialV2/ltm-remember') {
+              if (!userId) throw new Error('群聊里要指定 userId（这件事是关于谁的；QQ 号从消息里的 userId 取）');
+              // LIFE_LOOP_PATCH（规格 §8.3）：到期日 / 谁答应的 / 核心标记原样透传。
+              // DECAY_PATCH（规格 M5）：replaces = 「这条是在更新一件旧事」，旧的会被标成过时。
+              const r = ltm.remember({ userId, name: body.name, cat: String(body.category ?? body.cat ?? ''), text: body.content ?? body.text, sourceKey: key, scope: body.scope, due: body.due, by: body.by, core: body.core, replaces: body.replaces });
+              // SUGGEST_PATCH（规格 §4.6）：她记下的内容如果和刚给她看过的某条候选相似，就标「采用」。
+              // 只动状态文件，整段 try/catch；**不改给她的响应**（下面一行起是原来的逻辑）。
+              try { ledgerSuggest?.onRemember(key, userId, r.item.id); } catch (e) { log(`[suggest] 采用判定失败：${e?.message ?? e}`); }
+              log(`[ltm] ${key} 记下 ${userId}·${r.item.cat}：${r.item.text.slice(0, 40)}${r.item.due ? ` 到期 ${r.item.due}` : ''}${r.duplicate ? '（已存在）' : ''}${r.replaced ? `（替换 ${r.replaced.id}）` : ''}`);
+              // DECAY_PATCH：复习 / 相似提示都是锦上添花，失败不能让写入本身报错（规格 §6）。
+              let similar = [];
+              try {
+                // 又被记了一次 = 顺利想起
+                if (r.duplicate) ltmReview(r.item, userId, 'good');
+                else {
+                  similar = ltm.similarItems(userId, r.item.text, { viewerKey: key, excludeIds: [r.item.id, r.replaced?.id].filter(Boolean) });
+                }
+              } catch (e) {
+                log(`[decay] 记忆写入后的记账失败：${e?.message ?? e}`);
+              }
+              sendJson({
+                ok: true,
+                duplicate: r.duplicate,
+                item: r.item,
+                ...(r.replaced ? { replaced: { id: r.replaced.id } } : {}),
+                ...(similar.length ? { similar, hint: `可能和${similar.map((x) => `〔${x.id}〕`).join('')}说的是同一件事：如果那条已经过时，用 qq_ltm_update 标 outdated=true` } : {})
+              });
+              return;
+            }
+            if (url.pathname === '/api/socialV2/ltm-recall') {
+              if (!userId) { sendJson({ ok: true, people: ltm.listPeople().slice(0, 50).map((p) => ({ userId: p.userId, name: p.name, items: p.items })) }); return; }
+              const v = ltm.personView(userId, key);
+              if (!v) { sendJson({ ok: true, person: { userId, items: [] }, categories: ltm.CATEGORIES }); return; }
+              // DECAY_PATCH（规格 M2-a）：带 query 查到的条目才算「费劲想起」；整本翻看不复习。
+              // 标签先算再复习 —— 她看到的是「想起之前」有多清楚。
+              const q = String(body.query ?? '').trim();
+              const tag = (items) => (decay ? items.map((it) => ({ ...it, memory: ltmMemoryLabel(it, userId) })) : items);
+              if (!q) {
+                sendJson({ ok: true, person: { ...v, items: tag(v.items) }, categories: ltm.CATEGORIES });
+                return;
+              }
+              const matched = ltm.matchItems(userId, key, q);
+              const rest = v.items.length - matched.length;
+              const hint = matched.length === 0
+                ? `没有和「${q}」直接相关的条目；不带 query 可看全部 ${v.items.length} 条`
+                : (rest > 0 ? `另有 ${rest} 条，不带 query 可看全部` : '');
+              const items = tag(matched);
+              // 命中的未过时条目按顺序复习，最多 5 条（冷却中的那几条由 decay.review 自己跳过）。
+              let attempts = 0;
+              for (const it of matched) {
+                if (attempts >= 5) break;
+                if (it.outdatedAt) continue;
+                attempts += 1;
+                ltmReview(it, userId, 'hard');
+              }
+              sendJson({ ok: true, person: { ...v, items }, categories: ltm.CATEGORIES, query: q, matched: matched.length, ...(hint ? { hint } : {}) });
+              return;
+            }
+            if (url.pathname === '/api/socialV2/ltm-update') {
+              // LIFE_LOOP_PATCH（规格 §8.3）：status / core / archived 也由 AI 在这里改。
+              // DECAY_PATCH（规格 M5）：outdated = 这条已经过时 / 取消过时。
+              const it = ltm.update({ userId, itemId: body.itemId ?? body.id, text: body.content ?? body.text, cat: body.category ?? body.cat, scope: body.scope, viewerKey: key, due: body.due, by: body.by, status: body.status, core: body.core, archived: body.archived, outdated: body.outdated });
+              // DECAY_PATCH：她更新 / 补充这一条 = 顺利想起（已过时的条目 ltmReview 自己跳过）。
+              ltmReview(it, userId, 'good');
+              sendJson({ ok: true, item: it });
+              return;
+            }
+            if (url.pathname === '/api/socialV2/ltm-forget') {
+              const it = ltm.forget({ userId, itemId: body.itemId ?? body.id, viewerKey: key });
+              // DECAY_PATCH：条目没了，遗忘记录也一并删掉（失败只忽略）。
+              try { decay?.drop('ltm:' + it.id); } catch { /* 遗忘模块的问题不影响删除 */ }
+              log(`[ltm] ${key} 删除 ${userId}·${it.cat}：${it.text.slice(0, 40)}`);
+              sendJson({ ok: true, removed: it });
+              return;
+            }
+            if (url.pathname === '/api/socialV2/history-search') {
+              // RAG_PATCH：先混合检索（memory-rag），失败或 mode=keyword 时退回本地关键词检索。
+              // key 只用上面校验过的那个，不接受 payload 里另给的 key。
+              const modeRaw = String(body.mode ?? '').trim();
+              const mode = modeRaw === 'keyword' || modeRaw === 'semantic' ? modeRaw : 'auto';
+              // 非法日期直接 400（外层 catch），让 AI 看到原因并改；
+              // 抛错信息里会说明要用 YYYY-MM-DD。
+              const { from, to } = normalizeDateRange({ from: body.from, to: body.to });
+              const keywords = normalizeKeywords(body.keywords);
+              const query = String(body.query ?? '').trim();
+              const speaker = String(body.speaker ?? '').trim();
+              const clampNum = (v, min, max, fallback) => {
+                const n = Number(v);
+                return Number.isFinite(n) ? Math.min(max, Math.max(min, Math.round(n))) : fallback;
+              };
+              const hasValue = (v) => v !== undefined && v !== null && v !== '';
+              const k = hasValue(body.limit) ? clampNum(body.limit, 1, 8, 5) : 5;
+              const expand = hasValue(body.context) ? clampNum(body.context, 0, 5, 0) : undefined;
+              const startedAt = Date.now();
+              // 结果太少时由 AI 自己决定要不要再查一次（服务端不做二次改写）。
+              const retryHint = '结果很少：可以换个说法、多给几个原话里可能出现的词，或放宽 from/to 再查一次（最多再查一次）；还是没有就说不记得，别编。';
+              // query 与 keywords 都为空 = 纯「按日期翻」：memory-rag 的向量路和 BM25 路都没法跑，
+              // 会回 200 + 空结果，看起来像「那天没聊过」。这种请求直接走 ltm.search 的 browse 模式
+              // （按日期/说话人过滤、从新到旧取 limit 条），语义标记为 off（服务没坏，只是没用上）。
+              const hasSearchText = Boolean(query) || keywords.length > 0;
+
+              if (mode !== 'keyword' && hasSearchText && rag) {
+                const r = await rag.search({ key, query, keywords, from, to, speaker, k, expand });
+                if (r) {
+                  const hint = [r.items.length < 2 ? retryHint : '', r.hint ?? ''].filter(Boolean).join(' ');
+                  log(`[rag] ${key} source=rag semantic=${r.semantic} items=${r.items.length} ${Date.now() - startedAt}ms`);
+                  sendJson({ ok: true, key, source: 'rag', semantic: r.semantic, items: r.items, ...(hint ? { hint } : {}) });
+                  // DECAY_PATCH：响应发出去之后才记「费劲想起」（refs 只在这里用，不外发）。
+                  reviewHistoryHits(key, r.refs);
+                  return;
+                }
+              }
+              // 降级：memory-rag 没起 / 超时 / 报错，或 AI 明确指定只走关键词，或只是按日期翻。
+              // DECAY_PATCH：debug=true 拿到命中行号（hits）供遗忘记账；hits 不进响应。
+              const r = ltm.search(key, { query, keywords, from, to, speaker, limit: body.limit, context: body.context, debug: true });
+              const semantic = mode === 'keyword' || !hasSearchText ? 'off' : 'unavailable';
+              const hint = r.matched < 2 ? retryHint : '';
+              log(`[rag] ${key} source=keyword semantic=${semantic} lines=${r.matched} ${Date.now() - startedAt}ms`);
+              sendJson({ ok: true, key, source: 'keyword', semantic, total: r.total, matched: r.matched, lines: r.lines, ...(hint ? { hint } : {}) });
+              reviewHistoryHits(key, (r.hits ?? []).map((h) => ({ file: h.file, line: h.line })));
+              return;
+            }
+            sendJson({ ok: false, error: '未知接口' }, 404);
+          } catch (error) {
+            sendJson({ ok: false, error: error?.message ?? String(error) }, 400);
+          }
+          return;
+        }
+
+        // ── TTS_API_PATCH：文字 → 远程 TTS 合成 → 当语音发出（AI 通道，与 send-voice 同一套闸门） ────
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/tts-voice') {
+          const body = await readBody();
+          const token = String(body.token ?? req.headers['x-agent-token'] ?? '').trim();
+          const key = String(body.key ?? body.target ?? '').trim();
+          const voice = voiceCfg();
+          const ttsCfg = ttsApi.readConfig();
+          if (!voice.enabled) { sendJson({ ok: false, error: '语音功能已关闭' }, 403); return; }
+          if (ttsCfg.enabled === false) { sendJson({ ok: false, error: '语音合成 API 已在控制台关闭' }, 403); return; }
+          if (!key) { sendJson({ ok: false, error: 'key 不能为空（格式 group:群号 或 private:QQ号）' }, 400); return; }
+          if (currentMode !== 'reserved2') { sendJson({ ok: false, error: '该接口仅 reserved2 模式可用' }, 403); return; }
+          if (!token) { sendJson({ ok: false, error: 'reserved2 模式发送必须携带 agent token' }, 403); return; }
+          if (!agentTokenOk(key, token)) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
+          if (!v2ToolEnabled('sendVoice') || !v2ToolEnabled('ttsVoice')) { sendJson({ ok: false, error: '工具未启用：qq_tts_voice' }, 403); return; }
+          if (!v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
+          if (shouldBlockSilentReply(key)) { sendJson({ ok: false, error: '静默模式已开启，当前不允许发送' }, 403); return; }
+          const keyMatch = /^(group|private):(\d+)$/.exec(key);
+          if (!keyMatch) { sendJson({ ok: false, error: 'key 格式应为 group:群号 或 private:QQ号' }, 400); return; }
+          const id = Number(keyMatch[2]);
+          if (!Number.isFinite(id) || id <= 0 || !modeAllowed(key, keyMatch[1], id, cfg, currentMode)) {
+            sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403);
+            return;
+          }
+          const text = String(body.text ?? '').trim();
+          if (!text) { sendJson({ ok: false, error: 'text 不能为空' }, 400); return; }
+          if ([...text].length > ttsCfg.maxChars) { sendJson({ ok: false, error: `文字太长（上限 ${ttsCfg.maxChars} 字），语音只适合 1~3 句` }, 400); return; }
+          try {
+            // 先看额度再合成，免得超限时白白调一次远程接口
+            voiceBudgetCheck(key, voice);
+            const ttsDir = path.join(voice.dir, 'tts');
+            const made = await ttsApi.synthesizeTo(ttsDir, { text, style: String(body.style ?? '').slice(0, 500) });
+            const sent = await sendVoiceForV2(key, `tts/${made.name}`, {
+              label: body.label ? String(body.label).slice(0, 100) : `[语音] ${text.slice(0, 150)}`,
+              verify: body.verify
+            });
+            log(`[tts] ${key} 合成并发送语音（${made.mode} · ${made.model}${made.voice ? ' · ' + made.voice : ''} · ${made.ms}ms）`);
+            sendJson({
+              ok: true,
+              key,
+              messageId: sent.messageId,
+              file: path.basename(sent.file),
+              detail: sent.detail,
+              synth: { mode: made.mode, model: made.model, voice: made.voice, ms: made.ms },
+              verified: sent.verification?.confirmed === true,
+              verification: sent.verification ?? null
+            });
+          } catch (error) {
+            sendJson({ ok: false, error: error?.message ?? String(error) }, 400);
+          }
+          return;
+        }
+
         // ── 语音发送（AI 通道：reserved2 + agent token，只能发自己那个会话） ────
         if (req.method === 'POST' && url.pathname === '/api/socialV2/send-voice') {
           const body = await readBody();
@@ -5792,6 +6888,8 @@ async function main() {
             // 记录到二代会话的 recentMessages，让 AI 知道自己发过这个表情
             const label = sent.entry?.desc || sent.entry?.localNote || '表情包';
             const text = `[表情包:${label}]`;
+            ltm.archive(key, { dir: 'out', text, msgId: sent.messageId ?? null });
+            persona?.onOutgoing({ key }); // PERSONA_PATCH
             st.recentMessages.push({
               messageId: sent.messageId ? String(sent.messageId) : null,
               sender: '我',
@@ -9107,6 +10205,332 @@ async function main() {
     return p;
   }
 
+  // ══════════════════════════════════════════════════════════════
+  // RAG_PATCH（P3）：唤醒时自动想起（影子 / 开；docs/design/ASSOCIATION_SPEC.md §6、§9.2）
+  //   私聊有人来信唤醒她时，把最近 1～3 条来信用 /recall 问一次 memory-rag：
+  //   「这时候本来会想起哪件旧事」。影子模式下只记日志、提示词一个字不变；
+  //   mode=on 时才把摘要块拼进提示词（默认不开，先看影子相关率再决定）。
+  //   日志只存编号与分数 —— 不存原文。规则、超时、字段校验都在 memory-rag-client.js。
+  // ══════════════════════════════════════════════════════════════
+  // 这些唤醒不是「对方来信」：她自己的时间、到期提醒、周报、首次引导 —— 查了也没有意义。
+  const RECALL_NON_INCOMING_WAKES = new Set([...LOCAL_TEXT_WAKES.keys(), 'bootstrap']);
+  // τ 标定用：同一个候选在不同门槛下的相关率（控制台小表）。
+  // RAG_PATCH（P3）：端到端实测（Qwen3-Embedding-8B + 查询指令前缀）相关旧事余弦 0.40～0.43、
+  // 无关 0.25～0.39，原来的 0.50～0.65 四档在影子期很可能一档都标不出来，整体下移。
+  const RECALL_TAUS = [0.35, 0.4, 0.45, 0.5, 0.55, 0.6];
+  const RECALL_DELETED_TEXT = '（已删除）';
+  // RAG_PATCH（P3）：同一批来信只查一次。reserved2 里回复检查 / 主动机会检查 / 繁忙后补发等唤醒
+  // 并不是新来信，拿到的还是上一次那几条；不去重的话影子日志会把同一批信、同一批候选反复记一遍，
+  // 统计被放大、标注时也要重复看。只记会话 key → 最新一条来信的标识，重启后清空（最多多查一次）。
+  const recallLastBatch = new Map();
+
+  const recallClampInt = (value, min, max, fallback) => {
+    // 注意 Number(null) === 0：查询参数没给时 get() 返回 null，不能当成 0（会把 limit 夹成 1）。
+    if (value === null || value === undefined || value === '') return fallback;
+    const n = Number(value);
+    return Number.isFinite(n) ? Math.min(max, Math.max(min, Math.round(n))) : fallback;
+  };
+
+  /**
+   * memoryRag.recall 的配置：**每次用时现读** config.json —— 用户只改配置、重启桥接就能开/关，
+   * 不需要重新初始化客户端。非法值一律退回缺省（配坏了不能把自动想起变成永远开启）。
+   */
+  function recallSettings() {
+    let raw = null;
+    try { raw = readJsonSafe(path.join(ROOT, 'config.json'), null)?.memoryRag?.recall ?? null; } catch { raw = null; }
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) raw = {};
+    return {
+      mode: raw.mode === 'on' || raw.mode === 'off' ? raw.mode : 'shadow',
+      private: raw.private !== false,
+      group: raw.group === true,
+      k: recallClampInt(raw.k, 1, 5, 2),
+      timeoutMs: recallClampInt(raw.timeoutMs, 100, 5000, 400)
+    };
+  }
+
+  /**
+   * 本次唤醒里对方（不是她自己）发的最近 1～3 条来信。
+   * 与 buildWakeSnapshotV2 同一来源（会话状态里的 recentMessages），拿文字 / 毫秒时间 / QQ 消息编号。
+   * 拍一拍不是「来信」（没有可比较的文字），不算进来。
+   */
+  function collectRecallIncoming(key) {
+    const st = getSocialV2State(key);
+    const list = Array.isArray(st?.recentMessages) ? st.recentMessages : [];
+    const picked = [];
+    for (let i = list.length - 1; i >= 0 && picked.length < 3; i -= 1) {
+      const m = list[i];
+      if (!m || m.isSelf || m.kind === 'poke') continue;
+      const text = String(m.plain ?? m.text ?? '').trim();
+      if (!text) continue;
+      picked.push({
+        text,
+        t: Number(m.time) || 0,
+        msgId: m.messageId == null || m.messageId === '' ? null : String(m.messageId)
+      });
+    }
+    return picked.reverse(); // 由旧到新：/recall 的 texts 按说话顺序拼
+  }
+
+  /**
+   * 这次唤醒要不要查 /recall；不要时返回 null。
+   * 条件：有 memory-rag 客户端、mode 不是 off、不是本地文案唤醒、会话类型允许、至少 1 条来信。
+   */
+  function recallPlanFor(key, reason) {
+    try {
+      if (!rag) return null;
+      const settings = recallSettings();
+      if (settings.mode === 'off') return null;
+      if (!reason || RECALL_NON_INCOMING_WAKES.has(reason)) return null;
+      if (String(key).startsWith('group:')) { if (!settings.group) return null; }
+      else if (!settings.private) return null;
+      const msgs = collectRecallIncoming(key);
+      if (!msgs.length) return null;
+      // 最新一条来信的标识（时间 + QQ 消息编号）：同一批来信（没有新消息）就不再查。
+      // 立刻写进 Map，而不是等查询成功 —— 上一批失败了也不重试，免得反复打一个挂掉的服务。
+      const newest = msgs[msgs.length - 1];
+      const batchId = `${Number(newest?.t) || 0}|${newest?.msgId ?? ''}`;
+      if (recallLastBatch.get(String(key)) === batchId) return null;
+      recallLastBatch.set(String(key), batchId);
+      return { settings, msgs, texts: msgs.map((m) => m.text) };
+    } catch { return null; }
+  }
+
+  /** 「开」模式拼进提示词的那一块；没有可注入的摘要时返回空串（提示词逐字不变）。 */
+  function buildRecallBlock(recalled) {
+    try {
+      const inject = Array.isArray(recalled?.inject) ? recalled.inject : [];
+      if (!inject.length) return '';
+      const byId = new Map((recalled.candidates ?? []).map((c) => [c.summary_id, c]));
+      const lines = [];
+      for (const id of inject) {
+        const c = byId.get(id);
+        if (!c || !c.summary) continue;
+        const day = String(c.day || '').slice(-5);
+        lines.push(`· ${day ? `[${day}] ` : ''}${c.summary}`);
+      }
+      if (!lines.length) return '';
+      return `【可能相关的旧事 —— 自动想起的，不一定准】\n${lines.join('\n')}\n要原话或更多细节，用 qq_history_search 查；对不上就当没这回事，别硬提。`;
+    } catch { return ''; }
+  }
+
+  // ── 影子日志（state/long-memory/recall-shadow/<YYYY-MM>.jsonl，目录 700、文件 600）──
+  const recallPad2 = (n) => String(n).padStart(2, '0');
+  function recallShadowFilePath(ts = Date.now()) {
+    const d = new Date(ts);
+    return path.join(RECALL_SHADOW_DIR, `${d.getFullYear()}-${recallPad2(d.getMonth() + 1)}.jsonl`);
+  }
+
+  /** 追加一行影子日志；失败只记一行日志 —— 绝不能影响唤醒。 */
+  function appendRecallShadow(entry) {
+    try {
+      fs.mkdirSync(RECALL_SHADOW_DIR, { recursive: true, mode: 0o700 });
+      const padded = JSON.stringify(entry) + '\n';
+      fs.appendFileSync(recallShadowFilePath(entry.at), padded, { encoding: 'utf8', mode: 0o600 });
+    } catch (e) {
+      log(`[recall] 影子日志写不进去：${e?.message ?? e}`);
+    }
+  }
+
+  /**
+   * 记一行影子日志并打一行摘要。`recalled` 为 null 表示 memory-rag 不可达 / 超时。
+   * 日志与 console 日志里都只有编号、类别和数字。
+   */
+  function logRecallShadow({ key, reason, mode, msgs, recalled, ms }) {
+    // 整段 try/catch：mode=on 时这里是**在唤醒路径上**调的，记日志失败绝不能把唤醒带崩。
+    try {
+      const safeKey = String(key ?? '');
+      const candidates = Array.isArray(recalled?.candidates) ? recalled.candidates : [];
+      const entry = {
+        id: `r-${Date.now()}-${crypto.randomBytes(2).toString('hex')}`,
+        at: Date.now(),
+        key: safeKey,
+        reason: String(reason ?? ''),
+        mode: mode === 'on' ? 'on' : 'shadow',
+        msgs: (Array.isArray(msgs) ? msgs : []).map((m) => ({ t: Number(m?.t) || 0, msgId: m?.msgId ?? null })),
+        skipped: recalled ? (typeof recalled.skipped === 'string' ? recalled.skipped : null) : 'unavailable',
+        tau: recalled && Number.isFinite(recalled.tau) ? recalled.tau : null,
+        ms: Math.max(0, Math.round(Number(ms) || 0)),
+        candidates: candidates.map((c) => ({
+          summary_id: c.summary_id,
+          chunk_id: c.chunk_id,
+          day: c.day,
+          cosine: c.cosine,
+          signals: c.signals,
+          pass: c.pass
+        })),
+        inject: Array.isArray(recalled?.inject) ? recalled.inject : []
+      };
+      appendRecallShadow(entry);
+      const passCount = entry.candidates.filter((c) => c.pass).length;
+      log(`[recall] ${safeKey} mode=${entry.mode} skipped=${entry.skipped ?? 'none'} cands=${entry.candidates.length} pass=${passCount} ${entry.ms}ms`);
+      return entry;
+    } catch (e) {
+      log(`[recall] 影子日志记录失败：${e?.message ?? e}`);
+      return null;
+    }
+  }
+
+  /** 影子模式：投递完成之后异步查一次（不 await，不拖慢回复）；异常全部吞掉。 */
+  function scheduleShadowRecall(key, reason, plan) {
+    Promise.resolve().then(async () => {
+      const startedAt = Date.now();
+      let recalled = null;
+      try { recalled = await rag.recall({ key, texts: plan.texts, k: plan.settings.k }); } catch { recalled = null; }
+      logRecallShadow({ key, reason, mode: 'shadow', msgs: plan.msgs, recalled, ms: Date.now() - startedAt });
+    }).catch(() => { /* 影子日志的问题绝不影响唤醒 */ });
+  }
+
+  /** 读全部影子日志，按时间倒序（月份文件从新到旧，文件内从后往前）。坏行跳过。 */
+  function readRecallShadowEntries() {
+    const out = [];
+    let files = [];
+    try {
+      files = fs.readdirSync(RECALL_SHADOW_DIR)
+        .filter((name) => /^\d{4}-\d{2}\.jsonl$/.test(name))
+        .sort()
+        .reverse();
+    } catch { return out; }
+    for (const name of files) {
+      let lines = [];
+      try { lines = fs.readFileSync(path.join(RECALL_SHADOW_DIR, name), 'utf8').split('\n'); } catch { continue; }
+      for (let i = lines.length - 1; i >= 0; i -= 1) {
+        if (!lines[i]) continue;
+        let entry;
+        try { entry = JSON.parse(lines[i]); } catch { continue; }
+        if (!entry || typeof entry !== 'object' || typeof entry.id !== 'string' || !entry.id) continue;
+        if (!Number.isFinite(Number(entry.at))) continue;
+        out.push(entry);
+      }
+    }
+    return out;
+  }
+
+  function recallLabelsPath() { return path.join(RECALL_SHADOW_DIR, 'labels.json'); }
+
+  function readRecallLabels() {
+    const raw = readJsonSafe(recallLabelsPath(), null);
+    return raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  }
+
+  function writeRecallLabels(labels) {
+    fs.mkdirSync(RECALL_SHADOW_DIR, { recursive: true, mode: 0o700 });
+    // recursive 模式只对新建目录生效；已存在时显式收紧一次。
+    try { fs.chmodSync(RECALL_SHADOW_DIR, 0o700); } catch {}
+    atomicWriteJson(recallLabelsPath(), labels);
+  }
+
+  /**
+   * 日志里只有消息时间与编号：原文现查存档。
+   * 按 t ± 2 秒取那个会话里对方（dir=in）的行，再按 msgId 对上；
+   * 没有 msgId（拍一拍之类）就取时间最近的一条。墓碑 / 找不到 →「（已删除）」。
+   */
+  function recallMessageText(key, msg) {
+    try {
+      const t = Number(msg?.t);
+      if (!Number.isFinite(t) || t <= 0) return RECALL_DELETED_TEXT;
+      const rows = ltm.archiveRows(String(key ?? ''), { sinceMs: t - 2000, untilMs: t + 2000 + 1, dir: 'in' });
+      if (!rows.length) return RECALL_DELETED_TEXT;
+      const msgId = msg?.msgId == null || msg.msgId === '' ? '' : String(msg.msgId);
+      let hit = null;
+      if (msgId) {
+        hit = rows.find((r) => r.msgId != null && String(r.msgId) === msgId) ?? null;
+      } else {
+        let bestDiff = Infinity;
+        for (const r of rows) {
+          const rt = Date.parse(r.t);
+          if (!Number.isFinite(rt)) continue;
+          const diff = Math.abs(rt - t);
+          if (diff < bestDiff) { bestDiff = diff; hit = r; }
+        }
+      }
+      const text = hit && typeof hit.text === 'string' ? hit.text : '';
+      return text || RECALL_DELETED_TEXT;
+    } catch { return RECALL_DELETED_TEXT; }
+  }
+
+  /** 按会话批量取摘要文字（每批 ≤100 个）；memory-rag 不可达时返回空 Map，调用方显示「已删除」。 */
+  async function resolveRecallSummaries(entries) {
+    const byKey = new Map();
+    for (const e of entries) {
+      const key = String(e?.key ?? '');
+      if (!key) continue;
+      const ids = (Array.isArray(e?.candidates) ? e.candidates : [])
+        .map((c) => String(c?.summary_id ?? ''))
+        .filter(Boolean);
+      if (!ids.length) continue;
+      if (!byKey.has(key)) byKey.set(key, new Set());
+      for (const id of ids) byKey.get(key).add(id);
+    }
+    const found = new Map(); // `${key}:${summary_id}` → { title, summary }
+    if (!rag) return found;
+    for (const [key, ids] of byKey) {
+      const list = [...ids];
+      for (let i = 0; i < list.length; i += 100) {
+        const chunk = list.slice(i, i + 100);
+        let r = null;
+        try { r = await rag.summaries({ key, ids: chunk }); } catch { r = null; }
+        for (const it of r?.items ?? []) found.set(`${key}:${it.summary_id}`, it);
+      }
+    }
+    return found;
+  }
+
+  const recallRate = (relevant, labeled) => (labeled > 0 ? Math.round((relevant / labeled) * 1000) / 1000 : null);
+
+  /**
+   * 近 3 天的影子统计（接口约定 C3）：
+   * - 总相关率只算「在日志里的 τ 时 pass 的候选」；
+   * - byTau 对每个 τ 重新判 pass = cosine ≥ τ 且 signals ≥ 2，再看它们的标注。
+   */
+  function recallShadowStats(entries, labels, nowMs) {
+    const since = nowMs - RECALL_SHADOW_DAYS * 86400000;
+    const recent = entries.filter((e) => (Number(e.at) || 0) >= since);
+    const skipped = { trivial: 0, unavailable: 0, no_summaries: 0 };
+    let withCandidates = 0;
+    let withPass = 0;
+    let labeled = 0;
+    let relevant = 0;
+    const byTau = RECALL_TAUS.map((tau) => ({ tau, pass: 0, labeled: 0, relevant: 0, rate: null }));
+    for (const e of recent) {
+      const s = typeof e.skipped === 'string' ? e.skipped : null;
+      if (s && Object.prototype.hasOwnProperty.call(skipped, s)) skipped[s] += 1;
+      const cands = (Array.isArray(e.candidates) ? e.candidates : []).filter((c) => c && typeof c === 'object');
+      if (cands.length) withCandidates += 1;
+      if (cands.some((c) => c.pass === true)) withPass += 1;
+      for (const c of cands) {
+        const sid = String(c.summary_id ?? '');
+        const label = sid ? labels[`${e.id}:${sid}`] : undefined;
+        if (c.pass === true && (label === 'relevant' || label === 'irrelevant')) {
+          labeled += 1;
+          if (label === 'relevant') relevant += 1;
+        }
+        const cosine = c.cosine === null || c.cosine === undefined ? null : Number(c.cosine);
+        const signals = Array.isArray(c.signals) ? c.signals : [];
+        if (cosine === null || !Number.isFinite(cosine)) continue;
+        for (const row of byTau) {
+          if (cosine < row.tau || signals.length < 2) continue;
+          row.pass += 1;
+          if (label === 'relevant' || label === 'irrelevant') {
+            row.labeled += 1;
+            if (label === 'relevant') row.relevant += 1;
+          }
+        }
+      }
+    }
+    for (const row of byTau) row.rate = recallRate(row.relevant, row.labeled);
+    return {
+      days: RECALL_SHADOW_DAYS,
+      entries: recent.length,
+      skipped,
+      withCandidates,
+      withPass,
+      labeled,
+      relevant,
+      rate: recallRate(relevant, labeled),
+      byTau
+    };
+  }
+
   // 实际的 DSH prompt 投递（不再直接对外暴露，统一走 promptQueues 串行队列）。
   async function deliverPromptNow(key, promptText, opts = {}) {
     if (!isSessionAllowedInCurrentMode(key)) throw new Error(`当前模式不允许会话 ${key}`);
@@ -9142,13 +10566,38 @@ async function main() {
     let wakeState;
     let wakeToken;
     let wakeSnapshot;
+    // RAG_PATCH（P3）：自动想起。shadow = 投递之后再查（只记日志）；on = 先查、有摘要就拼进提示词。
+    // 别的模式（off / 本地文案唤醒 / 群聊没开 / 没有来信）recallPlan 为 null，一切照旧。
+    let recallPlan = null;
+    let recallBlock = '';
+    // SUGGEST_PATCH：账本建议块（空 = 这次不带）；只有投递成功后才计出现次数。
+    let suggestPlan = null;
     if (opts.wakeReason) {
       if (wakeBlocked()) return skipWake();
       // Build only after session creation: retries may rotate the token, and an
       // offline queue may have received more messages since this wake was queued.
       wakeState = getSocialV2State(key);
       wakeToken = wakeState.agentToken;
-      promptText = buildWakePromptV2(key, opts.wakeReason);
+      recallPlan = recallPlanFor(key, opts.wakeReason);
+      if (recallPlan && recallPlan.settings.mode === 'on') {
+        // 客户端自带超时（默认 400 ms）：超时就是没想起来，唤醒照常继续。
+        const startedAt = Date.now();
+        let recalled = null;
+        try { recalled = await rag.recall({ key, texts: recallPlan.texts, k: recallPlan.settings.k }); } catch { recalled = null; }
+        recallBlock = buildRecallBlock(recalled);
+        logRecallShadow({ key, reason: opts.wakeReason, mode: 'on', msgs: recallPlan.msgs, recalled, ms: Date.now() - startedAt });
+        recallPlan = null;
+      }
+      // SUGGEST_PATCH（规格 §4.2）：账本建议 —— 长期记忆**工具**没关就去取候选；
+      // 判据和 ltmBlockFor / ltmLine 同一口径（`longMemory !== false`），不能用 ltmBlockFor 的返回值：
+      // 账本正文空时它是空串，可那恰恰是最该给候选的时候（正文空时【长期记忆】段显示「（还没有记下什么）」）。
+      // 失败 / 超时就是这次不带（plan 内部自带超时，绝不 reject），唤醒照常继续。
+      suggestPlan = cfg.socialV2?.tools?.longMemory !== false ? ((await ledgerSuggest?.plan(key)) ?? null) : null;
+      // LIFE_LOOP_PATCH（规格 §8.1，修 F1）：把调用方给的本地文案一起传进去 ——
+      // 以前 own-life / persona-weekly 的文案在这里被整段替换成通用提示，从来没送到她那里。
+      // RAG_PATCH（P3）：第 4 个参数是自动想起块，空串时输出与改动前逐字相同。
+      // SUGGEST_PATCH：第 5 个参数是账本建议块，同样空串时逐字不变。
+      promptText = buildWakePromptV2(key, opts.wakeReason, promptText, recallBlock, suggestPlan?.block ?? '');
       wakeSnapshot = buildWakeSnapshotV2(key);
       if (wakeSnapshot) {
         promptText += `\n\n【本次消息快照】\n${JSON.stringify(wakeSnapshot)}\n以上消息已提供，无需重复查询；partial=true 时用 qq_get_unread_messages(afterSeq=readThroughSeq) 继续读取。先处理当前消息；回复前如需确认后续补充，用 qq_wait_for_messages(purpose="reply") 补足短静默，已安静够久会立即返回，不要先长等。收尾只确认你已处理的 readThroughSeq（本地 seq，非 QQ messageId），传给 qq_mark_read 或 qq_set_wake_config 的 throughSeq；新到消息留待处理。`;
@@ -9188,6 +10637,14 @@ async function main() {
       await auditAndSend(key, mdToPlain(accepted.result.value.command.text));
     } else if (accepted.result.value.command?.text && opts.silent && opts.farewell) {
       social.exitingSessions.delete(sessionId);
+    }
+    // RAG_PATCH（P3）：影子模式在**投递完成之后**才去问 memory-rag ——
+    // 不 await、不拖慢回复；提示词在这之前已经原样交给 DSH 了。
+    if (recallPlan) scheduleShadowRecall(key, opts.wakeReason, recallPlan);
+    // SUGGEST_PATCH（规格 §4.5）：只有投递真的被 DSH 接受（accepted.result.ok）之后才计次；
+    // 投递失败、被跳过、进离线队列都不计（离线队列重投时会重新挑）。计次失败不影响唤醒。
+    if (suggestPlan && Array.isArray(suggestPlan.ids) && suggestPlan.ids.length) {
+      try { ledgerSuggest?.markShown(key, suggestPlan.ids); } catch { /* 计次的问题不影响唤醒 */ }
     }
     return { ok: true };
   }
@@ -9370,6 +10827,101 @@ async function main() {
     social.loopTimer.unref?.();
   }
 
+  // ══════════════════════════════════════════════════════════════
+  // OWN_LIFE_PATCH：她自己的生活
+  //   私聊没有「你自己的时间到了」这种自动唤醒，角色卡里写了也不会主动去做。
+  //   每 2.5 小时投一条静默提示（不进聊天），让她想起来可以发说说 / 写日记。
+  //   凌晨 3–8 点不叫，一天最多 6 次；23:30 后有一次「半夜那句邀请」。
+  // ══════════════════════════════════════════════════════════════
+  let ownLife = null;
+  // LIFE_LOOP_PATCH（规格 §8.2）：生活回路实例。own-life 投递时向它要日记与「忽然想起」。
+  let lifeLoop = null;
+  function startOwnLife() {
+    try {
+      if (ownLife) ownLife.stop();
+      const ownerKey = 'private:' + String(cfg.ownerQQ ?? '');
+      if (!cfg.ownerQQ) { log('[own-life] 没有 ownerQQ，跳过'); return; }
+      ownLife = createOwnLife({
+        key: ownerKey,
+        statePath: path.join(STATE_DIR, 'own-life.json'),
+        log: (m, ...rest) => log(`[own-life] ${m}${rest.length ? ' ' + rest.join(' ') : ''}`),
+        deliver: async (promptText, meta = {}) => {
+          if (socialV2.paused) throw new Error('socialV2 已暂停');
+          if (currentMode !== 'reserved2') throw new Error(`当前模式是 ${currentMode}，不是 reserved2`);
+          // LIFE_LOOP_PATCH（规格 §8.2）：附上最近写过的日记 + 一条「忽然想起」的旧事。
+          // RAG_PATCH（P3）：有异步版就走异步版 —— 它会在「忽然想起」抽中后再顺着联想一件相关旧事。
+          // 只调一次：异步版自己带 1.5 秒超时，超时后退回同步结果；在外面再调一次同步版会把当天的
+          // 回忆额度扣两次（审核第一批时定）。两者都自己 try/catch，这里再兜一层。
+          const composeArgs = { kind: meta.kind, now: meta.at, remainingSlots: meta.remainingSlots };
+          let extra = '';
+          try {
+            if (typeof lifeLoop?.composeOwnLifeAsync === 'function') {
+              extra = await lifeLoop.composeOwnLifeAsync(composeArgs) || '';
+            } else {
+              extra = lifeLoop?.composeOwnLife?.(composeArgs) || '';
+            }
+          } catch { /* 生活回路出错不影响唤醒 */ }
+          // PERSONA_PATCH：附上她此刻的心情；低落或想念时允许她主动跟主人说一句（每天有上限）
+          const mood = persona?.ownLifeLine?.() || '';
+          const text = [promptText, extra, mood].filter(Boolean).join('\n\n');
+          const r = await deliverPrompt(ownerKey, text, { silent: true, wakeReason: 'own-life' });
+          if (!r?.ok) throw new Error(r?.error || '投递被拒');
+          // REPORT_PATCH：报表只数真的投递成功的唤醒（失败那次不算）。
+          if (meta.kind === 'day') dailyReport?.count('ownLifeDay');
+          else if (meta.kind === 'midnight') dailyReport?.count('ownLifeMidnight');
+        },
+      });
+      ownLife.start();
+    } catch (e) {
+      log(`[own-life] 启动失败（不影响桥接）: ${e?.message ?? e}`);
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  // LIFE_LOOP_PATCH：生活回路（docs/design/LIFE_LOOP_SPEC.md §6、§8.2）
+  //   每分钟看一眼账本里今天到期的约定，到点主动去私聊提醒她；
+  //   own-life 唤醒时由它补日记与「忽然想起」。
+  // ══════════════════════════════════════════════════════════════
+  function startLifeLoop() {
+    try {
+      if (lifeLoop) lifeLoop.stop();
+      const conf = cfg.lifeLoop ?? {};
+      if (conf.enabled === false) { log('[life-loop] 已关闭（cfg.lifeLoop.enabled=false）'); lifeLoop = null; return; }
+      lifeLoop = createLifeLoop({
+        ltm,
+        persona,
+        // DECAY_PATCH：挑素材时按遗忘曲线（冻结的不冒出来，抽中后记一次「顺利想起」）。
+        decay,
+        diaryDir: path.join(STATE_DIR, 'diary'),
+        statePath: path.join(STATE_DIR, 'life-loop.json'),
+        ownerQQ: () => String(cfg.ownerQQ ?? ''),
+        deliverPromiseWake: async (key, text) => {
+          const r = await deliverPrompt(key, text, { silent: true, wakeReason: 'promise-due' });
+          if (!r?.ok) throw new Error(r?.error || '投递被拒');
+        },
+        // 当前模式下能不能往这个会话投唤醒：二代仿真、没暂停、白名单允许时才投。
+        isAllowed: (key) => currentMode === 'reserved2' && !socialV2.paused && cfg.socialV2?.enabled !== false && isSessionAllowedInCurrentMode(key),
+        // RAG_PATCH（P3）：联想链（docs/design/ASSOCIATION_SPEC.md §9.3）。只查主人私聊——
+        // 「顺着想起」是她自己记忆里的事，不该混进别人的会话。没客户端时给 null，生活回路退回同步结果。
+        associate: (params) => (rag ? rag.associate({ key: 'private:' + String(cfg.ownerQQ ?? ''), ...params }) : Promise.resolve(null)),
+        options: {
+          recallPerDay: conf.recallPerDay,
+          cooldownDays: conf.cooldownDays,
+          promiseWake: conf.promiseWake,
+          quiet: conf.quiet,
+          // 联想链自己的开关与门槛（cfg.lifeLoop.associate = { enabled, cooldownDays, minAgeDays }）。
+          associate: conf.associate,
+        },
+        log: (m, ...rest) => log(`[life-loop] ${m}${rest.length ? ' ' + rest.join(' ') : ''}`),
+      });
+      lifeLoop.start();
+    } catch (e) {
+      // 生活回路只是锦上添花：配置写坏了也不许把桥接带崩。
+      lifeLoop = null;
+      log(`[life-loop] 启动失败（不影响桥接）: ${e?.message ?? e}`);
+    }
+  }
+
   async function flushSummaries(key = null) {
     const targets = key ? (social.pendingSummaries.has(key) ? [[key, social.pendingSummaries.get(key)]] : []) : [...social.pendingSummaries.entries()];
     for (const [k, entry] of targets) {
@@ -9419,6 +10971,8 @@ async function main() {
   // 真正决定启不启动的只有配置里的显式关闭开关。
   if (cfg.social?.enabled !== false) {
     startSocialLoop();
+    startOwnLife();
+    startLifeLoop();
   }
 
   // 当前角色扮演提示：读 state/current-role.json + roles/<角色>.md，
@@ -9907,6 +11461,8 @@ async function main() {
     st.unread.push(msg);
     if (st.unread.length > unreadLimit) st.unread.splice(0, st.unread.length - unreadLimit);
     saveSocialV2State();
+    // PERSONA_PATCH：被拍一拍 → 一点害羞（只算拍她的）
+    if (targetIsSelf && userId != null) persona?.onPoke({ key, userId: String(userId), name: actor });
     return msg;
   }
 
@@ -9915,7 +11471,10 @@ async function main() {
     const now = Date.now();
     const recentLimit = Number(cfg.socialV2?.context?.recentLimit) || 100;
     const list = Array.isArray(messages) ? messages : [];
+    // PERSONA_PATCH：她说了话，开始等对方接（期望落空用）
+    if (list.length) persona?.onOutgoing({ key });
     for (let i = 0; i < list.length; i++) {
+      ltm.archive(key, { dir: 'out', text: String(list[i] ?? '') });
       const text = redactKnownTokensOnly(String(list[i] ?? '')).slice(0, 200);
       st.recentMessages.push({
         sender: '我',
@@ -10290,7 +11849,11 @@ async function main() {
     return `【你的身份】你在 QQ 上的昵称是${label}${idText}。${callBits}；群名片可能与昵称不同，at/引用段里带${id ? ` ${id} ` : '你的 QQ 号'}就是在叫你。\n\n`;
   }
 
-  function buildWakePromptV2(key, reason) {
+  // LIFE_LOOP_PATCH（规格 §8.1）：本地文案的分支见模块顶部的 LOCAL_TEXT_WAKES。
+  // RAG_PATCH（P3）：第 4 个参数是自动想起块（docs/design/ASSOCIATION_SPEC.md §9.2）。
+  // 默认空串时输出与改动前**逐字相同** —— 影子模式就是靠这一点做到「提示词一个字不变」。
+  // SUGGEST_PATCH：第 5 个参数是账本建议块，接在【长期记忆】后面（空串时同样逐字不变）。
+  function buildWakePromptV2(key, reason, localText = '', recallBlock = '', suggestBlock = '') {
     const roleState = readRoleState();
     const roleLine = roleState.role ? `【当前角色】${roleState.role}（完整角色卡请调用 qq_get_prompt 查看）\n\n` : '';
     const identityLine = selfIdentityTextV2();
@@ -10298,6 +11861,10 @@ async function main() {
     const tokenLine = `【会话令牌】${st.agentToken}（调用二代状态工具时请在参数中带上此令牌）\n\n`;
     const memoryText = formatMemoryV2(st);
     const memoryLine = memoryText ? `${memoryText}\n\n` : '';
+    // LTM_PATCH：长期记忆（会话重建/上下文压缩后仍在）
+    const ltmText = ltmBlockFor(key, st);
+    // LIFE_LOOP_PATCH（规格 §8.3）：用法说明补上约定的 due / by / status 与核心条目。
+    const ltmLine = cfg.socialV2?.tools?.longMemory === false ? '' : `【长期记忆 —— 你一直记得的事】\n${ltmText || '（还没有记下什么）'}\n用法：聊到值得长期记住的事（喜好习惯、他的经历、重要日子、约定、没聊完的事）用 qq_ltm_remember 记下，一件事一条、写具体；记错/过时用 qq_ltm_update / qq_ltm_forget（〔〕里是条目编号）。情况变了（搬家、换工作、改主意）用 qq_ltm_remember 记新的并填 replaces=旧编号，旧的会标成过时。想不起以前聊过什么，用 qq_history_search 翻这个会话的聊天记录：query 写一句完整的话，keywords 给几个原话里可能出现的说法/近义词/人名；对方的话里提到时间就必须填 from（需要时也填 to）：具体日期写 YYYY-MM-DD，「今天/昨天/前天/上周/上个月」可原样填，桥接会自动换算；查不到就说不记得，别编。约定（pending）记的时候填 due（到期日）和 by（me=你答应的 / them=他答应的）；到期后确认结果再用 qq_ltm_update 标 status（done / missed / cancelled）。这个人最重要的几件事可以 core=true（每人最多 8 条）。不要逐句记，也不要把这些记忆当清单念出来。\n\n`;
     // 注意：黑话表不在这里注入，deliverPromptNow 的 withSlangContext 会统一注入，
     // 避免唤醒 prompt 出现两份黑话表。
     const participationText = formatParticipationV2(st);
@@ -10343,12 +11910,23 @@ async function main() {
     const initialPromptLine = initialPromptText ? `${initialPromptText}\n\n` : '';
     // 时间感放在 base 的最末尾：紧接着就是【唤醒】原因与行动指令，位置最显眼。
     const timeSenseLine = buildTimeSenseLine(st);
-    const base = roleLine + identityLine + tokenLine + initialPromptLine + antiAiLine + proactiveLine + stickerLine + replyLine + statusLine + wakeLine + memoryLine + participationLine + preSleepLine + timeSenseLine;
+    // RAG_PATCH（P3）：自动想起块紧跟【长期记忆】。recallBlock 为空串时这一段不存在，输出与改动前一致。
+    const recallLine = recallBlock ? `${recallBlock}\n\n` : '';
+    // SUGGEST_PATCH：账本建议块在【长期记忆】与自动想起之间；ltmLine 为空（工具关了）时不加。
+    const suggestLine = suggestBlock && ltmLine ? `${suggestBlock}\n\n` : '';
+    const base = roleLine + identityLine + tokenLine + initialPromptLine + antiAiLine + proactiveLine + stickerLine + replyLine + statusLine + wakeLine + memoryLine + ltmLine + suggestLine + recallLine + participationLine + preSleepLine + timeSenseLine;
     // 唤醒原因里的那条消息本身多旧：`atMention@seq194` 这种形态能反查到原消息。
     const triggeredSeq = wakeReasonSeq(reason);
     const triggeredMsg = triggeredSeq ? findV2MessageBySeq(st, triggeredSeq) : null;
     const triggeredAgo = triggeredMsg ? describeAge(triggeredMsg.time, Date.now()) : '';
     const triggeredLine = triggeredAgo ? `（触发这条是 ${triggeredAgo} 前发的${triggeredMsg?.sender ? `，来自「${triggeredMsg.sender}」` : ''}，不是刚刚）` : '';
+    // LIFE_LOOP_PATCH（规格 §8.1）：本地文案只对 LOCAL_TEXT_WAKES 里的原因生效；文案为空时不许吞掉
+    // 原有分支（离线队列、重试路径可能只带着原因没有文案）。
+    const localReason = LOCAL_TEXT_WAKES.get(reason);
+    const localBody = String(localText ?? '').trim();
+    if (localReason && localBody) {
+      return `${base}【唤醒】${key}\n原因：${localReason}（${reason}）\n${localText}\n\n不需要回复谁；想做的事做完（或者什么都不做）后，用 qq_mark_read 或 qq_set_wake_config 收尾。`;
+    }
     if (reason === 'bootstrap') {
       return `${base}【引导唤醒】你已接入 QQ 会话 ${key}。\n当前是二代仿真模式：你的文本输出不会自动发送到 QQ，所有发言必须通过工具完成。\n请先调用 qq_get_prompt 查看角色、推荐值、可用工具和状态；有待回应的消息先按首回复节奏处理，最后才用 qq_set_wake_config 设置你希望如何被唤醒。`;
     }
@@ -10974,6 +12552,27 @@ async function main() {
     if (currentMode === 'reserved2') {
       const sender = kind === 'group' ? (event.sender?.card || event.sender?.nickname || String(event.user_id)) : '私聊';
       appendSocialV2Message(key, sender, textContent, plainContent, quoteTargetIsSelf, isOwner, event.message_id ?? event.msg_id ?? null, mediaList, event.user_id ?? null, extractForwardIds(event.message ?? []));
+      // LTM_PATCH：存档原文（不截断），并更新「认识这个人」的基础信息
+      {
+        const who = event.sender?.card || event.sender?.nickname || String(event.user_id ?? '');
+        ltm.archive(key, { dir: 'in', userId: event.user_id ?? null, name: who, text: textContent, msgId: event.message_id ?? event.msg_id ?? null });
+        // REPORT_PATCH：今天的报表要看「最后收到消息」是什么时候。
+        reportLive.lastIncomingAt = Date.now();
+        if (event.user_id != null) ltm.touch(event.user_id, who);
+      }
+      // PERSONA_PATCH：交给情绪判读（异步，不挡唤醒；出厂值未确认时直接返回）
+      if (persona && event.user_id != null) {
+        const who = event.sender?.card || event.sender?.nickname || String(event.user_id);
+        const atSelf = Array.isArray(event?.message) && event.message.some((seg) => seg?.type === 'at' && String(seg.data?.qq) === String(event?.self_id ?? ''));
+        const named = !!selfNickname && String(plainContent ?? '').toLowerCase().includes(String(selfNickname).toLowerCase());
+        const recent = (getSocialV2State(key).recentMessages || []).slice(-7, -1).map((m) => `${m.isSelf ? '我' : (m.sender || '对方')}：${m.plain || m.text || ''}`);
+        persona.onIncoming({
+          key, kind, userId: String(event.user_id), name: who, text: plainContent || textContent,
+          msgId: event.message_id ?? event.msg_id ?? null,
+          directed: kind === 'private' || atSelf || !!quoteTargetIsSelf || named,
+          context: recent
+        }).catch((e) => log(`[persona] 判读失败：${e?.message ?? e}`));
+      }
       // 二代同样收集群聊黑话学习素材（AI 自主提交之外，桥接仍自动提取高频陌生词）
       if (kind === 'group') feedSlangWindow(key, sender, plainContent);
       if (socialV2.paused) {
@@ -11590,7 +13189,13 @@ async function main() {
                 }
                 // 审计（对完整文本执行，避免截断漏判；这里只判断，不发送，避免双重发送）
                 const hasKnownToken = [...KNOWN_AGENT_TOKENS].some((t) => t && plain.includes(t));
-                if (shouldAuditKey(key) && (SENSITIVE_RE.test(plain) || hasKnownToken)) {
+                // R2_AUDIT_PATCH：这段文字到底会不会真的发到 QQ。三个分支一一对应：
+                // 仿真群友（reserved）会发；reserved2 只记日志；其它模式走一代发送。
+                // 为什么需要它：reserved2 的回合结尾文字只是她的内部小结（例如她自己写的日记路径），
+                // 本来就不会发出去，却因为审计放在分支判断之前，被当成「回复被拦截」，
+                // 还往 QQ 发一条拦截提示 —— 一条根本不存在的回复，主人却收到了误报（2026-10-30 线上）。
+                const willForward = isSocialEnabled() || currentMode !== 'reserved2';
+                if (willForward && shouldAuditKey(key) && (SENSITIVE_RE.test(plain) || hasKnownToken)) {
                   log(`⚠️ 回复被安全策略拦截 (${key})，疑似包含敏感信息${hasKnownToken ? '（含会话令牌）' : ''}`);
                   appendActivity(`${key} agent 回复被拦截（疑似敏感信息${hasKnownToken ? '/会话令牌' : ''}）`);
                   if (cfg.security?.interceptNotify !== false) {
@@ -11656,8 +13261,16 @@ async function main() {
                     }
                   }
                 } else if (currentMode === 'reserved2') {
-                  log(`[reserved2] AI 内部输出（不自动转发）(${key}): ${plain.slice(0, 80)}`);
-                  appendActivity(`${key} [reserved2] AI 内部输出：${plain.slice(0, 80)}${plain.length > 80 ? '…' : ''}`);
+                  // R2_AUDIT_PATCH：内部小结不会发出去，但日志/活动记录同样不该留敏感原文
+                  // （本机路径、会话令牌都会长期留在 bridge.log 与 qq-activity.log 里）。
+                  // SENSITIVE_RE 只有 /i 一个标志，重复 test() 不会因 lastIndex 失真。
+                  if (SENSITIVE_RE.test(plain) || hasKnownToken) {
+                    log(`[reserved2] AI 内部输出（不自动转发；含疑似敏感信息，不记原文）(${key})`);
+                    appendActivity(`${key} [reserved2] AI 内部输出（含疑似敏感信息，不记原文）`);
+                  } else {
+                    log(`[reserved2] AI 内部输出（不自动转发）(${key}): ${plain.slice(0, 80)}`);
+                    appendActivity(`${key} [reserved2] AI 内部输出：${plain.slice(0, 80)}${plain.length > 80 ? '…' : ''}`);
+                  }
                 } else {
                   if (shouldBlockSilentReply(key)) {
                     log(`静默模式，拦截在途回复 (${key})`);
@@ -11881,6 +13494,9 @@ async function main() {
     // 用实际连接地址（自愈后可能与 config 里的初值不同，别打印过期的那个）
     const connectedUrl = bot.url ?? cfg.snowluma.wsUrl;
     snowlumaHealth.connected = true;
+    // REPORT_PATCH：报表里的 WS 状态与断开时长。
+    reportLive.snowluma.connected = true;
+    reportLive.snowluma.downSinceMs = null;
     log(`SnowLuma 已连接：${connectedUrl}`);
     // 「已连接」只说明与 SnowLuma 的 WebSocket 通了，**不说明 QQ 侧收得到消息** ——
     // 这个区别见 startSnowlumaWatch 的说明。这里顺手把上游健康快照刷一次。
@@ -11997,6 +13613,9 @@ async function main() {
 
   bot.on('close', (info) => {
     snowlumaHealth.connected = false;
+    // REPORT_PATCH：只在「由连着变成断开」那一刻记时间，重复的 close 不覆盖。
+    if (reportLive.snowluma.connected) reportLive.snowluma.downSinceMs = Date.now();
+    reportLive.snowluma.connected = false;
     log(`SnowLuma 连接断开（code=${info?.code ?? '?'}），重连中…`);
     // 连不上时最常见的原因就是换了 QQ 账号 → token 变了；顺手自愈。
     // 注意 1006 在**每次启动**都可能出现一次：HTTP token 与 WS token 是两个不同的值，
@@ -12038,12 +13657,15 @@ async function main() {
 }
 
 process.on('SIGINT', () => {
+  // REPORT_PATCH：退出前尽量把报表计数与心跳写盘。
+  try { dailyReport?.flush(); } catch {}
   log('退出中…');
   saveState();
   releaseLock();
   process.exit(0);
 });
 process.on('SIGTERM', () => {
+  try { dailyReport?.flush(); } catch {}
   saveState();
   releaseLock();
   process.exit(0);
