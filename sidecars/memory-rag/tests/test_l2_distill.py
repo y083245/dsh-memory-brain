@@ -600,8 +600,10 @@ def test_health_distill_shape_and_no_secrets(stack, cfg, state, monkeypatch):
     health = svc.health()
     d = health["distill"]
     # SUGGEST_PATCH：多了账本建议的计数（接口约定 §1）
-    assert set(d) == {"enabled", "key", "model", "summaries", "pending", "failed", "skipped",
+    # APIHUB_PATCH：多了 source（提炼用的是单独配置的 API 还是人格判读那把，接口约定 §2.4）
+    assert set(d) == {"enabled", "key", "model", "source", "summaries", "pending", "failed", "skipped",
                       "vec_pending", "entities", "relations", "notes", "today", "daily_limit", "last_error"}
+    assert d["source"] == "shared"
     assert set(d["notes"]) == {"total", "queued", "failed"}
     assert d["key"] is True and d["model"] == "deepseek-flash" and d["enabled"] is True
     assert set(d["today"]) == {"calls", "ok", "failed", "cost"}

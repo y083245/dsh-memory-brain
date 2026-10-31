@@ -2,9 +2,9 @@
 # 按反序停止：qq-bridge → memory-rag → embedding → SnowLuma → QQ → DSH（DSH 是通用服务，默认保留）
 #
 # 用法：
-#   ./stop-all.sh          # 停桥接、向量记忆、SnowLuma、QQ
+#   ./stop-all.sh          # 停桥接、向量记忆、SnowLuma、QQ（不改 RAG 开关，下次 start-all.sh 照旧起）
 #   ./stop-all.sh --all    # 连 DSH 一起停
-#   ./stop-all.sh --rag    # 只停向量记忆（memory-rag 8093 + embedding 8091），其它一概不动
+#   ./stop-all.sh --rag    # 关掉向量记忆：写 enabled=false，再停 memory-rag 8093（自带时连 embedding 8091）
 #
 # 桥接 / memory-rag / embedding 装成 systemd 用户服务后（scripts/systemd/install.sh），先 systemctl --user stop
 # 它们（主动停的不会被自动拉起），再按原来的办法清掉 systemd 之外的旧进程；没装时行为不变。
@@ -14,6 +14,9 @@ set -uo pipefail
 # 可用 QQ_BIN 环境变量覆盖，缺省值保持作者本机原样。
 QQ_BIN="${QQ_BIN:-/opt/QQ/qq}"
 RUN_DIR="$HOME/.ai-companion-run"
+# APIHUB_PATCH：RAG 开关存在 config.json 的 memoryRag.enabled；`--rag` 等同控制台的「关闭」。
+BRIDGE_DIR="${BRIDGE_DIR:-$(cd "$(dirname "$0")" && pwd)}"
+RAG_CONFIG_PY="$(cd "$(dirname "$0")" && pwd)/scripts/rag-config.py"
 STOP_DSH=0
 RAG_ONLY=0
 
@@ -47,6 +50,15 @@ stop_unit() {
   fi
 }
 port_up() { ss -ltn 2>/dev/null | grep -qE "[:.]$1[[:space:]]"; }
+
+# APIHUB_PATCH：embedding 归不归本脚本管（设置文件 kind=bundled，或没有设置文件时 config.yml provider=local
+# 才管；自己部署的本地服务 / 云端不碰它 —— 不停单元、也不按 8091 端口兜底杀进程）。
+rag_embedding_managed() {
+  local answer=""
+  answer="$(python3 "$RAG_CONFIG_PY" embedding-managed "$BRIDGE_DIR" 2>/dev/null || true)"
+  [ "$answer" = "no" ] && return 1
+  return 0
+}
 
 for arg in "$@"; do
   case "$arg" in
@@ -161,7 +173,10 @@ stop_rag() {
   else
     stop_rag_service "$RUN_DIR/memory-rag.pid" 8093 'memory_rag.app' 'memory-rag'
   fi
-  if use_unit qq-embedding.service; then
+  # APIHUB_PATCH：自己部署 / 云端时整段跳过（不停单元、不看 8091、不按端口杀）。
+  if ! rag_embedding_managed; then
+    ok "向量模型：自己部署 / 云端，不由本脚本管理"
+  elif use_unit qq-embedding.service; then
     stop_unit qq-embedding.service embedding
     if port_up 8091 || [ -f "$RUN_DIR/embed.pid" ]; then
       stop_rag_service "$RUN_DIR/embed.pid" 8091 'llama-server' 'embedding（systemd 之外）'
@@ -175,6 +190,13 @@ stop_rag() {
 if [ "$RAG_ONLY" = "1" ]; then
   echo
   log "只停向量记忆（--rag）"
+  # APIHUB_PATCH：等同控制台「关闭」——先把开关写进 config.json（写不成只告警，照样停）。
+  if [ -f "$RAG_CONFIG_PY" ] && command -v python3 >/dev/null 2>&1; then
+    python3 "$RAG_CONFIG_PY" set-enabled "$BRIDGE_DIR" false \
+      || warn "没能把 RAG 开关写进 $BRIDGE_DIR/config.json，这次仍按命令停服务"
+  else
+    warn "找不到 scripts/rag-config.py 或 python3，跳过写 config.json"
+  fi
   stop_rag
   echo
   exit 0

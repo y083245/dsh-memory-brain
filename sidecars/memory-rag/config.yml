@@ -4,6 +4,9 @@
 
 state_dir: ../../state
 
+# APIHUB_PATCH：控制台「API 管理」保存后会写 state/long-memory/rag/embedding-settings.json，
+# 那个文件存在时**优先于**下面的 provider / api（只有文件不存在时才按这里走）。
+# 一般不用手改这里；下面是本机默认（自带 llama.cpp）。
 embedding:
   provider: local           # local = 本机 llama-server；api = OpenAI 兼容的 embedding API
   base_url: http://127.0.0.1:8091

@@ -39,17 +39,41 @@ import { createMemoryDecay } from '../src/memory-decay.js';
 // REPORT_PATCH：每日报表（bridge.js 顶层 import，同样要注入；坑 12）。
 // dayOf 也要注入：桥接用 W1 导出的 dayOf 判断「今天」，剥离 import 后必须由这里提供。
 import { createDailyReport, isErrorLine, dayOf } from '../src/daily-report.js';
+// APIHUB_PATCH：RAG 总开关与「API 管理」后端（bridge.js 顶层 import，同样要注入）。
+// defaultRagExec 一定要换成下面的替身：真实现会调 `systemctl --user`，在这台机器上会停掉线上 RAG。
+import { createRagControl } from '../src/rag-control.js';
+import { createApiHub, readEmbeddingKind } from '../src/api-hub.js';
+import * as dshCredentials from '../src/dsh-credentials.js';
+
+// 硬性闸门：整个测试进程里禁止默认实现 spawn systemctl（rag-control 的第一行会检查它）。
+process.env.QQB_NO_SYSTEMCTL = '1';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 export async function bridgeHarness({ config = {}, savedState, files = {}, globals = {} } = {}) {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-audit-bridge-'));
   fs.mkdirSync(path.join(temp, 'src'));
   fs.mkdirSync(path.join(temp, 'state'));
-  fs.writeFileSync(path.join(temp, 'config.json'), JSON.stringify({
+  // APIHUB_PATCH：凭据一律落在临时目录里 —— 测试**绝不能**读真的 ~/.dsh（那是用户的密钥文件）。
+  // DSH_HOME 也是 D 的 dsh-credentials 与 web-search 的凭据兜底共同的口径。
+  const dshHome = path.join(temp, 'dsh-home');
+  fs.mkdirSync(dshHome, { recursive: true });
+  const prevDshHome = process.env.DSH_HOME;
+  const prevDeepseekKey = process.env.DEEPSEEK_API_KEY;
+  process.env.DSH_HOME = dshHome;
+  // 让「联网搜索实际用哪把」的判定不受开发机环境变量影响。
+  delete process.env.DEEPSEEK_API_KEY;
+  const testConfig = {
     dsh: { authToken: 'fixture-only' }, ownerQQ: 123,
     allow: { private: ['123'], groups: ['456'] }, consolePort: 0,
     consoleToken: 'fixture-console-token', slang: { enabled: false }, ...config,
-  }));
+  };
+  // APIHUB_PATCH：以前所有夹具都只写 memoryRag.url（那时没有总开关）；新语义下缺省 = 关，
+  // 这些用例会整批失效。harness 代表「已经配好并启用」的部署：memoryRag 存在但没写 enabled 时补 true。
+  // 要测「关着」的用例显式传 memoryRag: { enabled: false }。
+  if (testConfig.memoryRag && typeof testConfig.memoryRag === 'object' && testConfig.memoryRag.enabled === undefined) {
+    testConfig.memoryRag = { ...testConfig.memoryRag, enabled: true };
+  }
+  fs.writeFileSync(path.join(temp, 'config.json'), JSON.stringify(testConfig));
   if (savedState) fs.writeFileSync(path.join(temp, 'state/sessions.json'), JSON.stringify(savedState));
   // 额外状态文件（用于测试"启动时读到损坏/旧版文件"这类路径）。
   for (const [rel, content] of Object.entries(files)) {
@@ -57,7 +81,14 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.writeFileSync(target, typeof content === 'string' ? content : JSON.stringify(content));
   }
-  const calls = { created: [], archived: [], sent: [], prompts: [], follows: [], cancelled: [], images: [], faces: [], http: [] };
+  const calls = { created: [], archived: [], sent: [], prompts: [], follows: [], cancelled: [], images: [], faces: [], http: [], ragExec: [] };
+  // APIHUB_PATCH：rag-control 的默认 execFile 会调真的 systemctl；测试里只记录调用、一律回成功。
+  // 默认按「装了 systemd 单元」处理（`systemctl --user cat` 退出码 0），要测 nohup / script 模式
+  // 的用例可以改 globals.defaultRagExec 覆盖。
+  const fakeRagExec = async (cmd, args = []) => {
+    calls.ragExec.push([cmd, ...args]);
+    return { code: 0, stdout: '', stderr: '' };
+  };
   // 语音发送在桥接里是**直接 fetch 网关**（与文本/表情共用 sendChain，但要自己带 record 段），
   // 所以这里给 VM 注入一个记录型 fetch：既不让测试真的发 QQ 消息，又能断言发出的段内容。
   const fakeFetch = async (url, init = {}) => {
@@ -179,6 +210,9 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     getLifeLoop() { return lifeLoop; },
     // DECAY_PATCH：测试要直接拿到遗忘模块实例（看 snapshot、或确认它有没有创建失败）。
     getDecay() { return decay; },
+    // APIHUB_PATCH：RAG 开关与 API 管理实例（验证创建成功、或接口确实经过它们）。
+    getRagControl() { return ragControl; },
+    getApiHub() { return apiHub; },
     // REPORT_PATCH：测试要直接拿到报表实例（计数、快照），并验证创建失败时是 null。
     getDailyReport() { return dailyReport; },
     // SUGGEST_PATCH：账本建议实例（验证候选 / 计次 / 采用；创建失败时是 null）。
@@ -206,7 +240,9 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     execFileSync: () => '',
     // process 桩要带 env：voice-core / bridge 会读 process.env.FFMPEG_PATH、FFPROBE_PATH 等。
     // 之前只给 pid/platform/kill/exit，导致 `process.env.FFMPEG_PATH` 直接抛 TypeError。
-    process: { pid: process.pid, platform: process.platform, kill: process.kill, env: {}, exit: (code) => { throw new Error('unexpected exit ' + code); } },
+    // APIHUB_PATCH：QQB_RUN_DIR 指到临时目录 —— rag-control 会读 embed.log 的最后一条提示，
+    // 测试绝不能去读线上的 ~/.ai-companion-run。
+    process: { pid: process.pid, platform: process.platform, kill: process.kill, env: { QQB_RUN_DIR: path.join(temp, 'run') }, exit: (code) => { throw new Error('unexpected exit ' + code); } },
     setTimeout: (fn, ms) => { const timer = setTimeout(fn, ms); timers.add(timer); return timer; },
     clearTimeout, setInterval: () => ({ unref() {} }), clearInterval: () => {},
     NodeApiClient: class { constructor() { return api; } },
@@ -219,6 +255,8 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     createPersona,
     createMemoryDecay,
     createDailyReport, isErrorLine, dayOf,
+    // APIHUB_PATCH：RAG 开关 / API 管理 / DSH 凭据（bridge.js 顶层 import；默认 execFile 换替身）。
+    createRagControl, defaultRagExec: fakeRagExec, createApiHub, readEmbeddingKind, dshCredentials,
     ...markdown, ...sensitive, ...wait, ...safeFetch, ...forward, ...slang, ...sticker,
     ...modelPrices, ...tokenLedger, ...voiceLib, ...stateAcl, ...presetPrompt,
     // 桥接的出图出口会调归一化（体积/动图抽帧）：VM 里必须能拿到这几个函数。
@@ -258,6 +296,11 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
   bridge.setReady(true);
   return { ...bridge, calls, temp, async close() {
     for (const timer of timers) clearTimeout(timer);
+    // APIHUB_PATCH：还原测试进程里被临时改过的环境变量。
+    if (prevDshHome === undefined) delete process.env.DSH_HOME;
+    else process.env.DSH_HOME = prevDshHome;
+    if (prevDeepseekKey === undefined) delete process.env.DEEPSEEK_API_KEY;
+    else process.env.DEEPSEEK_API_KEY = prevDeepseekKey;
     fs.rmSync(temp, { recursive: true, force: true });
   } };
 }

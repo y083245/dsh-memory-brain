@@ -35,6 +35,7 @@
     "test:issues": "node scripts/test-issue-regressions.mjs",
     "test:r2-audit": "node scripts/test-reserved2-internal-audit.mjs",
     "test:report": "node scripts/test-daily-report.mjs && node scripts/test-daily-report-bridge.mjs",
+    "test:apihub": "node scripts/test-rag-control.mjs && node scripts/test-api-hub.mjs && node scripts/test-dsh-credentials.mjs && node scripts/test-rag-scripts.mjs",
     "test-wait:e2e": "node scripts/test-dsh-v2-wait.mjs",
     "test-vision": "node scripts/test-vision-media.mjs",
     "test-forward": "node scripts/test-forward.mjs",

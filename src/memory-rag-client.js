@@ -181,7 +181,15 @@ function assertLoopback(urlText) {
   return `${parsed.origin}${parsed.pathname.replace(/\/+$/, '')}`;
 }
 
-export function createMemoryRagClient({ url = DEFAULT_URL, timeoutMs = DEFAULT_TIMEOUT_MS, recallTimeoutMs = RECALL_DEFAULT_TIMEOUT_MS, log = () => {} } = {}) {
+export function createMemoryRagClient({ url = DEFAULT_URL, timeoutMs = DEFAULT_TIMEOUT_MS, recallTimeoutMs = RECALL_DEFAULT_TIMEOUT_MS, isEnabled = () => true, log = () => {} } = {}) {
+  // APIHUB_PATCH：控制台的总开关关掉后，桥接不该再向 memory-rag 发任何请求（服务已经停了，
+  // 发了也只是等超时）。这里统一在每个方法入口拦一次，各处调用点本来就把「不可用」当正常情况。
+  // 不传 isEnabled 时恒为 true：老调用方（测试 / 脚本）行为逐字不变。
+  const enabled = () => {
+    try { return isEnabled() !== false; } catch { return false; }
+  };
+  // 关着时写操作返回与服务不可用一致的形态，桥接现有的 409 / queued 映射不用改。
+  const offResult = () => ({ ok: false, status: 503, data: { off: true, error: 'RAG 已关闭' } });
   const baseUrl = assertLoopback(String(url || DEFAULT_URL).trim());
   const timeout = clampInt(timeoutMs, 100, 60000, DEFAULT_TIMEOUT_MS);
   // RAG_PATCH（P3）：/recall 走的是唤醒路径，超时单独一个（夹到 100～5000）：
@@ -218,6 +226,7 @@ export function createMemoryRagClient({ url = DEFAULT_URL, timeoutMs = DEFAULT_T
    * 返回结构只保留 { semantic, hint?, items: [{ day, title, sources, text }] }。
    */
   async function search(params = {}) {
+    if (!enabled()) return null;
     const key = String(params.key ?? '').trim();
     if (!KEY_RE.test(key)) {
       log(`[rag] 拒绝检索：会话 key 不合法`);
@@ -296,6 +305,7 @@ export function createMemoryRagClient({ url = DEFAULT_URL, timeoutMs = DEFAULT_T
 
   /** GET /health：成功返回解析后的对象，失败返回 null。 */
   async function health() {
+    if (!enabled()) return null;
     const response = await request('/health', { method: 'GET' });
     if (!response || !response.ok) return null;
     try {
@@ -315,11 +325,13 @@ export function createMemoryRagClient({ url = DEFAULT_URL, timeoutMs = DEFAULT_T
 
   /** POST /index/run：增量索引。口径不一致时服务端回 503。 */
   function indexRun() {
+    if (!enabled()) return offResult();
     return callJson('/index/run', { method: 'POST' }, INDEX_TIMEOUT_MS);
   }
 
   /** POST /rebuild：全量重建（后台任务，202）。 */
   function rebuild() {
+    if (!enabled()) return offResult();
     return callJson('/rebuild', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -329,6 +341,7 @@ export function createMemoryRagClient({ url = DEFAULT_URL, timeoutMs = DEFAULT_T
 
   /** POST /forget：删掉某个会话的全部块与向量。key 不合法直接返回 null，不发请求。 */
   async function forget(key) {
+    if (!enabled()) return offResult();
     const k = String(key ?? '').trim();
     if (!KEY_RE.test(k)) {
       log('[rag] 拒绝遗忘：会话 key 不合法');
@@ -467,6 +480,7 @@ export function createMemoryRagClient({ url = DEFAULT_URL, timeoutMs = DEFAULT_T
    * 失败（网络 / 超时 / 非 2xx / 坏 JSON / key 不一致 / candidates 不是数组）一律 null。
    */
   async function recall(params = {}) {
+    if (!enabled()) return null;
     const key = String(params.key ?? '').trim();
     if (!KEY_RE.test(key)) {
       log('[rag] 拒绝自动想起：会话 key 不合法');
@@ -495,6 +509,7 @@ export function createMemoryRagClient({ url = DEFAULT_URL, timeoutMs = DEFAULT_T
    * people 只留纯数字 QQ 号（至多 5 个），exclude 至多 200 个。
    */
   async function associate(params = {}) {
+    if (!enabled()) return null;
     const key = String(params.key ?? '').trim();
     if (!KEY_RE.test(key)) {
       log('[rag] 拒绝联想：会话 key 不合法');
@@ -525,6 +540,7 @@ export function createMemoryRagClient({ url = DEFAULT_URL, timeoutMs = DEFAULT_T
 
   /** POST /summaries：控制台按编号取摘要文字（ids 至多 100，没有 id 就不发请求）。 */
   async function summaries(params = {}) {
+    if (!enabled()) return null;
     const key = String(params.key ?? '').trim();
     if (!KEY_RE.test(key)) {
       log('[rag] 拒绝查摘要：会话 key 不合法');
@@ -547,6 +563,7 @@ export function createMemoryRagClient({ url = DEFAULT_URL, timeoutMs = DEFAULT_T
    * timeoutMs 由调用方单独给（它不走唤醒路径，但也不能把控制台拖住）。
    */
   async function notes(params = {}, { timeoutMs } = {}) {
+    if (!enabled()) return null;
     const key = String(params.key ?? '').trim();
     if (!KEY_RE.test(key)) {
       log('[rag] 拒绝查账本候选：会话 key 不合法');
@@ -563,6 +580,7 @@ export function createMemoryRagClient({ url = DEFAULT_URL, timeoutMs = DEFAULT_T
 
   /** POST /distill/retry：控制台「重试失败的」。返回 { ok, status, data } 或 null（不可达）。 */
   function distillRetry() {
+    if (!enabled()) return offResult();
     return callJson('/distill/retry', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -570,5 +588,9 @@ export function createMemoryRagClient({ url = DEFAULT_URL, timeoutMs = DEFAULT_T
     }, DISTILL_RETRY_TIMEOUT_MS);
   }
 
-  return { search, health, indexRun, rebuild, forget, recall, associate, summaries, notes, distillRetry };
+  return {
+    search, health, indexRun, rebuild, forget, recall, associate, summaries, notes, distillRetry,
+    // APIHUB_PATCH：给桥接算 history-search 的 semantic / 判断总开关用。
+    enabled
+  };
 }

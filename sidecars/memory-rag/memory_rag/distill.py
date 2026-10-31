@@ -29,6 +29,9 @@ import httpx
 from .embeddings import EmbeddingUnavailable
 from .l2 import ENTITY_TYPES, SELF, normalize_name, text_hash
 
+# APIHUB_PATCH：单独的提炼 API 配置（控制台「API 管理」写，600）。文件不存在 = 跟随人格判读。
+DEFAULT_DISTILL_API_FILE = "long-memory/rag/distill-api.json"
+
 # 固定 system 提示词：每次逐字相同，DeepSeek 的前缀缓存才能命中（命中价是未命中的 1/50）。
 SYSTEM_PROMPT = """你是聊天记录的提炼器。你会收到一段聊天记录，请提炼成一个 JSON 对象。
 
@@ -245,6 +248,40 @@ class Distiller:
         appr = settings.get("appraisal") if isinstance(settings.get("appraisal"), dict) else {}
         return str(appr.get("baseUrl") or "https://api.deepseek.com").rstrip("/")
 
+    def _read_own_api(self) -> dict | None:
+        """APIHUB_PATCH：读单独的提炼 API 配置；None = 跟随人格判读（现状）。
+
+        每次调用前现读，不缓存：控制台保存后不用重启（规格 §4.4）。
+        `useShared:false` 但没密钥时返回 key=None —— **不回落**人格那把，
+        免得用户以为自己填的密钥在用。
+        """
+        try:
+            data = json.loads((self.paths.state / DEFAULT_DISTILL_API_FILE).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if not isinstance(data, dict) or data.get("useShared") is not False:
+            return None  # 文件不存在 / 坏掉 / useShared 不是布尔或为真：都按「共用」处理
+        raw_key = data.get("apiKey")
+        key = raw_key.strip() if isinstance(raw_key, str) and raw_key.strip() else None
+        base = data.get("baseUrl")
+        model = data.get("model")
+        return {"key": key,
+                "base_url": base.strip().rstrip("/") if isinstance(base, str) else "",
+                "model": model.strip() if isinstance(model, str) else ""}
+
+    def _resolve_api(self) -> tuple[str | None, str, str, str]:
+        """APIHUB_PATCH：返回 (密钥, base_url, 模型, source)，每次现读 distill-api.json。
+
+        模型优先级：单独配置的 model → config.yml 的 distill.model → 人格判读的 appraisal.model
+        → deepseek-flash（后三档就是原来的 `_model`）。
+        """
+        shared_key, settings = self._read_key()
+        own = self._read_own_api()
+        if own is None:
+            return shared_key, self._base_url(settings), self._model(settings), "shared"
+        base_url = own["base_url"] if own["base_url"].startswith("https://") else self._base_url(settings)
+        return own["key"], base_url, (own["model"] or self._model(settings)), "own"
+
     @staticmethod
     def _today_key() -> str:
         return time.strftime("%Y-%m-%d", time.localtime())
@@ -328,13 +365,15 @@ class Distiller:
     # ---------------------------------------------------------------- 对外
 
     def status(self) -> dict:
-        key, settings = self._read_key()
+        # APIHUB_PATCH：source 告诉控制台「现在用的是单独配的，还是人格判读那把」
+        key, _base_url, model, source = self._resolve_api()
         st = self.l2.stats() if self.l2 else {}
         today = self._day(create=False)
         return {
             "enabled": self.enabled,
             "key": bool(key),
-            "model": self._model(settings),
+            "model": model,
+            "source": source,
             "summaries": int(st.get("summaries", 0)),
             "pending": int(st.get("pending", 0)),
             "failed": int(st.get("failed", 0)),
@@ -370,15 +409,12 @@ class Distiller:
 
         counts["vectors"] += self._fill_vectors()
 
-        key, settings = self._read_key()
+        key, base_url, model, _source = self._resolve_api()
         if not key:
             return counts  # 没配密钥：本轮不提炼，/health 的 key=false 说明原因
 
         if self._day()["calls"] >= self.daily_limit:
             return counts  # 到上限：块留着第二天
-
-        model = self._model(settings)
-        base_url = self._base_url(settings)
         for chunk in self.l2.pending_chunks(now, self.per_round):
             if self._day()["calls"] >= self.daily_limit:
                 break
@@ -445,9 +481,11 @@ class Distiller:
         limit = min(self.per_round, room)
         if limit <= 0:
             return counts
-        key, _settings = self._read_key()
+        key, fresh_base, fresh_model, _source = self._resolve_api()
         if not key:
             return counts
+        # APIHUB_PATCH：回补可能接着跑很久，用这一轮现读的口径（控制台刚改的立即生效）
+        base_url, model = fresh_base, fresh_model
         for it in self.l2.queued_notes(limit):
             if self._day()["calls"] >= self.daily_limit:
                 break

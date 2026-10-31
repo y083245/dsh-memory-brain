@@ -251,6 +251,12 @@ class ChunkDB:
             reasons = {r["cut_reason"]: int(r["n"]) for r in self.conn.execute("SELECT cut_reason, COUNT(*) AS n FROM chunks GROUP BY cut_reason")}
         return {"chunks": total, "per_key": per_key, "cut_reason": reasons}
 
+    def total_chars(self) -> int:
+        """APIHUB_PATCH：全部块正文的字数之和（给桥接估算重建量）。读也要持锁，理由同 stats。"""
+        with self.lock:
+            row = self.conn.execute("SELECT COALESCE(SUM(LENGTH(text)), 0) AS n FROM chunks").fetchone()
+        return int(row["n"] or 0)
+
 
 def bm25_lines(lines: Sequence[str], tokens: Sequence[str], n_docs: int, df: dict[str, int],
                k1: float = 1.2, b: float = 0.75) -> list[float]:

@@ -24,6 +24,18 @@ cmd="${1:-}"
 case "$cmd" in
   embed-check)
     bin="${2:-}" model="${3:-}"
+    # APIHUB_PATCH：用户选了「自己部署的本地服务 / 云端」时，向量模型不归我们管，自带的
+    # embedding（约 9 GB 显存）就不该起来。拦在这里，是因为它是单元自己的 ExecCondition：
+    # memory-rag 的 Wants=、控制台开关、start-all.sh、开机自启、崩溃重启都会经过这一关，
+    # 不用改已经装好的 unit 文件。判定口径与 start-all.sh 共用 rag-config.py（约定 §6）。
+    # 没有 python3 / 脚本不存在 / 输出不是正好 no → 一律照旧往下走。
+    repo_root="$(cd "$(dirname "$0")/../.." && pwd)"
+    if command -v python3 >/dev/null 2>&1 && [ -f "$repo_root/scripts/rag-config.py" ]; then
+      if [ "$(python3 "$repo_root/scripts/rag-config.py" embedding-managed "$repo_root" 2>/dev/null)" = "no" ]; then
+        echo "[qqb] 向量模型是自己部署 / 云端，不起自带的 embedding（控制台「API 管理」里改部署方式）"
+        exit 1
+      fi
+    fi
     if port_up 8091; then
       echo "[qqb] 端口 8091 已被占用（可能是 systemd 之外拉起的 embedding），不再起一份"
       exit 1

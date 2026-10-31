@@ -16,8 +16,15 @@
 - 独立的 Python 服务：只读上面那份聊天存档，按时间间隔与话题变化切块，写进 Chroma（块向量）与 SQLite FTS5（jieba / BM25）。
 - 检索走「语义 + 关键词」两路 RRF 合并，返回原文片段和日期；`qq_history_search` 可以同时给语义 query 与关键词变体。
 - 提炼层用一次模型调用为每个话题块生成摘要、实体与关系，摘要始终指回原文；删除存档后可重建，原文没变的块按哈希复用旧摘要。
-- embedding 可选：本地 `llama-server`（Qwen3-Embedding）或任意 OpenAI 兼容 `/embeddings` API，只改 `sidecars/memory-rag/config.yml` 的 `embedding.provider`；细节见该目录 README。
+- embedding 三种部署方式：本项目自带的 `llama-server`（Qwen3-Embedding）、自己部署的本地服务（Ollama / LM Studio / vLLM，只许回环地址）、云端 OpenAI 兼容 `/embeddings` API。一般在控制台「API 管理」页选（写 `state/long-memory/rag/embedding-settings.json`，优先于 `config.yml`）；细节与兼容性见该目录 README。
 - 服务连不上或超时时，桥接自动退回关键词检索，不影响正常收发。
+
+## RAG 开关与 API 管理（控制台「API 管理」页 `#api`）
+
+- **RAG 总开关**：`config.json` 的 `memoryRag.enabled`（缺省关）。打开 = 写开关并拉起 memory-rag（部署方式是「自带」时连 embedding）；关闭 = 桥接立即不再调用记忆服务（检索退回关键词，自动想起 / 联想 / 账本建议 / 提炼暂停）再停服务，数据保留。装了 systemd 用户服务时用 `systemctl --user`，没装时调 `start-all.sh --rag` / `stop-all.sh --rag`。页面实时显示 已关闭 / 启动中 / 运行中 / 部分可用 / 需要重建 / 重建中 / 启动失败。
+- **API 统一填写**：她聊天（DSH 的 DeepSeek 密钥，按 DSH 的写锁协议只改 `refs.DEEPSEEK_API_KEY` 一行）、人格判读、联网搜索、语音合成、RAG 向量模型、RAG 话题提炼（缺省沿用人格判读那把）。密钥仍存在各模块原来的文件里，页面只显示前 4 / 后 4 位；RAG 两栏只有开关打开后才能填。
+- **兼容性说明**写在页面顶部：向量模型三种方式都走 OpenAI 兼容 `POST /v1/embeddings`；人格判读与话题提炼走 OpenAI 兼容 `/chat/completions`（要支持 JSON 输出）；联网搜索走 Anthropic 兼容 Messages + `web_search` 工具（只有 DeepSeek 官方与 Anthropic 官方支持，接不上自动退回 Bing）。
+- 换向量模型：先「测试连接」拿到维度 → 保存时提示全量重建（重建期间只走关键词，摘要不重新提炼）→ 自动重启 memory-rag 并重建。
 
 ## 人格与情绪（影子模式 / 注入、DSH 插件）
 
@@ -71,6 +78,6 @@
 
 - **Node**：`package.json` 要求 `>= 22.13`，推荐使用 Node 24。
 - **配置**：复制 `config.example.json` 为 `config.json`，至少填 `snowluma`、`dsh`、`ownerQQ`、`allow`。本分支新增的可选项在 `memoryRag`、`decay`、`lifeLoop` 三段，均带缺省值与 `_comment` 说明；不写也能启动。
-- **向量记忆**：Python 3.12 + `uv`，在 `sidecars/memory-rag` 下建 `.venv` 并 `pip install -e . pytest`；embedding 用 `llama.cpp` 的 `llama-server` 跑 Qwen3-Embedding（缺省端口 8091），memory-rag 自身监听 8093。也可以把 `embedding.provider` 改成 `api`，走 OpenAI 兼容接口。`START_RAG=1 ./start-all.sh` 会连向量记忆一起起，`./start-all.sh --rag` 只起这两个服务。
+- **向量记忆**：Python 3.12 + `uv`，在 `sidecars/memory-rag` 下建 `.venv` 并 `pip install -e . pytest`；embedding 用 `llama.cpp` 的 `llama-server` 跑 Qwen3-Embedding（缺省端口 8091），memory-rag 自身监听 8093。也可以在控制台「API 管理」页改成自己部署的本地服务（Ollama 等）或云端 API。RAG 总开关是 `config.json` 的 `memoryRag.enabled`（缺省关）：控制台打开即可；`./start-all.sh --rag` 起服务并打开开关，`./stop-all.sh --rag` 停服务并关上。
 - **运行时数据**：全部在 `state/`（聊天存档、账本、人格、记忆代谢、报表快照、令牌等），已在 `.gitignore` 中排除，**绝不提交**。
-- **测试**：`npm run test:suggest`、`test:assoc`、`test:report`、`test:r2-audit`、`test:decay`、`test:persona`、`test:life-loop`、`test:ltm-forget`、`test:rag-bridge`、`test:ltm-search`、`test:mcp-history-search`、`test:regressions`、`test:issues`、`test:hardening`、`test:mcp-servers`、`test:role-card`、`test:token`；sidecar 测试用 `sidecars/memory-rag/.venv/bin/python -m pytest -q`。
+- **测试**：`npm run test:suggest`、`test:assoc`、`test:report`、`test:r2-audit`、`test:decay`、`test:persona`、`test:life-loop`、`test:ltm-forget`、`test:rag-bridge`、`test:ltm-search`、`test:mcp-history-search`、`test:regressions`、`test:issues`、`test:hardening`、`test:mcp-servers`、`test:role-card`、`test:token`、`test:apihub`；sidecar 测试用 `sidecars/memory-rag/.venv/bin/python -m pytest -q`。

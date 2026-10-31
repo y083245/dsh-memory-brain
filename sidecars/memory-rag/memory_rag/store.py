@@ -12,6 +12,8 @@ from typing import Sequence
 
 import chromadb
 import numpy as np
+# APIHUB_PATCH：重建窗口里数向量 / 查询会撞上「集合不存在」，需要按类型精确捕获
+from chromadb.errors import NotFoundError
 from chromadb.config import Settings
 
 COLLECTION = "chunks"
@@ -21,6 +23,60 @@ SUMMARIES = "summaries"
 
 class IndexMismatch(RuntimeError):
     """库里向量的口径和当前配置不一致，必须全量重建。"""
+
+
+def drop_collections(path: Path) -> None:
+    """APIHUB_PATCH：用 chromadb 的接口删掉块与摘要两个集合，替代「删 chroma 目录」。
+
+    为什么不能删目录：chromadb 1.5.x 的 `PersistentClient` 在同一进程里**按路径缓存 System**
+    （`SharedSystemClient`，键是路径的哈希）。`shutil.rmtree` 只删掉了磁盘文件，之后新建的
+    客户端拿到的还是缓存里那份 System——旧集合、旧 metadata 全在，于是「换向量口径后全量重建」
+    当场又抛 IndexMismatch（控制台「API 管理」换模型 → 桥接重启 memory-rag → /rebuild 走的就是
+    这条路，用户会卡在「需要全量重建」里出不来）。按集合删除走的是那份 System 的真实接口，
+    磁盘和缓存一起清干净；集合本来就不存在（首次启动、目录里什么都没有）时忽略。
+    """
+    path = Path(path)
+    path.mkdir(parents=True, exist_ok=True)
+    client = None
+    try:
+        client = chromadb.PersistentClient(
+            path=str(path), settings=Settings(anonymized_telemetry=False, allow_reset=True))
+        for name in (COLLECTION, SUMMARIES):
+            try:
+                client.delete_collection(name)
+            except Exception:  # 集合不存在：本来就没有，没什么可删的
+                pass
+    finally:
+        try:
+            if client is not None:
+                client.close()  # 引用计数归零时顺便停掉 System、清掉共享缓存
+        except Exception:
+            pass
+
+
+def read_collection_meta(path: Path, name: str = COLLECTION) -> dict | None:
+    """APIHUB_PATCH：只读现有集合的 metadata（坏配置要用旧口径，见 Service）。
+
+    不创建集合、不改动任何数据：库文件不存在或集合不存在都返回 None。
+    读完立刻关掉客户端，不和随后的 VectorStore 抢同一套 System。
+    """
+    db_file = Path(path) / "chroma.sqlite3"
+    if not db_file.exists():
+        return None
+    client = None
+    try:
+        client = chromadb.PersistentClient(
+            path=str(path), settings=Settings(anonymized_telemetry=False, allow_reset=True))
+        col = client.get_collection(name, embedding_function=None)
+        return dict(col.metadata or {})
+    except Exception:  # 集合不存在 / 库版本不认：当作没有，交给调用方兜底
+        return None
+    finally:
+        try:
+            if client is not None:
+                client.close()
+        except Exception:
+            pass
 
 
 class VectorStore:
@@ -107,17 +163,30 @@ class VectorStore:
         if t_to is not None:
             conds.append({"t_start": {"$lte": int(t_to)}})
         where = conds[0] if len(conds) == 1 else {"$and": conds}
-        total = self.col.count()
-        if total == 0:
+        # APIHUB_PATCH：这里连着两次碰旧集合（count 与 query），重建窗口里都可能抛
+        # NotFoundError。调用方（search.search）只兜 EmbeddingUnavailable，不兜这个，
+        # 于是控制台一搜就 500；这轮就当作向量路没结果，其余几路（BM25 / 摘要 / 图）照常。
+        try:
+            total = self.col.count()
+            if total == 0:
+                return []
+            res = self.col.query(query_embeddings=[np.asarray(vec, dtype=np.float32).tolist()],
+                                 n_results=min(int(n), total), where=where, include=["distances"])
+        except NotFoundError:
             return []
-        res = self.col.query(query_embeddings=[np.asarray(vec, dtype=np.float32).tolist()],
-                             n_results=min(int(n), total), where=where, include=["distances"])
         ids = (res.get("ids") or [[]])[0]
         dists = (res.get("distances") or [[]])[0]
         return [(i, 1.0 - float(d)) for i, d in zip(ids, dists)]
 
     def count(self) -> int:
-        return int(self.col.count())
+        # APIHUB_PATCH：reset() 是先 delete_collection 再重新打开的，这两步之间别的线程
+        # 拿着旧 self.col 去数就会抛 NotFoundError；/health 被控制台每 2 秒轮询一次，
+        # 撞上时整页会短暂显示成「启动失败」。重置中的集合本来就是空的，按 0 报即可；
+        # 别的异常（比如库损坏）照旧往上抛，不在这里一起吞掉。
+        try:
+            return int(self.col.count())
+        except NotFoundError:
+            return 0
 
     # ---------------------------------------------------------------- 摘要向量（P3）
 
@@ -144,11 +213,16 @@ class VectorStore:
         if t_end_lte is not None:
             conds.append({"t_end": {"$lte": int(t_end_lte)}})
         where = conds[0] if len(conds) == 1 else {"$and": conds}
-        total = self.scol.count()
-        if total == 0:
+        # APIHUB_PATCH：同 query()——reset_all() 窗口里调用方（search / recall）都没兜
+        # NotFoundError，这里按「这轮摘要路没有结果」处理。
+        try:
+            total = self.scol.count()
+            if total == 0:
+                return []
+            res = self.scol.query(query_embeddings=[np.asarray(vec, dtype=np.float32).tolist()],
+                                  n_results=min(int(n), total), where=where, include=["distances"])
+        except NotFoundError:
             return []
-        res = self.scol.query(query_embeddings=[np.asarray(vec, dtype=np.float32).tolist()],
-                              n_results=min(int(n), total), where=where, include=["distances"])
         ids = (res.get("ids") or [[]])[0]
         dists = (res.get("distances") or [[]])[0]
         return [(i, 1.0 - float(d)) for i, d in zip(ids, dists)]
@@ -160,4 +234,9 @@ class VectorStore:
         self.scol.delete(ids=ids)
 
     def count_summaries(self) -> int:
-        return int(self.scol.count())
+        # APIHUB_PATCH：同 count()——reset_all() 删掉摘要集合到重新打开之间，这里会抛
+        # NotFoundError（service.health 与 recall 都会调，抛了就整条链路 500）。按 0 报。
+        try:
+            return int(self.scol.count())
+        except NotFoundError:
+            return 0

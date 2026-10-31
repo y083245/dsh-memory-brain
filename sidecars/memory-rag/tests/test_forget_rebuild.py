@@ -512,3 +512,90 @@ def test_http_health_during_rebuild_never_fails(client, service, state):
     assert not errors, f"重建期间 /health 出错（前 3 条）：{errors[:3]}"
     assert calls >= 20, f"并发轮询没真正跑起来（只成功 {calls} 次）"
     assert service.db.stats()["chunks"] == total
+
+
+# ---------------------------------------------------------------- 换向量口径后重建（APIHUB_PATCH）
+
+
+class _StoreEmbedder:
+    """APIHUB_PATCH：口径可配的假 embedding——模型名和维度都能换，不连 8091、不联网。
+
+    和 conftest 的 FakeEmbedder 一样只按文字算一个确定向量；区别是 model_id / dim 由用例指定，
+    才能在同一进程里模拟「控制台换了向量模型」。不用 numpy：这里只需要能被 Chroma 吃下的数组。
+    """
+
+    def __init__(self, model_id: str, dim: int):
+        self.model_id = model_id
+        self.dim = dim
+
+    def _one(self, text: str) -> list[float]:
+        v = [0.0] * self.dim
+        for i, ch in enumerate(text[: self.dim]):
+            v[i] = ord(ch) % 97 + 1.0
+        n = sum(x * x for x in v) ** 0.5 or 1.0
+        return [x / n for x in v]
+
+    def embed_docs(self, texts):
+        return [self._one(t) for t in texts]
+
+    def embed_query(self, text):
+        return self._one(text)
+
+    def healthy(self):
+        return True
+
+
+def _close_service(svc) -> None:
+    """释放这轮 Service 的向量库客户端与 SQLite 连接（同 conftest.close_rag）。"""
+    from conftest import close_rag
+
+    close_rag(svc)
+
+
+def _rebuild_after_model_change(monkeypatch, state, dim_b: int) -> None:
+    """同一进程内：A 口径建库并索引 → B 口径启动报不一致 → rebuild() 必须能救回来。"""
+    monkeypatch.setenv("MEMORY_RAG_STATE_DIR", str(state))
+    write_archive(state, PRIVATE, PRIVATE_ROWS)
+
+    svc_a = Service(str(ROOT / "config.yml"), embedder=_StoreEmbedder("model-A", 8))
+    try:
+        assert svc_a.mismatch is None
+        assert svc_a.indexer.run(now_ms=FAR_FUTURE)["chunks"] >= 2
+        assert svc_a.vstore.count() > 0
+    finally:
+        _close_service(svc_a)
+
+    svc_b = Service(str(ROOT / "config.yml"), embedder=_StoreEmbedder("model-B", dim_b))
+    try:
+        # 换口径后启动一定是 mismatch（否则这个用例根本没测到要修的那条路）
+        assert svc_b.mismatch and "model-A" in svc_b.mismatch
+        assert svc_b.vstore is None and svc_b.indexer is None
+
+        # 改动前：这里抛 IndexMismatch（rmtree 删了磁盘文件，chromadb 同进程按路径缓存
+        # 的 System 还是那一份，旧集合与旧 metadata 都还在）
+        svc_b.rebuild()
+
+        assert svc_b.mismatch is None
+        assert svc_b.vstore.model_id == "model-B" and svc_b.vstore.dim == dim_b
+        assert svc_b.indexer is not None and svc_b.searcher is not None
+        # 新口径能把块重新索引进去（不是「能打开但写不进去」）
+        assert svc_b.indexer.run(now_ms=FAR_FUTURE)["chunks"] >= 2
+        assert svc_b.vstore.count() > 0
+
+        health = svc_b.health()
+        assert health["ok"] is True and health["mismatch"] is None
+        assert health["embedding"]["model_id"] == "model-B"
+        assert health["embedding"]["healthy"] is True
+        assert health["store"]["vectors"] == svc_b.vstore.count() > 0
+    finally:
+        _close_service(svc_b)
+
+
+def test_rebuild_after_model_change_in_same_process(monkeypatch, state):
+    """控制台换向量模型后桥接重启 memory-rag 并调 /rebuild：维度不变（8 → 8）。"""
+    _rebuild_after_model_change(monkeypatch, state, dim_b=8)
+
+
+def test_rebuild_after_model_and_dim_change_in_same_process(monkeypatch, state):
+    """同一条路，维度也变了（8 → 16）：旧集合的维度不能把新集合卡住。"""
+    _rebuild_after_model_change(monkeypatch, state, dim_b=16)

@@ -2,9 +2,9 @@
 # 一键按顺序启动：DSH → QQ → SnowLuma → 等 OneBot → qq-bridge
 #
 # 用法：
-#   ./start-all.sh                  # 全部启动（向量记忆默认关，不占显存）
-#   START_RAG=1 ./start-all.sh      # 连向量记忆一起起（embedding :8091 + memory-rag :8093）
-#   ./start-all.sh --rag            # 只起向量记忆，起完就退出（不动 DSH/QQ/SnowLuma/桥接）
+#   ./start-all.sh                  # 全部启动（向量记忆按 config.json 的 memoryRag.enabled 决定起不起）
+#   START_RAG=1 ./start-all.sh      # 打开向量记忆（写 enabled=true 并起 embedding :8091 + memory-rag :8093）
+#   ./start-all.sh --rag            # 只起向量记忆（同上，写完开关就退出，不动 DSH/QQ/SnowLuma/桥接）
 #
 # 特点：
 #   - 已经在跑的环节自动跳过，可以反复执行
@@ -28,7 +28,8 @@ if [ ! -d "$SNOW_DIR" ]; then
   # 版本升级后目录名会变，自动找最新的 lite 包
   SNOW_DIR="$(ls -d "$HOME_DIR"/snowluma/SnowLuma-*-lite 2>/dev/null | sort -V | tail -n 1 || true)"
 fi
-BRIDGE_DIR="${BRIDGE_DIR:-$HOME_DIR/qq-bridge}"
+# 仓库目录：缺省就是本脚本所在目录（可用 BRIDGE_DIR 覆盖）
+BRIDGE_DIR="${BRIDGE_DIR:-$(cd "$(dirname "$0")" && pwd)}"
 QQ_BIN="${QQ_BIN:-/opt/QQ/qq}"
 GSV_DIR="${GSV_DIR:-$HOME_DIR/gpt-sovits}"
 GSV_PY="$GSV_DIR/.venv/bin/python"
@@ -38,6 +39,10 @@ START_GSV="${START_GSV:-0}"
 # 会和 ComfyUI 生图抢。关着不影响桥接：检索会自动降级为关键词检索。
 START_RAG="${START_RAG:-0}"
 RAG_ONLY=0
+# APIHUB_PATCH：RAG 开不开以 config.json 的 memoryRag.enabled 为准（控制台开关、stop-all.sh --rag 都写它，
+# 这样「重启后要不要把向量记忆拉起来」跟用户的意图一致）。START_RAG=1 / --rag 只是「现在打开」的快捷方式。
+RAG_CONFIG_PY="$(cd "$(dirname "$0")" && pwd)/scripts/rag-config.py"
+RAG_ENABLED=0
 RAG_DIR="$BRIDGE_DIR/sidecars/memory-rag"
 RAG_PY="$RAG_DIR/.venv/bin/python"
 EMBED_BIN="${EMBED_BIN:-$HOME_DIR/llama.cpp/build/bin/llama-server}"
@@ -103,12 +108,38 @@ sd_start() {
   sd start "$1"
 }
 
+# APIHUB_PATCH：读写 RAG 开关（python3，见 scripts/rag-config.py）；读不到 / python3 缺失按 false。
+rag_cfg() { python3 "$RAG_CONFIG_PY" "$@"; }
+# rag_embedding_managed：embedding 归不归本脚本管 —— 部署方式是「本项目自带」（设置文件 kind=bundled，
+# 或没有设置文件时的 config.yml provider=local）才管；自己部署的本地服务 / 云端只填地址，不碰它的进程。
+rag_embedding_managed() {
+  local answer=""
+  answer="$(rag_cfg embedding-managed "$BRIDGE_DIR" 2>/dev/null || true)"
+  [ "$answer" = "no" ] && return 1
+  return 0
+}
+
 for arg in "$@"; do
   case "$arg" in
     --rag) RAG_ONLY=1; START_RAG=1 ;;
     *) warn "未知参数：$arg（可用：--rag）" ;;
   esac
 done
+
+# APIHUB_PATCH：START_RAG=1 / --rag 就是「打开 RAG」，先把开关写进 config.json（写不成只告警，照样起）；
+# 其它情况一律看 config.json 的 memoryRag.enabled（原来只看 START_RAG）。
+if [ -f "$RAG_CONFIG_PY" ] && command -v python3 >/dev/null 2>&1; then
+  if [ "$START_RAG" = "1" ]; then
+    rag_cfg set-enabled "$BRIDGE_DIR" true \
+      || warn "没能把 RAG 开关写进 $BRIDGE_DIR/config.json，这次仍按命令起服务"
+    RAG_ENABLED=1
+  elif [ "$(rag_cfg get-enabled "$BRIDGE_DIR" 2>/dev/null || true)" = "true" ]; then
+    RAG_ENABLED=1
+  fi
+else
+  warn "找不到 scripts/rag-config.py 或 python3，RAG 开关按 START_RAG=${START_RAG} 处理"
+  [ "$START_RAG" = "1" ] && RAG_ENABLED=1
+fi
 
 # rag_wait_health <port> <seconds> <grep-pattern>：轮询 /health 直到响应里出现 pattern。
 # 两个服务的健康响应形状不同：llama-server 是 {"status":"ok"}，memory-rag 是 {"ok":true,...}，
@@ -138,7 +169,10 @@ sd_running() {
 start_rag_units() {
   local reason=""
   # ── embedding ──
-  if sd_running qq-embedding.service embedding; then
+  # APIHUB_PATCH：自己部署 / 云端时整段跳过（不 embed-check、不起单元、不等健康）。
+  if ! rag_embedding_managed; then
+    ok "向量模型：自己部署 / 云端，不由本脚本管理"
+  elif sd_running qq-embedding.service embedding; then
     :
   elif port_up 8091; then
     ok "embedding 已在运行（8091，不是 systemd 起的，本次不管它）"
@@ -179,14 +213,16 @@ start_rag_units() {
 start_rag() {
   local free_mib="" running=""
   echo
-  if [ "$START_RAG" != "1" ]; then
-    # 没开 START_RAG 不等于没在跑（可能之前用 --rag 起过）。如实说明，别让人以为服务被停了。
-    port_up 8091 && running="8091"
+  if [ "$RAG_ENABLED" != "1" ]; then
+    # 开关关着不等于没在跑（可能之前用 --rag 起过）。如实说明，别让人以为服务被停了。
+    if rag_embedding_managed; then
+      port_up 8091 && running="8091"
+    fi
     port_up 8093 && running="${running:+$running/}8093"
     if [ -n "$running" ]; then
-      ok "向量记忆没有开启（START_RAG=0），但检测到在运行（$running），本次不管它"
+      ok "向量记忆没有开启（config.json 的 memoryRag.enabled 不是 true），但检测到在运行（$running），本次不管它"
     else
-      ok "向量记忆已关闭，跳过（需要时 START_RAG=1 ./start-all.sh，或只起它：./start-all.sh --rag）"
+      ok "向量记忆已关闭，跳过（需要时 ./start-all.sh --rag，或在控制台打开 RAG 开关）"
     fi
     return 0
   fi
@@ -197,7 +233,10 @@ start_rag() {
   fi
 
   # ── embedding ──
-  if port_up 8091; then
+  # APIHUB_PATCH：自己部署 / 云端时整段跳过（不查端口、不判显存、不起进程）。
+  if ! rag_embedding_managed; then
+    ok "向量模型：自己部署 / 云端，不由本脚本管理"
+  elif port_up 8091; then
     ok "embedding 已在运行（8091）"
   else
     free_mib="$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits 2>/dev/null | head -n 1 | tr -d ' ')"
@@ -244,7 +283,14 @@ if [ "$RAG_ONLY" = "1" ]; then
   start_rag
   echo
   printf '\033[1;32m向量记忆（可选）\033[0m\n'
-  if port_up 8091; then echo "  embedding        http://127.0.0.1:8091"; else echo "  embedding        未运行（检索只走 BM25）"; fi
+  # APIHUB_PATCH：向量模型不归本脚本管时连端口都不查（8091 上可能是用户自己的服务）。
+  if ! rag_embedding_managed; then
+    echo "  向量模型：自己部署 / 云端，不由本脚本管理"
+  elif port_up 8091; then
+    echo "  embedding        http://127.0.0.1:8091"
+  else
+    echo "  embedding        未运行（检索只走 BM25）"
+  fi
   if port_up 8093; then echo "  memory-rag       http://127.0.0.1:8093"; else echo "  memory-rag       未运行（检索降级为关键词）"; fi
   echo "  日志目录         $RUN_DIR"
   echo
@@ -410,8 +456,13 @@ echo
 printf '\033[1;32m全部就绪\033[0m\n'
 echo "  DSH              http://127.0.0.1:3080"
 [ "$START_GSV" = "1" ] && echo "  GPT-SoVITS API   http://127.0.0.1:9880/docs"
-if [ "$START_RAG" = "1" ]; then
-  echo "  embedding        http://127.0.0.1:8091"
+# APIHUB_PATCH：RAG 开着才打这两行；向量模型不归本脚本管时换成一句说明。
+if [ "$RAG_ENABLED" = "1" ]; then
+  if rag_embedding_managed; then
+    echo "  embedding        http://127.0.0.1:8091"
+  else
+    echo "  向量模型         自己部署 / 云端，不由本脚本管理"
+  fi
   echo "  memory-rag       http://127.0.0.1:8093"
 fi
 echo "  SnowLuma WebUI   http://127.0.0.1:5099"

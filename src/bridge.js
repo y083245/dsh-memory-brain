@@ -72,6 +72,13 @@ import { createLedgerSuggest } from './ledger-suggest.js';
 import { createPersona } from './persona.js';
 // REPORT_PATCH：每日报表（docs/design/DAILY_REPORT_SPEC.md；接口约定见 docs/design/worker-kit/report/contract.md）
 import { createDailyReport, isErrorLine, dayOf } from './daily-report.js';
+// APIHUB_PATCH：RAG 总开关 + 「API 管理」页的后端（docs/design/API_CONSOLE_SPEC.md；
+// 接口约定见 docs/design/worker-kit/apihub/contract.md）。defaultRagExec 单独导出，
+// 是为了测试（scripts/audit-bridge-harness.mjs）能把它换成只记录调用的替身 —— 默认实现会调真的
+// systemctl，测试路径绝不能碰（QQB_NO_SYSTEMCTL=1 是第二道闸门）。
+import { createRagControl, defaultRagExec } from './rag-control.js';
+import { createApiHub, readEmbeddingKind } from './api-hub.js';
+import * as dshCredentials from './dsh-credentials.js';
 
 // LIFE_LOOP_PATCH（规格 §8.1）：这三种唤醒本来就是桥接自己产出的「本地文案」——own-life 的
 // 自己的时间、到期的约定、每周周报。以前它们会被通用唤醒分支整段替换掉（F1），现在有文案时
@@ -1649,18 +1656,55 @@ async function main() {
   // RAG_PATCH：memory-rag 客户端。loadConfig 只保留已知顶层键，memoryRag 不在其中，
   // 这里从同一份 config.json 补读（用户不配就用客户端默认的 127.0.0.1:8093）。
   // 配成非回环地址时客户端会拒绝创建：只告警、不把整个桥接带崩，检索退回关键词。
+  //
+  // APIHUB_PATCH：总开关（config.json 的 memoryRag.enabled，缺省 = 关）在这里建；
+  // 客户端拿到 isEnabled 之后，关着时一个请求都不发（检索退回关键词、自动想起跳过）。
+  const ragFileCfg = (() => {
+    try { return readJsonSafe(path.join(ROOT, 'config.json'), null)?.memoryRag ?? {}; } catch { return {}; }
+  })();
+  const embeddingKindOf = readEmbeddingKind({ root: ROOT, stateDir: STATE_DIR });
+  let ragControl = null;
   let rag = null;
   try {
-    const ragFileCfg = readJsonSafe(path.join(ROOT, 'config.json'), null)?.memoryRag ?? {};
     // RAG_PATCH（P3）：自动想起的 /recall 走唤醒路径，超时单独配（memoryRag.recall.timeoutMs）。
     rag = createMemoryRagClient({
       url: ragFileCfg.url,
       timeoutMs: ragFileCfg.timeoutMs,
       recallTimeoutMs: ragFileCfg.recall?.timeoutMs,
+      // 开关创建失败时按「关」处理（规格 §3.3 / 任务书：这时把 isEnabled 当 false）。
+      // ragControl 在下面才建，但这段闭包只会在调用时求值，那时已经初始化好了。
+      isEnabled: () => (ragControl ? ragControl.enabled() === true : false),
       log
     });
   } catch (error) {
     log(`⚠️ memory-rag 客户端未启用：${error?.message ?? error}`);
+    rag = null;
+  }
+  try {
+    ragControl = createRagControl({
+      root: ROOT,
+      stateDir: STATE_DIR,
+      runDir: process.env.QQB_RUN_DIR || path.join(os.homedir(), '.ai-companion-run'),
+      // 启动时读一次，之后以内存值为准（只有开关接口改它，见规格 §3.3）。
+      readEnabled: () => ragFileCfg.enabled === true,
+      writeEnabled: (value) => {
+        // 读整份 → 只改 memoryRag.enabled（保留 url / recall / suggest 等）→ 原子写。
+        const configFile = path.join(ROOT, 'config.json');
+        const file = readConfigObject(configFile);
+        file.memoryRag = { ...(file.memoryRag && typeof file.memoryRag === 'object' ? file.memoryRag : {}), enabled: value === true };
+        atomicWriteJson(configFile, file);
+      },
+      execFile: defaultRagExec,
+      fetchImpl: fetch,
+      ragUrl: ragFileCfg.url,
+      rag, // rebuild() 用
+      embeddingKind: embeddingKindOf,
+      log,
+      now: Date.now
+    });
+  } catch (error) {
+    log(`⚠️ RAG 总开关未启用：${error?.message ?? error}`);
+    ragControl = null;
   }
 
   // SUGGEST_PATCH：账本建议（docs/design/LEDGER_SUGGEST_SPEC.md §4；接口约定见
@@ -1861,6 +1905,30 @@ async function main() {
     persona.start();
   } catch (error) {
     log(`⚠️ 人格与情绪模块未启用：${error?.message ?? error}`);
+  }
+
+  // ── APIHUB_PATCH：「API 管理」页的设置读写、校验与向量模型测试（规格 §4～§7） ──
+  // 各模块（人格 / TTS / DSH 凭据 / RAG）都已就绪后再建；创建失败只告警，桥接照常启动，
+  // 新接口回 503。密钥规则、脱敏、合并都由 api-hub 负责，桥接这里只做路由。
+  let apiHub = null;
+  try {
+    apiHub = createApiHub({
+      root: ROOT,
+      stateDir: STATE_DIR,
+      getPersonaConsole: () => persona?.console ?? null,
+      ttsApi,
+      dshCredentials,
+      ragControl,
+      rag,
+      readConfigObject,
+      atomicWriteJson,
+      fetchImpl: fetch,
+      log,
+      now: Date.now
+    });
+  } catch (error) {
+    log(`⚠️ API 管理模块未启用：${error?.message ?? error}`);
+    apiHub = null;
   }
 
   // ── DECAY_PATCH：记忆代谢的记账助手（子项目 2 · docs/design/MEMORY_DECAY_SPEC.md） ──
@@ -3907,6 +3975,61 @@ async function main() {
           }
           return;
         }
+        // ── APIHUB_PATCH：RAG 总开关 +「API 管理」页（仅控制台；agent 调用一律 403） ──
+        // 与 /api/persona/ 同一套写法：MCP 的工具进程同样持控制台令牌，靠这两个头区分
+        // 「管理端」与「智能体」，否则她（或群里的 AI）就能改自己的密钥与 RAG 开关。
+        if (url.pathname === '/api/apis' || url.pathname.startsWith('/api/apis/') || url.pathname === '/api/rag/control') {
+          if (req.headers['x-agent-call'] !== undefined || req.headers['x-agent-token'] !== undefined) {
+            sendJson({ ok: false, error: '该接口只对控制台开放' }, 403);
+            return;
+          }
+          if (!apiHub || !ragControl) { sendJson({ ok: false, error: 'API 管理模块未启用（看 bridge.log）' }, 503); return; }
+          try {
+            if (req.method === 'GET' && url.pathname === '/api/apis') {
+              const r = await apiHub.summary();
+              sendJson(r.body, r.status);
+              return;
+            }
+            if (req.method === 'GET' && url.pathname === '/api/rag/control') {
+              sendJson({ ok: true, ...(await ragControl.state()) });
+              return;
+            }
+            if (req.method !== 'POST') { sendJson({ ok: false, error: '不支持的方法' }, 405); return; }
+            const body = await readBody();
+            if (url.pathname === '/api/rag/control') {
+              if (typeof body.enabled !== 'boolean') { sendJson({ ok: false, error: 'enabled 必须是布尔值' }, 400); return; }
+              try {
+                // 202：立即回忙状态，后台启停（页面每 2 秒轮询 GET /api/rag/control）。
+                const state = await ragControl.setEnabled(body.enabled);
+                sendJson({ ok: true, ...state }, 202);
+              } catch (error) {
+                if (error?.code === 'busy') { sendJson({ ok: false, busy: true, error: '正在启停向量记忆，请稍候' }, 409); return; }
+                // 写 config.json 失败：内存开关不变，页面提示（规格 §11）。
+                log(`[rag] 开关保存失败（${error?.code ?? 'error'}）`);
+                sendJson({ ok: false, error: '写 config.json 失败，开关没有改变' }, 500);
+              }
+              return;
+            }
+            const handlers = {
+              '/api/apis/dsh': () => apiHub.saveDsh(body),
+              '/api/apis/persona': () => apiHub.savePersona(body),
+              '/api/apis/web-search': () => apiHub.saveWebSearch(body),
+              '/api/apis/tts': () => apiHub.saveTts(body),
+              '/api/apis/embedding': () => apiHub.saveEmbedding(body),
+              '/api/apis/embedding/test': () => apiHub.testEmbedding(body),
+              '/api/apis/distill': () => apiHub.saveDistill(body)
+            };
+            const handler = handlers[url.pathname];
+            if (!handler) { sendJson({ ok: false, error: '未知接口' }, 404); return; }
+            const r = await handler();
+            sendJson(r.body, r.status);
+          } catch (error) {
+            // 不回显栈或原文（可能带本机路径）；密钥错误已由各方法转成 4xx。
+            log(`[api-hub] 接口出错（${error?.code ?? 'error'}）`);
+            sendJson({ ok: false, error: 'API 管理接口失败' }, 500);
+          }
+          return;
+        }
         // ── LTM_PATCH：长期记忆管理接口（仅控制台） ──
         if (url.pathname.startsWith('/api/ltm/')) {
           try {
@@ -3942,6 +4065,9 @@ async function main() {
             }
             // ── RAG_PATCH（P2）：向量索引状态（memory-rag 停着也能看到待处理的遗忘请求） ──
             if (req.method === 'GET' && url.pathname === '/api/ltm/rag/status') {
+              // APIHUB_PATCH：总开关关着时整个「向量索引」卡片都是灰的，接口明确回 off，
+              // 页面据此显示「RAG 已关闭 · 去开启 →」（规格 §3.3）。
+              if (ragControl && ragControl.enabled() !== true) { sendJson({ ok: false, off: true, error: 'RAG 已关闭' }, 409); return; }
               // RAG_PATCH（P3）：health 原样透传 memory-rag 的 /health（P2 起多了 distill 字段）。
               const health = rag ? await rag.health() : null;
               sendJson({ ok: true, configured: !!rag, reachable: !!health, health, pendingForget: ltm.pendingForgetKeys() });
@@ -4123,6 +4249,7 @@ async function main() {
             }
             // ── RAG_PATCH（P3）：重试提炼失败的摘要（转发 memory-rag 的 POST /distill/retry） ──
             if (url.pathname === '/api/ltm/rag/distill-retry') {
+              if (ragControl && ragControl.enabled() !== true) { sendJson({ ok: false, off: true, error: 'RAG 已关闭' }, 409); return; }
               if (!rag) { sendJson({ ok: false, error: '向量索引没有配置' }, 503); return; }
               const r = await rag.distillRetry();
               if (!r) { sendJson({ ok: false, error: '向量索引服务不可达' }, 503); return; }
@@ -4133,6 +4260,7 @@ async function main() {
             }
             // ── RAG_PATCH（P2）：手动增量索引 / 全量重建（状态码原样透传） ──
             if (url.pathname === '/api/ltm/rag/index') {
+              if (ragControl && ragControl.enabled() !== true) { sendJson({ ok: false, off: true, error: 'RAG 已关闭' }, 409); return; }
               if (!rag) { sendJson({ ok: false, error: '向量索引没有配置' }, 503); return; }
               const r = await rag.indexRun();
               if (!r) { sendJson({ ok: false, error: '向量索引服务不可达' }, 503); return; }
@@ -4141,6 +4269,7 @@ async function main() {
               return;
             }
             if (url.pathname === '/api/ltm/rag/rebuild') {
+              if (ragControl && ragControl.enabled() !== true) { sendJson({ ok: false, off: true, error: 'RAG 已关闭' }, 409); return; }
               if (!rag) { sendJson({ ok: false, error: '向量索引没有配置' }, 503); return; }
               const r = await rag.rebuild();
               if (!r) { sendJson({ ok: false, error: '向量索引服务不可达' }, 503); return; }
@@ -6675,8 +6804,11 @@ async function main() {
               // 会回 200 + 空结果，看起来像「那天没聊过」。这种请求直接走 ltm.search 的 browse 模式
               // （按日期/说话人过滤、从新到旧取 limit 条），语义标记为 off（服务没坏，只是没用上）。
               const hasSearchText = Boolean(query) || keywords.length > 0;
+              // APIHUB_PATCH：总开关关着时不要再试着调 memory-rag（服务已经停了），
+              // 语义标记直接给 off —— 与「AI 自己选了 keyword」同一个值，响应形状不变。
+              const ragOff = !rag?.enabled?.();
 
-              if (mode !== 'keyword' && hasSearchText && rag) {
+              if (mode !== 'keyword' && hasSearchText && rag && !ragOff) {
                 const r = await rag.search({ key, query, keywords, from, to, speaker, k, expand });
                 if (r) {
                   const hint = [r.items.length < 2 ? retryHint : '', r.hint ?? ''].filter(Boolean).join(' ');
@@ -6690,7 +6822,7 @@ async function main() {
               // 降级：memory-rag 没起 / 超时 / 报错，或 AI 明确指定只走关键词，或只是按日期翻。
               // DECAY_PATCH：debug=true 拿到命中行号（hits）供遗忘记账；hits 不进响应。
               const r = ltm.search(key, { query, keywords, from, to, speaker, limit: body.limit, context: body.context, debug: true });
-              const semantic = mode === 'keyword' || !hasSearchText ? 'off' : 'unavailable';
+              const semantic = mode === 'keyword' || !hasSearchText || ragOff ? 'off' : 'unavailable';
               const hint = r.matched < 2 ? retryHint : '';
               log(`[rag] ${key} source=keyword semantic=${semantic} lines=${r.matched} ${Date.now() - startedAt}ms`);
               sendJson({ ok: true, key, source: 'keyword', semantic, total: r.total, matched: r.matched, lines: r.lines, ...(hint ? { hint } : {}) });

@@ -67,6 +67,60 @@ chmod 600 ../../state/long-memory/rag/embedding-api.json
 - **隐私**：API 模式下，每个话题块的原文、每块提炼出的摘要、以及检索时的查询语句都会发给第三方服务商。
   存档和账本仍然只在本地。
 
+## 接哪些 embedding 服务（兼容性）
+
+三种部署方式（本项目自带 / 自己部署 / 云端）走的是同一个接口：**OpenAI 兼容 `POST {baseUrl}/embeddings`**，
+请求 `{"model": ..., "input": [...], "encoding_format": "float"}`（支持截短的模型可加 `dimensions`），
+返回 `data[].embedding`。地址与模型在控制台「API 管理 → RAG → 向量模型」里填；下面是能接的范围。
+
+### 本项目自带
+
+llama.cpp 的 `llama-server`，固定 `127.0.0.1:8091`，启动参数 `--embedding --pooling last`
+（Qwen3-Embedding 必须带 `--pooling last`）。归 `qq-embedding` 服务管，随 RAG 开关启停。
+
+### 自己部署（只能填本机回环地址）
+
+控制台里只填 **`127.0.0.1:<端口>`**（`localhost` 也行），地址会自动补成 `http://127.0.0.1:<端口>/v1`；
+模型名必须填服务里真实存在的名字（Ollama 要先 `ollama pull`）。明文 http 只允许回环地址，
+免得聊天原文在网络上裸奔。
+
+| 服务 | 默认地址 | 说明 |
+| --- | --- | --- |
+| Ollama | `127.0.0.1:11434` | `/v1/embeddings` 必须带 `model`；有 `/v1/models`；没有 `/health` |
+| LM Studio | `127.0.0.1:1234` | 启动本地服务器后填模型名 |
+| vLLM | `127.0.0.1:8000` | 用 OpenAI 兼容的 embedding 模型起服务 |
+| llama.cpp `llama-server` | 自定端口 | 加 `--embedding`；Qwen3-Embedding 再加 `--pooling last` |
+
+### 云端（必须 https）
+
+| 服务 | 地址 | 模型与限制 |
+| --- | --- | --- |
+| 硅基流动 | `https://api.siliconflow.cn/v1` | `BAAI/bge-m3`（1024 维）；`Qwen/Qwen3-Embedding-8B` / `4B` / `0.6B`；只有 Qwen3 系列支持 `dimensions` |
+| 阿里百炼（兼容模式） | `https://<业务空间ID>.cn-beijing.maas.aliyuncs.com/compatible-mode/v1` | `text-embedding-v4` 每批最多 **10** 条；`qwen3.7-text-embedding` 每批最多 **20** 条——「高级 → 每批条数」要改小 |
+| 智谱 | `https://open.bigmodel.cn/api/paas/v4` | `embedding-3`，默认 2048 维（可选 256 / 512 / 1024 / 2048），每批最多 **64** 条 |
+| OpenAI | `https://api.openai.com/v1` | `text-embedding-3-small` / `-large`，支持 `dimensions` 改小 |
+
+以服务商文档为准（2026-10-31 核对）。
+
+**接不了**：只有自家原生接口的服务（如 Gemini、Cohere 原生）；DeepSeek 没有 embedding 模型。
+
+### 换模型与重建
+
+- 维度只能在支持截短的模型上改小（Qwen3-Embedding、OpenAI text-embedding-3、百炼 text-embedding-v4 等）；
+  `bge-m3` 这类必须用原生 1024。
+- 换部署方式 / 模型 / 维度 / 查询指令前缀 → 向量口径变了，必须**全量重建**（控制台保存时会提示并自动重建）。
+- 选云端 = 每个话题块的原文、摘要和检索查询都会发给该服务商；存档与账本仍只在本地。
+
+### 设置文件
+
+一般由控制台写，不用手改：
+
+- `state/long-memory/rag/embedding-settings.json`（600，不含密钥）：部署方式与参数；
+  文件不存在时按 `config.yml` 的 `embedding.provider` 走旧行为。
+- `state/long-memory/rag/embedding-api.json`（600）：`{"apiKey": "<云端>", "localApiKey": "<本地可选>"}`。
+- 设置文件坏了（不是合法 JSON、字段非法、本地地址不是回环等）时服务照常启动，向量路降级为 BM25，
+  `/health` 的 `embedding.error` 写原因类别，不会删改向量库。
+
 ## 用法
 
 ```bash

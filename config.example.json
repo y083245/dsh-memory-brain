@@ -55,7 +55,8 @@
     "interceptNotify": true
   },
   "memoryRag": {
-    "_comment": "向量记忆 sidecar（sidecars/memory-rag，缺省 :8093）。不填或连不上会自动退回关键词检索；只允许回环地址。",
+    "_comment": "向量记忆 sidecar（sidecars/memory-rag，缺省 :8093）。enabled 是 RAG 总开关（缺省 false = 关，桥接不会去连）；一般在控制台「API 管理」页打开，也可以 ./start-all.sh --rag。关着或连不上时自动退回关键词检索；只允许回环地址。",
+    "enabled": false,
     "url": "http://127.0.0.1:8093",
     "timeoutMs": 3000,
     "recall": {

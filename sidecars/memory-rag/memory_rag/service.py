@@ -12,12 +12,12 @@ from pathlib import Path
 from .archive import key_dir, valid_key
 from .config import load_config
 from .distill import Distiller
-from .embeddings import Embedder, make_embedder
+from .embeddings import Embedder, embedding_settings_path, make_embedder_from_state
 from .fts import ChunkDB
 from .indexer import IndexBusy, Indexer
 from .l2 import L2
 from .search import Searcher
-from .store import IndexMismatch, VectorStore
+from .store import IndexMismatch, VectorStore, drop_collections, read_collection_meta
 
 
 class RebuildRunning(RuntimeError):
@@ -42,7 +42,16 @@ class Service:
         paths.rag.mkdir(parents=True, exist_ok=True)
         os.chmod(paths.rag, 0o700)
         # EMBED_API_PATCH：provider local（缺省）/ api 由工厂决定，注入用法不变
-        self.embedder = embedder or make_embedder(self.cfg.get("embedding") or {}, paths.state)
+        # APIHUB_PATCH：有设置文件时按它的 kind 造；坏配置退化成 BrokenConfigEmbedder，
+        # 需要向量库现有的口径（model_id / dim），否则会误判 mismatch、把旧向量删掉重建。
+        if embedder is not None:
+            self.embedder = embedder
+        else:
+            existing_meta = None
+            if embedding_settings_path(paths.state).exists():
+                existing_meta = read_collection_meta(paths.rag / "chroma")
+            self.embedder = make_embedder_from_state(
+                self.cfg.get("embedding") or {}, paths.state, existing_meta)
         self.db = ChunkDB(paths.rag / "rag.sqlite3")
         self.mismatch: str | None = None
         try:
@@ -79,10 +88,14 @@ class Service:
     def rebuild(self) -> None:
         """删掉派生数据从头建：换模型、改维度、改切块参数之后用。原始存档不动。"""
         if self.vstore is None:
-            import shutil
-            shutil.rmtree(self.cfg["paths"].rag / "chroma", ignore_errors=True)
-            self.mismatch = None
-            self.vstore = VectorStore(self.cfg["paths"].rag / "chroma", self.embedder.model_id, self.embedder.dim)
+            # APIHUB_PATCH：换向量口径后的重建不能 rmtree 掉 chroma 目录——chromadb 1.5.x
+            # 在同一进程里按路径缓存 System，删了磁盘文件也还是那份旧集合，重建当场再抛
+            # IndexMismatch（控制台换模型后桥接重启 + /rebuild 走的正是这条路）。
+            # 改成用 chromadb 接口删两个集合，再按当前口径新建。
+            path = self.cfg["paths"].rag / "chroma"
+            drop_collections(path)
+            self.vstore = VectorStore(path, self.embedder.model_id, self.embedder.dim)
+            self.mismatch = None  # 新库建成了才清口径错误，免得建失败时 /health 假装正常
             self.indexer = Indexer(self.cfg, self.embedder, self.db, self.vstore)
             self.searcher = Searcher(self.cfg, self.embedder, self.db, self.vstore, self.indexer)
             self._bind_l2()
@@ -186,15 +199,24 @@ class Service:
             job["finished_at"] = int(time.time() * 1000)
 
     def health(self) -> dict:
-        out = {"ok": self.mismatch is None and self.embedder.healthy(),
-               # RAG_PATCH（P2）：embedder 可注入，测试的假 embedding 没有 base_url
-               "embedding": {"url": getattr(self.embedder, "base_url", None),
-                             # EMBED_API_PATCH：只加这一个字段，其余不变
-                             "provider": getattr(self.embedder, "provider", "local"),
-                             "model_id": self.embedder.model_id, "healthy": self.embedder.healthy()},
+        emb = self.embedder
+        emb_info = {"url": getattr(emb, "base_url", None),
+                    # EMBED_API_PATCH：只加这一个字段，其余不变
+                    "provider": getattr(emb, "provider", "local"),
+                    "model_id": emb.model_id, "healthy": emb.healthy(),
+                    # APIHUB_PATCH：kind 区分自带 / 自己部署 / 云端 / 旧配置
+                    "kind": getattr(emb, "kind", "legacy-local")}
+        # 坏配置的原因类别；没有错误时**没有**这个键（接口约定 §2.3）
+        err = getattr(emb, "error", None)
+        if err:
+            emb_info["error"] = str(err)
+        out = {"ok": self.mismatch is None and emb.healthy(),
+               "embedding": emb_info,
                "mismatch": self.mismatch}
         if self.indexer:
-            out["store"] = {**self.db.stats(), "vectors": self.vstore.count()}
+            # APIHUB_PATCH：chars 是全部块文本字数之和，给重建估算用
+            out["store"] = {**self.db.stats(), "vectors": self.vstore.count(),
+                            "chars": self.db.total_chars()}
             out["lag_rows"] = self.indexer.lag()
             out["last_index"] = self.indexer.last
         out["job"] = dict(self.job) if self.job else None

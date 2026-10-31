@@ -1819,6 +1819,31 @@ textarea.tts-code { font-family:Consolas,"SFMono-Regular",monospace; font-size:1
 .report-legend i.their { background:var(--ok) }
 .report-legend i.xing { background:var(--accent-hover) }
 .report-legend i.care { background:var(--warn-fg-strong) }
+/* APIHUB_PATCH：API 管理页的 RAG 开关（带可见的开 / 关文字，键盘可操作）与状态点 */
+.api-switch { display:inline-flex; align-items:center; gap:8px; cursor:pointer; margin:0; flex:0 0 auto }
+.api-switch input { position:absolute; width:1px; height:1px; opacity:0; margin:0 }
+.api-switch-track { width:38px; height:22px; border-radius:999px; background:var(--border-strong); position:relative; transition:background .15s; flex:0 0 auto }
+.api-switch-track::after { content:""; position:absolute; top:3px; left:3px; width:16px; height:16px; border-radius:50%; background:#fff; box-shadow:0 1px 2px rgba(0,0,0,.25); transition:transform .15s }
+.api-switch input:checked + .api-switch-track { background:var(--accent) }
+.api-switch input:checked + .api-switch-track::after { transform:translateX(16px) }
+.api-switch input:focus-visible + .api-switch-track { outline:2px solid var(--accent-border-focus); outline-offset:2px }
+.api-switch input:disabled + .api-switch-track { opacity:.45 }
+.api-switch-text { font-size:12px; color:var(--muted); min-width:1em }
+.api-dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; vertical-align:middle; background:var(--muted-soft) }
+.api-dot.ok { background:var(--ok) }
+.api-dot.warn { background:var(--warn-fg-strong) }
+.api-dot.err { background:var(--err) }
+.api-dot.busy { background:var(--accent) }
+.api-embed-option { display:block; font-size:12px; color:var(--label); margin:10px 0 0 }
+.api-embed-option input { margin-right:6px }
+.api-embed-desc { font-size:12px; color:var(--muted); line-height:1.7; margin:2px 0 0 22px }
+.api-embed-desc[hidden] { display:none }
+section.card fieldset { min-width:0 }
+/* APIHUB_PATCH：窄屏时把标题旁的接口类型换到下一行，免得标题被挤成两行 */
+@media(max-width:760px) {
+  section[data-page="api"] h2 { flex-wrap:wrap }
+  section[data-page="api"] h2:after { margin-left:0; flex-basis:100%; text-align:left }
+}
 </style>
 </head>
 <body>
@@ -1841,6 +1866,8 @@ textarea.tts-code { font-family:Consolas,"SFMono-Regular",monospace; font-size:1
       <!-- REPORT_PATCH：每日报表（子项目 4 v1，规格 DAILY_REPORT_SPEC.md §2） -->
       <button data-view="report" class="nav-item"><span class="nav-icon" aria-hidden="true">▦</span>每日报表</button>
       <div class="nav-label">管理</div>
+      <!-- APIHUB_PATCH：API 管理页（规格 API_CONSOLE_SPEC.md §4） -->
+      <button data-view="api" class="nav-item"><span class="nav-icon" aria-hidden="true">⚙</span>API 管理</button>
       <button data-view="usage" class="nav-item"><span class="nav-icon" aria-hidden="true">◧</span>令牌与花费</button>
       <button data-view="access" class="nav-item"><span class="nav-icon" aria-hidden="true">⊙</span>访问与安全</button>
       <button data-view="operations" class="nav-item"><span class="nav-icon" aria-hidden="true">⌘</span>调试与运维</button>
@@ -2542,6 +2569,8 @@ textarea.tts-code { font-family:Consolas,"SFMono-Regular",monospace; font-size:1
 <!-- RAG_PATCH（P2）：向量索引（memory-rag）状态与维护 -->
 <section id="section-ltm-rag" data-page="ltm" class="card span-all">
       <h2>向量索引</h2>
+      <!-- APIHUB_PATCH：卡片顶部显示 RAG 总开关的状态；关着时只显示一行「去开启」 -->
+      <div id="ltmRagControl" class="meta"></div>
       <div class="meta">语义检索用的索引（memory-rag，:8093）。原始存档不会被它改动；索引随时可以删掉重建。</div>
       <div class="row" style="margin-top:8px">
         <button id="ltmRagRefresh" type="button" class="btn-secondary small">刷新</button>
@@ -2672,17 +2701,210 @@ textarea.tts-code { font-family:Consolas,"SFMono-Regular",monospace; font-size:1
       </div>
       <div class="row" style="margin-top:6px">
         <select id="mindMode" style="flex:0 1 160px"><option value="model">模型判读</option><option value="rules">只用规则</option><option value="off">关闭判读</option></select>
-        <input type="text" id="mindModel" placeholder="模型名" style="flex:0 1 200px">
-        <input type="text" id="mindBaseUrl" placeholder="接口地址" style="flex:1 1 220px">
         <input type="number" id="mindDailyLimit" placeholder="每日上限" style="flex:0 1 120px">
-      </div>
-      <div class="row" style="margin-top:6px">
-        <input type="password" id="mindApiKey" placeholder="判读用的 DeepSeek 密钥（留空不修改）" style="flex:1 1 260px" autocomplete="off">
         <button id="mindSave" type="button" class="small">保存</button>
-        <button id="mindClearKey" type="button" class="btn-secondary small">清除密钥</button>
         <span class="meta" id="mindSaveMsg"></span>
       </div>
+      <!-- APIHUB_PATCH：判读接口与密钥统一到「API 管理」页，这里只读显示（保存时仍带上当前 model / baseUrl，后端对 settings 是浅合并） -->
+      <div class="meta">判读接口：<span id="mindApiReadout">—</span> · <a href="#api">在 API 管理页修改 →</a></div>
     </section>
+
+<!-- APIHUB_PATCH：API 管理页（规格 API_CONSOLE_SPEC.md §4；接口见 worker-kit/apihub/contract.md §4）。所有接口字符串一律走 textContent / esc() 进 DOM。 -->
+<section id="section-api-compat" data-page="api" class="card span-all">
+      <h2>API 管理</h2>
+      <div class="meta">这一页填的密钥存进各模块原来的文件，页面只显示「已保存，末尾 xxxx」，不回显原文。改动立即生效（向量模型需要重启 memory-rag）。</div>
+      <details class="settings-group">
+        <summary>兼容性说明：哪些服务能接、哪些接不了</summary>
+        <div class="settings-content">
+          <div class="meta"><b>向量模型</b>：三种部署方式都走 <b>OpenAI 兼容 <code>POST /v1/embeddings</code></b>（请求 <code>{model, input:[...]}</code>，返回 <code>data[].embedding</code>）。</div>
+          <ul class="meta" style="margin:8px 0 0;padding-left:20px">
+            <li>本项目自带：llama.cpp <code>llama-server</code>，地址固定 <code>127.0.0.1:8091</code>。</li>
+            <li>自己部署（只能填本机回环地址 + 端口）：Ollama <code>127.0.0.1:11434</code>（模型名填 Ollama 里的名字，如 <code>bge-m3</code>，先 <code>ollama pull</code>）；LM Studio <code>127.0.0.1:1234</code>；vLLM <code>127.0.0.1:8000</code>；llama.cpp <code>llama-server</code>（启动加 <code>--embedding</code>，Qwen3-Embedding 再加 <code>--pooling last</code>）。</li>
+            <li>云端（必须 https）：硅基流动 <code>https://api.siliconflow.cn/v1</code>（<code>BAAI/bge-m3</code> 1024 维；<code>Qwen/Qwen3-Embedding-8B</code> 等，只有 Qwen3 系列支持 dimensions）；阿里百炼 <code>https://&lt;业务空间ID&gt;.cn-beijing.maas.aliyuncs.com/compatible-mode/v1</code>（<code>text-embedding-v4</code> 每批最多 10 条、<code>qwen3.7-text-embedding</code> 每批最多 20 条，要在「高级 → 每批条数」改小）；智谱 <code>https://open.bigmodel.cn/api/paas/v4</code>（<code>embedding-3</code>，默认 2048 维，每批最多 64 条）；OpenAI <code>https://api.openai.com/v1</code>（<code>text-embedding-3-small</code> / <code>-large</code>）。以服务商文档为准（2026-10-31 核对）。</li>
+            <li>接不了：只有自家原生接口的服务（如 Gemini、Cohere 原生）；DeepSeek 没有 embedding 模型。</li>
+            <li>维度：只有支持截短的模型能改小（Qwen3-Embedding 系列、text-embedding-v4、embedding-3、OpenAI text-embedding-3）；bge-m3 必须 1024。</li>
+            <li>选云端 = 聊天原文会发给该服务商。</li>
+          </ul>
+          <div class="meta" style="margin-top:12px"><b>人格判读、话题提炼</b>：OpenAI 兼容 <code>POST /chat/completions</code>，要支持 JSON 输出（<code>response_format: json_object</code>）。DeepSeek、硅基流动、百炼、OpenAI 等都可以。</div>
+          <div class="meta"><b>联网搜索</b>：Anthropic 兼容 Messages + 服务端 <code>web_search</code> 工具。只有 DeepSeek 官方（<code>https://api.deepseek.com/anthropic/v1</code>）和 Anthropic 官方支持；普通 OpenAI 兼容接口用不了，接不上会自动退回 Bing。</div>
+          <div class="meta"><b>她聊天（DSH）</b>：DeepSeek 官方；想换别家要在 DSH 里配置。</div>
+          <div class="meta"><b>语音合成</b>：小米 MiMo（<code>/chat/completions</code> 返回音频）。</div>
+        </div>
+      </details>
+      <div class="meta" id="apiLoadMsg"></div>
+    </section>
+
+<section id="section-api-dsh" data-page="api" class="card span-all">
+      <h2 data-note="接口：DeepSeek 官方">她聊天（DSH）</h2>
+      <div class="meta">密钥写进 DSH 的凭据文件（<code>~/.dsh/.credentials.yaml</code> 的 <code>refs.DEEPSEEK_API_KEY</code>），点保存后 DSH 立即生效。</div>
+      <div class="meta" id="apiDshStatus">未填写</div>
+      <div class="row" style="margin-top:8px">
+        <input type="password" id="apiDshKey" placeholder="留空不修改" autocomplete="off" style="flex:1 1 260px">
+        <button id="apiDshSave" type="button" class="small">保存</button>
+        <span class="meta" style="flex:0 0 auto">清掉她就回不了话，所以只能替换</span>
+        <span class="meta" id="apiDshMsg"></span>
+      </div>
+      <div class="meta err" id="apiDshReason" hidden></div>
+      <div class="meta"><a id="apiDshDshLink" href="#" target="_blank" rel="noopener" hidden>到 DSH 模型页填写 →</a></div>
+    </section>
+
+<section id="section-api-persona" data-page="api" class="card span-all">
+      <h2 data-note="接口：OpenAI 兼容 /chat/completions（需支持 JSON 输出）">人格判读</h2>
+      <div class="meta" id="apiPersonaUnavailable" hidden>人格与情绪模块没有启用</div>
+      <div id="apiPersonaBody">
+        <label for="apiPersonaBaseUrl">接口地址</label>
+        <input type="text" id="apiPersonaBaseUrl" placeholder="https://api.deepseek.com" autocomplete="off">
+        <label for="apiPersonaModel">模型</label>
+        <input type="text" id="apiPersonaModel" placeholder="deepseek-flash" autocomplete="off">
+        <label for="apiPersonaKey">密钥</label>
+        <input type="password" id="apiPersonaKey" placeholder="留空不修改" autocomplete="off">
+        <div class="meta" id="apiPersonaKeyHint">未填写</div>
+        <div class="row" style="margin-top:10px">
+          <button id="apiPersonaSave" type="button" class="small">保存</button>
+          <button id="apiPersonaClear" type="button" class="btn-secondary small">清除密钥</button>
+          <span class="meta" id="apiPersonaMsg"></span>
+        </div>
+      </div>
+    </section>
+
+<section id="section-api-websearch" data-page="api" class="card span-all">
+      <h2 data-note="接口：Anthropic 兼容 Messages + web_search（只有 DeepSeek 官方 / Anthropic 官方支持）">联网搜索</h2>
+      <div class="row" style="margin-top:8px">
+        <label class="meta"><input type="radio" name="apiWebKeySource" value="dsh" checked> 沿用她聊天那把（推荐）</label>
+        <label class="meta"><input type="radio" name="apiWebKeySource" value="own"> 单独填一把</label>
+      </div>
+      <div id="apiWebOwnKeyRow" hidden>
+        <label for="apiWebKey">单独的密钥</label>
+        <input type="password" id="apiWebKey" placeholder="留空不修改" autocomplete="off">
+        <div class="meta" id="apiWebKeyHint">未填写</div>
+      </div>
+      <label for="apiWebBaseUrl">接口地址</label>
+      <input type="text" id="apiWebBaseUrl" placeholder="留空 = https://api.deepseek.com/anthropic/v1" autocomplete="off">
+      <label for="apiWebModel">模型</label>
+      <input type="text" id="apiWebModel" placeholder="deepseek-v4-flash" autocomplete="off">
+      <div class="row" style="margin-top:10px">
+        <button id="apiWebSave" type="button" class="small">保存</button>
+        <span class="meta" id="apiWebMsg"></span>
+      </div>
+      <div class="meta" id="apiWebEffective">实际使用：—</div>
+    </section>
+
+<section id="section-api-tts" data-page="api" class="card span-all">
+      <h2 data-note="接口：小米 MiMo（/chat/completions 返回音频）">语音合成</h2>
+      <div class="meta" id="apiTtsUnavailable" hidden>语音合成模块没有启用</div>
+      <div id="apiTtsBody">
+        <label for="apiTtsEndpoint">接口地址</label>
+        <input type="text" id="apiTtsEndpoint" placeholder="https://api.xiaomimimo.com/v1/chat/completions" autocomplete="off">
+        <label for="apiTtsKey">密钥</label>
+        <input type="password" id="apiTtsKey" placeholder="留空不修改" autocomplete="off">
+        <div class="meta" id="apiTtsKeyHint">未填写</div>
+        <div class="row" style="margin-top:10px">
+          <button id="apiTtsSave" type="button" class="small">保存</button>
+          <button id="apiTtsClear" type="button" class="btn-secondary small">清除密钥</button>
+          <span class="meta" id="apiTtsMsg"></span>
+        </div>
+        <div class="meta">模型和音色在 <a href="#tts">「语音合成 API」页</a>。</div>
+      </div>
+    </section>
+
+<section id="section-api-rag" data-page="api" class="card span-all">
+      <h2>RAG（向量记忆）</h2>
+      <div class="row" style="margin-top:8px">
+        <label class="api-switch">
+          <input type="checkbox" id="apiRagSwitch" role="switch" aria-label="RAG 总开关" aria-describedby="apiRagSwitchText">
+          <span class="api-switch-track" aria-hidden="true"></span>
+          <span class="api-switch-text" id="apiRagSwitchText">关</span>
+        </label>
+        <span class="meta" style="margin:0">关掉会停掉 memory-rag（自带的向量模型一起停、释放显存）；索引、摘要都留着，再打开接着用。</span>
+      </div>
+      <div class="meta" id="apiRagStatus">加载中…</div>
+      <div class="row" id="apiRagActions"></div>
+      <div class="meta" id="apiRagMsg"></div>
+    </section>
+
+<section id="section-api-embedding" data-page="api" class="card span-all">
+      <h2 data-note="接口：OpenAI 兼容 POST /v1/embeddings">向量模型</h2>
+      <div class="meta err" id="apiEmbedOffHint" hidden>打开 RAG 后才能填写</div>
+      <fieldset id="apiEmbedFieldset" disabled style="border:0;padding:0;margin:0;min-width:0">
+        <label class="api-embed-option"><input type="radio" name="apiEmbedKind" value="bundled">本项目自带 llama.cpp</label>
+        <div class="api-embed-desc">地址固定 <code>127.0.0.1:8091</code>，随 RAG 开关启停。</div>
+        <label class="api-embed-option"><input type="radio" name="apiEmbedKind" value="local">我自己部署的本地服务</label>
+        <div class="api-embed-desc">Ollama / LM Studio / vLLM / 自己的 llama.cpp，只能填本机回环地址，RAG 开关不会启停它。</div>
+        <label class="api-embed-option"><input type="radio" name="apiEmbedKind" value="cloud">云端 API</label>
+        <div class="api-embed-desc">必须 https，聊天原文会发给该服务商。</div>
+        <div class="meta err" id="apiEmbedErrKind" hidden></div>
+
+        <div class="meta" id="apiEmbedBundled">自带向量模型：<span id="apiEmbedBundledText">—</span></div>
+        <div class="meta" id="apiEmbedBundledHint" hidden>没装 qq-embedding 服务，开关会改用 start-all.sh</div>
+
+        <div id="apiEmbedForm" hidden>
+          <label for="apiEmbedBaseUrl">接口地址</label>
+          <input type="text" id="apiEmbedBaseUrl" placeholder="127.0.0.1:11434" autocomplete="off">
+          <div class="meta err" id="apiEmbedErrBaseUrl" hidden></div>
+          <label for="apiEmbedModel">模型</label>
+          <input type="text" id="apiEmbedModel" placeholder="例如 bge-m3" autocomplete="off">
+          <div class="meta err" id="apiEmbedErrModel" hidden></div>
+          <label for="apiEmbedKey">密钥<span id="apiEmbedKeyOptional">（可空）</span></label>
+          <input type="password" id="apiEmbedKey" placeholder="留空不修改" autocomplete="off">
+          <div class="meta" id="apiEmbedKeyHint">未填写</div>
+          <label for="apiEmbedDim">维度</label>
+          <input type="number" id="apiEmbedDim" min="1" max="8192">
+          <div class="meta err" id="apiEmbedErrDim" hidden></div>
+          <div class="meta">只有支持截短的模型能改小；bge-m3 必须 1024。</div>
+          <div class="row" style="margin-top:10px">
+            <button id="apiEmbedTest" type="button" class="btn-secondary small">测试连接</button>
+            <span class="meta" id="apiEmbedTestMsg"></span>
+            <span class="meta" id="apiEmbedCloudCost" hidden>会产生极少量费用</span>
+            <button id="apiEmbedClear" type="button" class="btn-secondary small">清除密钥</button>
+          </div>
+          <details class="settings-group">
+            <summary>高级</summary>
+            <div class="settings-content">
+              <label for="apiEmbedInstruct">查询指令前缀</label>
+              <input type="text" id="apiEmbedInstruct" placeholder="Qwen3 系列建议填；其它模型留空" autocomplete="off">
+              <div class="meta err" id="apiEmbedErrInstruct" hidden></div>
+              <div class="row" style="margin-top:8px">
+                <label class="meta"><input type="checkbox" id="apiEmbedAppendEos"> 末尾补 EOS</label>
+                <label class="meta"><input type="checkbox" id="apiEmbedSendDimensions"> 请求带 dimensions</label>
+              </div>
+              <div class="row" style="margin-top:8px">
+                <div style="flex:1 1 140px"><label for="apiEmbedBatch">每批条数</label><input type="number" id="apiEmbedBatch" min="1" max="256"><div class="meta err" id="apiEmbedErrBatch" hidden></div></div>
+                <div style="flex:1 1 140px"><label for="apiEmbedTimeout">超时（秒）</label><input type="number" id="apiEmbedTimeout" min="1" max="300"><div class="meta err" id="apiEmbedErrTimeout" hidden></div></div>
+              </div>
+            </div>
+          </details>
+        </div>
+        <div class="row" style="margin-top:12px">
+          <button id="apiEmbedSave" type="button" class="small">保存</button>
+          <span class="meta" id="apiEmbedSaveMsg"></span>
+        </div>
+      </fieldset>
+    </section>
+
+<section id="section-api-distill" data-page="api" class="card span-all">
+      <h2 data-note="接口：OpenAI 兼容 /chat/completions（需支持 JSON 输出）">话题提炼</h2>
+      <div class="meta err" id="apiDistillOffHint" hidden>打开 RAG 后才能填写</div>
+      <fieldset id="apiDistillFieldset" disabled style="border:0;padding:0;margin:0;min-width:0">
+        <label class="meta"><input type="checkbox" id="apiDistillShared" checked> 和人格判读用同一个 API</label>
+        <div class="meta" id="apiDistillSharedText">当前：—</div>
+        <div id="apiDistillForm" hidden>
+          <label for="apiDistillBaseUrl">接口地址</label>
+          <input type="text" id="apiDistillBaseUrl" placeholder="https://api.deepseek.com" autocomplete="off">
+          <label for="apiDistillModel">模型</label>
+          <input type="text" id="apiDistillModel" placeholder="deepseek-flash" autocomplete="off">
+          <label for="apiDistillKey">密钥</label>
+          <input type="password" id="apiDistillKey" placeholder="留空不修改" autocomplete="off">
+          <div class="meta" id="apiDistillKeyHint">未填写</div>
+          <div class="row" style="margin-top:10px">
+            <button id="apiDistillSave" type="button" class="small">保存</button>
+            <button id="apiDistillClear" type="button" class="btn-secondary small">清除密钥</button>
+            <span class="meta" id="apiDistillMsg"></span>
+          </div>
+        </div>
+        <div class="meta">联想摘要、账本建议都靠它；花费记在每日报表的提炼用量里。</div>
+      </fieldset>
+    </section>
+
 <!-- REPORT_PATCH：每日报表（子项目 4 v1，规格 DAILY_REPORT_SPEC.md §2）。数据只来自 /api/report/daily 与 /api/report/series。 -->
 <section id="section-report-toolbar" data-page="report" class="card span-all">
       <h2>每日报表 <span id="reportPartialTag" class="pill report-partial" hidden title="这天的快照是补算的，只靠桥接计数的数字（own-life 投递、报错、中断）没有">部分</span></h2>
@@ -2730,20 +2952,11 @@ textarea.tts-code { font-family:Consolas,"SFMono-Regular",monospace; font-size:1
 <section id="section-tts-api" data-page="tts" class="card span-all">
       <h2>接口与模型</h2>
       <div class="meta">默认接入小米 MiMo 语音合成（<code>/v1/chat/completions</code>），也可以填其它 OpenAI 风格的接口。密钥只保存在本机 <code>state/tts-api/config.json</code>（权限 600），页面不会回显原文。</div>
-      <label for="ttsEndpoint">接口地址</label>
-      <div class="row">
-        <input type="text" id="ttsEndpoint" placeholder="https://api.xiaomimimo.com/v1/chat/completions">
-        <button id="ttsEndpointDefault" type="button" class="btn-secondary small">恢复默认</button>
-      </div>
+      <!-- APIHUB_PATCH：接口地址与密钥统一到「API 管理」页，这里只显示当前值（保存时不再发送 endpoint / apiKey） -->
+      <div class="meta" id="ttsApiReadout">接口地址：<span id="ttsEndpointText">—</span>，密钥 <span id="ttsApiKeyText">未填写</span> · <a href="#api">在 API 管理页修改 →</a></div>
       <label for="ttsModelsUrl">模型列表地址（可选，留空自动推导）</label>
       <input type="text" id="ttsModelsUrl" placeholder="留空 = 由接口地址推导">
       <div class="meta" id="ttsModelsUrlHint"></div>
-      <label for="ttsApiKey">API 密钥</label>
-      <div class="row">
-        <input type="password" id="ttsApiKey" placeholder="未填写" autocomplete="new-password" style="flex:1 1 260px">
-        <label style="flex:0 0 auto;margin:0"><input type="checkbox" id="ttsApiKeyClear" style="width:auto"> 清除已保存的密钥</label>
-      </div>
-      <div class="meta" id="ttsApiKeyHint">留空保存 = 保留原密钥。</div>
       <label for="ttsModel">模型</label>
       <div class="row">
         <select id="ttsModel" style="flex:1 1 260px"></select>
@@ -4850,6 +5063,7 @@ const consolePages = {
   mind: ['人格与情绪', '她会开心，也会委屈。', '看她此刻的情绪、慢慢养成的性格，以及和每个人的关系；可以确认出厂性格、锁定特质、回滚到某一天、设置情绪判读。'],
   report: ['每日报表', '这一天，过得怎么样。', '按天看她这一天的收发、记忆、花费、服务状态和说话习惯；今天的数字是现算的，以前的来自每天凌晨的快照。'],
   tts: ['语音合成 API', '给她一副，真正的嗓子。', '接入小米 MiMo 或其它 OpenAI 风格的语音合成接口，选好音色，让 AI 用它发 QQ 语音。'],
+  api: ['API 管理', '用到的 API，在一处管好。', '填各项服务的接口地址与密钥，开关向量记忆（RAG），并查看它启动 / 重建的实时状态。'],
   usage: ['令牌与花费', '每一次思考，都算得清楚。', '实时查看 AI 的 token 消耗与花费，可下钻到每个群、每个好友、每一轮对话。'],
   access: ['访问与安全', '明确边界，安心连接。', '管理允许对话的对象、管理员权限与控制台访问凭证。'],
   operations: ['调试与运维', '让桥接，始终井然有序。', '测试消息、引导 AI，或维护桥接进程与会话工作区。'],
@@ -4897,6 +5111,11 @@ function setConsolePage(page, { updateHash = true, focus = false, target = '' } 
     if (typeof loadLtmSuggest === 'function') queueMicrotask(loadLtmSuggest);
   }
   if (page === 'mind' && typeof loadMindPanel === 'function') queueMicrotask(loadMindPanel);
+  // APIHUB_PATCH：API 管理页的状态对象声明在脚本末尾，同样延后一个微任务；直接以 #api 打开也能加载。
+  if (page === 'api' && typeof loadApiPanel === 'function') queueMicrotask(loadApiPanel);
+  // APIHUB_PATCH：离开这一页就停掉 RAG 状态的 2 秒轮询，不在后台空转。
+  // 用微任务延后：脚本初始化阶段（setConsolePage 在文件中间被调用一次）apiHub 还在暂时性死区里。
+  if (page !== 'api' && typeof apiHubStopPoll === 'function') queueMicrotask(apiHubStopPoll);
   // REPORT_PATCH：每日报表的状态对象声明在脚本末尾；同样延后一个微任务，直接以 #report 打开也不撞暂时性死区。
   // 每次切回这一页都重新请求「今天」的数据（规格 §2）。
   if (page === 'report' && typeof loadReportPanel === 'function') queueMicrotask(loadReportPanel);
@@ -5684,12 +5903,11 @@ function ttsTemplateMeta(which, t) {
 function ttsFill(data) {
   tts.data = data;
   const c = data.config;
-  ttsEl('ttsEndpoint').value = c.endpoint || '';
+  // APIHUB_PATCH：接口地址与密钥改在「API 管理」页，这里只读显示当前值。
+  ttsEl('ttsEndpointText').textContent = c.endpoint || '—';
+  ttsEl('ttsApiKeyText').textContent = c.hasApiKey ? (c.apiKeyHint || '已保存') : '未填写';
   ttsEl('ttsModelsUrl').value = c.modelsUrl || '';
   ttsEl('ttsModelsUrlHint').textContent = c.modelsUrlResolved ? `实际请求：${c.modelsUrlResolved}` : '';
-  ttsEl('ttsApiKey').value = '';
-  ttsEl('ttsApiKey').placeholder = c.hasApiKey ? `已保存 ${c.apiKeyHint}` : '未填写';
-  ttsEl('ttsApiKeyClear').checked = false;
   ttsRenderModels(c.models, c.model);
   ttsEl('ttsModelManual').value = '';
   const modeSel = ttsEl('ttsMode');
@@ -5733,8 +5951,9 @@ async function loadTtsPanel(force = false) {
 
 function ttsCollectConfig() {
   const model = ttsEl('ttsModelManual').value.trim() || ttsEl('ttsModel').value;
+  // APIHUB_PATCH：接口地址与密钥只在「API 管理」页填，这里不再发送 endpoint / apiKey / clearApiKey
+  //（endpoint 传空串会被后端当成「恢复默认」）。
   const patch = {
-    endpoint: ttsEl('ttsEndpoint').value.trim(),
     modelsUrl: ttsEl('ttsModelsUrl').value.trim(),
     model,
     mode: ttsEl('ttsMode').value,
@@ -5746,9 +5965,6 @@ function ttsCollectConfig() {
     design: { prompt: ttsEl('ttsDesignPrompt').value },
     clone: { instruction: ttsEl('ttsCloneInstruction').value }
   };
-  const key = ttsEl('ttsApiKey').value.trim();
-  if (ttsEl('ttsApiKeyClear').checked) patch.clearApiKey = true;
-  else if (key) patch.apiKey = key;
   return patch;
 }
 
@@ -5756,9 +5972,8 @@ async function ttsSaveConfig({ quiet = false } = {}) {
   const r = await api('/api/tts/config', 'POST', ttsCollectConfig());
   if (!r.ok) { ttsSetMsg('ttsSaveMsg', '保存失败：' + (r.error || ''), false); return false; }
   tts.data.config = r.config;
-  ttsEl('ttsApiKey').value = '';
-  ttsEl('ttsApiKey').placeholder = r.config.hasApiKey ? `已保存 ${r.config.apiKeyHint}` : '未填写';
-  ttsEl('ttsApiKeyClear').checked = false;
+  ttsEl('ttsEndpointText').textContent = r.config.endpoint || '—';
+  ttsEl('ttsApiKeyText').textContent = r.config.hasApiKey ? (r.config.apiKeyHint || '已保存') : '未填写';
   ttsEl('ttsModelsUrlHint').textContent = r.config.modelsUrlResolved ? `实际请求：${r.config.modelsUrlResolved}` : '';
   ttsApplyModeVisibility();
   ttsRenderVoices();
@@ -5785,9 +6000,6 @@ async function ttsResetTemplate(which) {
   ttsTemplateMeta(which, r);
 }
 
-ttsEl('ttsEndpointDefault').addEventListener('click', () => {
-  ttsEl('ttsEndpoint').value = tts.data?.defaults?.endpoint || 'https://api.xiaomimimo.com/v1/chat/completions';
-});
 ttsEl('ttsModel').addEventListener('change', () => { ttsEl('ttsModelManual').value = ''; ttsApplyModeVisibility(); });
 ttsEl('ttsModelManual').addEventListener('input', ttsApplyModeVisibility);
 ttsEl('ttsMode').addEventListener('change', ttsApplyModeVisibility);
@@ -5795,10 +6007,9 @@ ttsEl('ttsFetchModels').addEventListener('click', async function () {
   this.disabled = true;
   ttsSetMsg('ttsModelsMsg', '正在获取模型列表…');
   try {
+    // APIHUB_PATCH：地址与密钥不再从本页提交，后端用已保存的配置。
     const r = await api('/api/tts/models', 'POST', {
-      endpoint: ttsEl('ttsEndpoint').value.trim(),
-      modelsUrl: ttsEl('ttsModelsUrl').value.trim(),
-      apiKey: ttsEl('ttsApiKey').value.trim()
+      modelsUrl: ttsEl('ttsModelsUrl').value.trim()
     });
     if (!r.ok) throw new Error(r.error || '获取失败');
     const current = ttsEl('ttsModelManual').value.trim() || ttsEl('ttsModel').value;
@@ -6185,6 +6396,8 @@ ltmEl('ltmSearchBtn').addEventListener('click', async function () {
 let ltmRagLoading = false;   // 在途去重：进页面时 setConsolePage 与 loadLtmPanel 可能各触发一次
 let ltmRagPollTimer = null;  // 重建轮询：只用 setTimeout 链，同一时间最多一条
 let ltmRagPollMiss = 0;
+// APIHUB_PATCH：RAG 总开关关着时，这张卡片只留一行「去开启」，索引 / 重建按钮全部隐藏。
+let ltmRagOff = false;
 
 function ltmSetMsg(id, text, ok) {
   const el = ltmEl(id);
@@ -6340,9 +6553,10 @@ function ltmNum(v) {
 }
 
 // RAG_PATCH（P3）：「重试失败的」按钮只在提炼里有失败块时出现。
+// APIHUB_PATCH：RAG 总开关关着时一律不显示（提炼也停了）。
 function ltmRagDistillBtn(show) {
   const btn = ltmEl('ltmRagDistillRetry');
-  if (btn) btn.style.display = show ? '' : 'none';
+  if (btn) btn.style.display = (show && !ltmRagOff) ? '' : 'none';
 }
 
 // RAG_PATCH（P3）：提炼状态。失败数 > 0 时把重试按钮亮出来。
@@ -6396,6 +6610,8 @@ function ltmRagRender(d) {
   const box = ltmClear('ltmRagStatus');
   // RAG_PATCH（P3）：失败数为 0 / 读不到状态时都不显示「重试失败的」。
   ltmRagDistillBtn(false);
+  // APIHUB_PATCH：总开关关着时后端回 409「RAG 已关闭」，这不是错误（顶部已有提示），只说一句现状。
+  if (d && d.off === true) { ltmLine(box, '向量记忆已关闭：检索暂时只走关键词，索引和摘要都还在。'); return; }
   if (!d || d.ok === false) { ltmLine(box, '读取失败：' + ((d && d.error) || '未知错误'), true); return; }
   if (d.configured === false) { ltmLine(box, '没有配置向量索引（config.json 的 memoryRag）'); return; }
   const h = d.health || {};
@@ -6439,10 +6655,66 @@ function ltmRagRender(d) {
   ltmLine(box, pending.length ? `待处理的遗忘请求：${pending.join('、')}` : '待处理的遗忘请求：无');
 }
 
+// APIHUB_PATCH：卡片顶部的 RAG 总开关状态。关着时隐藏索引 / 重建按钮，只留「去开启」。
+// 状态文本与链接都用 DOM 拼（不拼 innerHTML），接口字符串不会进 HTML。
+const LTM_RAG_PHASE_TEXT = {
+  off: '已关闭', starting: '启动中', stopping: '正在关闭', running: '运行中',
+  partial: '部分可用', mismatch: '需要全量重建', rebuilding: '重建中', failed: '启动失败'
+};
+function ltmRagSetButtons(show) {
+  for (const id of ['ltmRagIndex', 'ltmRagRebuild']) {
+    const btn = ltmEl(id);
+    if (btn) btn.style.display = show ? '' : 'none';
+  }
+  if (!show) ltmRagDistillBtn(false);
+}
+function ltmRagApplyControl(state) {
+  const box = ltmEl('ltmRagControl');
+  while (box.firstChild) box.removeChild(box.firstChild);
+  const div = document.createElement('div');
+  div.className = 'meta';
+  if (!state || state.ok === false) {
+    ltmRagOff = false;
+    div.textContent = 'RAG 状态读取失败，按可用处理。';
+    box.appendChild(div);
+    ltmRagSetButtons(true);
+    return;
+  }
+  ltmRagOff = state.enabled === false;
+  if (ltmRagOff) {
+    div.append('RAG 已关闭 · ');
+    const link = document.createElement('a');
+    link.href = '#api';
+    link.textContent = '去开启 →';
+    div.appendChild(link);
+    box.appendChild(div);
+    ltmRagSetButtons(false);
+    return;
+  }
+  const phase = state.phase || '';
+  let text = 'RAG：' + (LTM_RAG_PHASE_TEXT[phase] || phase || '未知');
+  if (state.reason) text += '：' + state.reason;
+  div.textContent = text;
+  box.appendChild(div);
+  ltmRagSetButtons(true);
+}
+async function ltmRagLoadControl() {
+  try {
+    const state = await api('/api/rag/control');
+    ltmRagApplyControl(state);
+    return state;
+  } catch {
+    ltmRagApplyControl(null);
+    return null;
+  }
+}
+
 async function loadLtmRagStatus() {
   if (ltmRagLoading) return;
   ltmRagLoading = true;
   try {
+    // APIHUB_PATCH：先刷新顶部的开关状态（关着时后面的状态接口必然不可达）。
+    await ltmRagLoadControl();
     const d = await api('/api/ltm/rag/status');
     ltmRagRender(d);
   } catch (e) {
@@ -6457,6 +6729,8 @@ async function ltmRagIndexNow() {
   ltmSetMsg('ltmRagMsg', '索引中…', null);
   try {
     const r = await api('/api/ltm/rag/index', 'POST', {});
+    // APIHUB_PATCH：后端在 RAG 关着时回 409 { off:true }，同样切成「已关闭」的显示。
+    if (r.off) { ltmRagApplyControl({ enabled: false }); ltmSetMsg('ltmRagMsg', 'RAG 已关闭，先去「API 管理」页打开', false); return; }
     if (!r.ok) throw new Error(r.error || '索引失败');
     const res = r.result || {};
     if (res.skipped) ltmSetMsg('ltmRagMsg', String(res.skipped), null);
@@ -6507,6 +6781,8 @@ async function ltmRagRebuildNow() {
   btn.disabled = true;
   try {
     const r = await api('/api/ltm/rag/rebuild', 'POST', {});
+    // APIHUB_PATCH：RAG 关着时后端回 409 { off:true }。
+    if (r.off) { ltmRagApplyControl({ enabled: false }); ltmSetMsg('ltmRagMsg', 'RAG 已关闭，先去「API 管理」页打开', false); return; }
     if (!r.ok) throw new Error(r.error || '重建失败');
     ltmSetMsg('ltmRagMsg', '已开始全量重建', true);
     ltmRagSchedulePoll();
@@ -7243,9 +7519,9 @@ function mindRenderSettings(s) {
   mindEl('mindEnabled').checked = s.settings?.enabled !== false;
   mindEl('mindInject').checked = s.settings?.inject !== false;
   mindEl('mindMode').value = a.mode || 'model';
-  mindEl('mindModel').value = a.model || '';
-  mindEl('mindBaseUrl').value = a.baseUrl || '';
   mindEl('mindDailyLimit').value = a.dailyLimit ?? '';
+  // APIHUB_PATCH：模型 / 地址 / 密钥改在「API 管理」页，这里只读显示当前值。
+  mindEl('mindApiReadout').textContent = `${a.model || '—'} @ ${a.baseUrl || '—'}，密钥 ${s.apiKeyHint || '未填写'}`;
 }
 
 // PERSONA_PATCH（v2 §6 / §9 A1）：关系播种预览表。只往上补、不往下压，没变化的人灰掉；
@@ -7379,20 +7655,20 @@ mindEl('mindReportBtn').addEventListener('click', async () => {
   const r = await api('/api/persona/report?name=' + encodeURIComponent(name));
   mindEl('mindReportOut').textContent = r.ok ? r.markdown : '读取失败：' + (r.error || '');
 });
-async function mindSave(extra = {}) {
+async function mindSave() {
+  // APIHUB_PATCH：判读接口与密钥改在「API 管理」页。saveConfig 对 settings 是浅合并，
+  // appraisal 整个被替换，所以照旧带上当前 model / baseUrl（不发 apiKey）。
+  const current = mindUi.status?.settings?.appraisal || {};
   const settings = {
     enabled: mindEl('mindEnabled').checked,
     inject: mindEl('mindInject').checked,
-    appraisal: { mode: mindEl('mindMode').value, model: mindEl('mindModel').value.trim(), baseUrl: mindEl('mindBaseUrl').value.trim(), dailyLimit: Number(mindEl('mindDailyLimit').value) || 400 }
+    appraisal: { mode: mindEl('mindMode').value, model: current.model || '', baseUrl: current.baseUrl || '', dailyLimit: Number(mindEl('mindDailyLimit').value) || 400 }
   };
-  const key = mindEl('mindApiKey').value.trim();
-  const r = await api('/api/persona/config', 'POST', { settings, ...(key ? { apiKey: key } : {}), ...extra });
-  mindEl('mindApiKey').value = '';
+  const r = await api('/api/persona/config', 'POST', { settings });
   mindEl('mindSaveMsg').textContent = r.ok ? `已保存（密钥 ${r.apiKeyHint || '未填写'}）` : '失败：' + (r.error || '');
   if (r.ok) loadMindPanel(true);
 }
 mindEl('mindSave').addEventListener('click', () => mindSave());
-mindEl('mindClearKey').addEventListener('click', () => { if (confirm('清除判读密钥？之后只用规则判读。')) mindSave({ clearApiKey: true }); });
 if (location.hash === '#mind') loadMindPanel();
 
 // ── 每日报表（REPORT_PATCH，规格 DAILY_REPORT_SPEC.md §2 / worker-kit/report/contract.md） ──
@@ -8041,6 +8317,632 @@ reportEl('reportDay')?.addEventListener('change', () => {
   loadReportPanel({ reset: false });
 });
 reportEl('reportRefresh')?.addEventListener('click', () => loadReportPanel({ reset: false }));
+
+// ── APIHUB_PATCH：API 管理页 + RAG 总开关（规格 API_CONSOLE_SPEC.md §3 / §4）──────
+// 接口返回的字符串（地址、模型、reason、step、error、keyHint）一律经 textContent 进 DOM，不拼 innerHTML。
+// 密钥只从输入框读一次、发出后立即清空；不存 localStorage、不存全局变量。
+const apiEl = (id) => document.getElementById(id);
+const apiHub = {
+  loading: false,
+  data: null,
+  rag: null,
+  ragPollTimer: null,
+  ragPollMiss: 0,
+  embedKind: 'bundled',
+  embedDraft: { local: null, cloud: null },
+  unitInstalled: true,
+  testedDim: null
+};
+const APIHUB_EFFECTIVE = {
+  config: '单独填的那把',
+  env: '环境变量 DEEPSEEK_API_KEY',
+  'dsh-credentials': '她聊天那把（DSH 凭据）',
+  none: '都没有（联网搜索会退回 Bing）'
+};
+const APIHUB_TEST_ERROR = {
+  timeout: '超时（服务没响应）',
+  network: '连不上（地址或端口不对）',
+  bad_response: '返回格式不对（不是 OpenAI 兼容的 /embeddings）',
+  no_key: '没有密钥',
+  short_vector: '返回的向量比维度短'
+};
+const APIHUB_RAG_PHASE = {
+  off: ['已关闭', ''],
+  starting: ['启动中', 'busy'],
+  stopping: ['正在关闭', 'busy'],
+  running: ['运行中', 'ok'],
+  partial: ['部分可用', 'warn'],
+  mismatch: ['需要全量重建', 'err'],
+  rebuilding: ['重建中', 'busy'],
+  failed: ['启动失败', 'err']
+};
+
+function apiHubSetMsg(id, text, ok) {
+  const el = apiEl(id);
+  if (!el) return;
+  el.textContent = text;
+  el.className = 'meta' + (ok === true ? ' ok' : ok === false ? ' err' : '');
+}
+
+async function apiHubPost(path, body) {
+  try {
+    return await api(path, 'POST', body);
+  } catch (e) {
+    return { ok: false, error: (e && e.message) || '网络错误' };
+  }
+}
+
+async function loadApiPanel() {
+  if (apiHub.loading) return;
+  apiHub.loading = true;
+  apiHubSetMsg('apiLoadMsg', '正在读取…');
+  try {
+    const r = await api('/api/apis');
+    if (!r || r.ok === false) throw new Error((r && r.error) || '读取失败');
+    apiHub.data = r;
+    const items = r.items || {};
+    apiHubRenderDsh(items.dsh);
+    apiHubRenderPersona(items.persona);
+    apiHubRenderWeb(items.webSearch);
+    apiHubRenderTts(items.tts);
+    apiHubApplyEmbedding(items.embedding || {});
+    apiHubRenderDistill(items.distill || {});
+    if (r.rag) apiHubApplyRag(r.rag);
+    apiHubSetMsg('apiLoadMsg', '');
+  } catch (e) {
+    apiHubSetMsg('apiLoadMsg', '读取失败：' + ((e && e.message) || '未知错误'), false);
+  } finally {
+    apiHub.loading = false;
+  }
+}
+
+// ── 她聊天（DSH）──
+function apiHubRenderDsh(d) {
+  const x = d || {};
+  apiEl('apiDshStatus').textContent = x.hasKey ? `已保存 ${x.keyHint || ''}`.trim() : '未填写';
+  const input = apiEl('apiDshKey');
+  input.value = '';
+  input.placeholder = x.hasKey ? '留空不修改' : '填新的 DeepSeek 密钥';
+  const locked = x.writable === false;
+  input.disabled = locked;
+  apiEl('apiDshSave').disabled = locked;
+  apiEl('apiDshReason').hidden = !locked;
+  apiEl('apiDshReason').textContent = locked ? (x.reason || '当前不能在这里写（DSH 凭据格式不认识或权限不对）') : '';
+  const link = apiEl('apiDshDshLink');
+  link.hidden = !locked;
+  if (locked) link.href = x.dshUrl || 'http://127.0.0.1:3080';
+  apiHubSetMsg('apiDshMsg', '');
+}
+
+async function apiHubSaveDsh() {
+  const key = apiEl('apiDshKey').value.trim();
+  if (!key) { apiHubSetMsg('apiDshMsg', '先填密钥', false); return; }
+  const btn = apiEl('apiDshSave');
+  btn.disabled = true;
+  const r = await apiHubPost('/api/apis/dsh', { apiKey: key });
+  btn.disabled = false;
+  if (!r || r.ok === false) {
+    apiHubSetMsg('apiDshMsg', '保存失败：' + ((r && r.error) || '未知错误'), false);
+    return;
+  }
+  apiEl('apiDshKey').value = '';
+  apiEl('apiDshStatus').textContent = r.keyHint ? `已保存 ${r.keyHint}` : '已保存';
+  apiHubSetMsg('apiDshMsg', '已保存，DSH 立即生效', true);
+}
+
+// ── 人格判读 ──
+function apiHubRenderPersona(p) {
+  const avail = p && p.available !== false;
+  apiEl('apiPersonaUnavailable').hidden = avail;
+  apiEl('apiPersonaBody').hidden = !avail;
+  if (!avail) return;
+  apiEl('apiPersonaBaseUrl').value = p.baseUrl || '';
+  apiEl('apiPersonaModel').value = p.model || '';
+  apiEl('apiPersonaKey').value = '';
+  apiEl('apiPersonaKeyHint').textContent = p.hasKey ? `已保存 ${p.keyHint || ''}` : '未填写';
+  apiHubSetMsg('apiPersonaMsg', '');
+}
+
+async function apiHubSavePersona(clearKey) {
+  const body = {
+    baseUrl: apiEl('apiPersonaBaseUrl').value.trim(),
+    model: apiEl('apiPersonaModel').value.trim()
+  };
+  const key = apiEl('apiPersonaKey').value.trim();
+  if (clearKey) body.clearKey = true;
+  else if (key) body.apiKey = key;
+  const r = await apiHubPost('/api/apis/persona', body);
+  if (!r || r.ok === false) {
+    apiHubSetMsg('apiPersonaMsg', '保存失败：' + ((r && r.error) || '未知错误'), false);
+    return;
+  }
+  apiEl('apiPersonaKey').value = '';
+  apiEl('apiPersonaKeyHint').textContent = r.hasKey ? `已保存 ${r.keyHint || ''}` : '未填写';
+  apiHubSetMsg('apiPersonaMsg', '已保存', true);
+}
+
+// ── 联网搜索 ──
+function apiHubWebSource() {
+  const checked = document.querySelector('input[name="apiWebKeySource"]:checked');
+  return checked ? checked.value : 'dsh';
+}
+
+function apiHubRenderWebEffective(effective) {
+  apiEl('apiWebEffective').textContent = '实际使用：' + (APIHUB_EFFECTIVE[effective] || '未知（' + (effective || '空') + '）');
+}
+
+function apiHubRenderWeb(w) {
+  const x = w || {};
+  const source = x.keySource === 'own' ? 'own' : 'dsh';
+  document.querySelectorAll('input[name="apiWebKeySource"]').forEach((r) => { r.checked = r.value === source; });
+  apiEl('apiWebOwnKeyRow').hidden = source !== 'own';
+  apiEl('apiWebBaseUrl').value = x.baseURL || '';
+  apiEl('apiWebModel').value = x.model || '';
+  apiEl('apiWebKey').value = '';
+  apiEl('apiWebKeyHint').textContent = x.hasOwnKey ? `已保存 ${x.ownKeyHint || ''}` : '未填写';
+  apiHubRenderWebEffective(x.effective);
+  apiHubSetMsg('apiWebMsg', '');
+}
+
+async function apiHubSaveWeb() {
+  const source = apiHubWebSource();
+  const body = { keySource: source, baseURL: apiEl('apiWebBaseUrl').value.trim(), model: apiEl('apiWebModel').value.trim() };
+  const key = apiEl('apiWebKey').value.trim();
+  if (source === 'own' && key) body.apiKey = key;
+  const r = await apiHubPost('/api/apis/web-search', body);
+  if (!r || r.ok === false) {
+    apiHubSetMsg('apiWebMsg', '保存失败：' + ((r && r.error) || '未知错误'), false);
+    return;
+  }
+  apiEl('apiWebKey').value = '';
+  apiEl('apiWebKeyHint').textContent = r.hasOwnKey ? `已保存 ${r.ownKeyHint || ''}` : '未填写';
+  apiHubRenderWebEffective(r.effective);
+  apiHubSetMsg('apiWebMsg', '已保存', true);
+}
+
+// ── 语音合成 ──
+function apiHubRenderTts(t) {
+  const avail = t && t.available !== false;
+  apiEl('apiTtsUnavailable').hidden = avail;
+  apiEl('apiTtsBody').hidden = !avail;
+  if (!avail) return;
+  apiEl('apiTtsEndpoint').value = t.endpoint || '';
+  apiEl('apiTtsKey').value = '';
+  apiEl('apiTtsKeyHint').textContent = t.hasKey ? `已保存 ${t.keyHint || ''}` : '未填写';
+  apiHubSetMsg('apiTtsMsg', '');
+}
+
+async function apiHubSaveTts(clearKey) {
+  const body = { endpoint: apiEl('apiTtsEndpoint').value.trim() };
+  const key = apiEl('apiTtsKey').value.trim();
+  if (clearKey) body.clearKey = true;
+  else if (key) body.apiKey = key;
+  const r = await apiHubPost('/api/apis/tts', body);
+  if (!r || r.ok === false) {
+    apiHubSetMsg('apiTtsMsg', '保存失败：' + ((r && r.error) || '未知错误'), false);
+    return;
+  }
+  apiEl('apiTtsKey').value = '';
+  apiEl('apiTtsEndpoint').value = r.endpoint || '';
+  apiEl('apiTtsKeyHint').textContent = r.hasKey ? `已保存 ${r.keyHint || ''}` : '未填写';
+  apiHubSetMsg('apiTtsMsg', '已保存', true);
+}
+
+// ── 向量模型（5a）──
+function apiHubEmbedSeg(seg) {
+  const s = seg || {};
+  return {
+    baseUrl: s.baseUrl || '',
+    model: s.model || '',
+    dim: (s.dim === null || s.dim === undefined || s.dim === '') ? null : Number(s.dim),
+    instruct: s.instruct || '',
+    appendEos: s.appendEos === true,
+    sendDimensions: s.sendDimensions === true,
+    batch: Number.isFinite(Number(s.batch)) ? Number(s.batch) : 32,
+    timeoutS: Number.isFinite(Number(s.timeoutS)) ? Number(s.timeoutS) : 30,
+    hasKey: s.hasKey === true,
+    keyHint: s.keyHint || ''
+  };
+}
+
+function apiHubClearEmbedErrors() {
+  for (const id of ['apiEmbedErrBaseUrl', 'apiEmbedErrModel', 'apiEmbedErrDim', 'apiEmbedErrKind', 'apiEmbedErrInstruct', 'apiEmbedErrBatch', 'apiEmbedErrTimeout']) {
+    const el = apiEl(id);
+    el.textContent = '';
+    el.hidden = true;
+  }
+}
+
+function apiHubShowEmbedFieldError(field, error) {
+  const map = {
+    baseUrl: 'apiEmbedErrBaseUrl', model: 'apiEmbedErrModel', dim: 'apiEmbedErrDim', kind: 'apiEmbedErrKind',
+    instruct: 'apiEmbedErrInstruct', batch: 'apiEmbedErrBatch', timeoutS: 'apiEmbedErrTimeout'
+  };
+  const id = map[field];
+  if (!id) return false;
+  const el = apiEl(id);
+  el.textContent = error;
+  el.hidden = false;
+  return true;
+}
+
+function apiHubApplyEmbedKindVisual(kind) {
+  const bundled = kind === 'bundled';
+  apiEl('apiEmbedForm').hidden = bundled;
+  apiEl('apiEmbedBundled').hidden = !bundled;
+  apiEl('apiEmbedBundledHint').hidden = !(bundled && apiHub.unitInstalled === false);
+  apiEl('apiEmbedCloudCost').hidden = kind !== 'cloud';
+  apiEl('apiEmbedBaseUrl').placeholder = kind === 'cloud' ? 'https://api.siliconflow.cn/v1' : '127.0.0.1:11434';
+  apiEl('apiEmbedKeyOptional').hidden = kind !== 'local';
+}
+
+function apiHubFillEmbedForm(seg) {
+  const s = apiHubEmbedSeg(seg);
+  apiEl('apiEmbedBaseUrl').value = s.baseUrl;
+  apiEl('apiEmbedModel').value = s.model;
+  apiEl('apiEmbedKey').value = '';
+  apiEl('apiEmbedKeyHint').textContent = s.hasKey ? `已保存 ${s.keyHint}` : '未填写';
+  apiEl('apiEmbedDim').value = s.dim === null ? '' : s.dim;
+  apiEl('apiEmbedInstruct').value = s.instruct;
+  apiEl('apiEmbedAppendEos').checked = s.appendEos;
+  apiEl('apiEmbedSendDimensions').checked = s.sendDimensions;
+  apiEl('apiEmbedBatch').value = s.batch;
+  apiEl('apiEmbedTimeout').value = s.timeoutS;
+  apiHubClearEmbedErrors();
+  apiHubSetMsg('apiEmbedSaveMsg', '');
+  apiHubSetMsg('apiEmbedTestMsg', '');
+}
+
+function apiHubReadEmbedForm() {
+  return {
+    baseUrl: apiEl('apiEmbedBaseUrl').value.trim(),
+    model: apiEl('apiEmbedModel').value.trim(),
+    dim: apiEl('apiEmbedDim').value === '' ? null : Number(apiEl('apiEmbedDim').value),
+    instruct: apiEl('apiEmbedInstruct').value.trim(),
+    appendEos: apiEl('apiEmbedAppendEos').checked,
+    sendDimensions: apiEl('apiEmbedSendDimensions').checked,
+    batch: Number(apiEl('apiEmbedBatch').value),
+    timeoutS: Number(apiEl('apiEmbedTimeout').value)
+  };
+}
+
+function apiHubApplyEmbedding(e) {
+  const x = e || {};
+  const kind = ['bundled', 'local', 'cloud'].includes(x.kind) ? x.kind : 'bundled';
+  apiHub.embedKind = kind;
+  apiHub.embedDraft = { local: apiHubEmbedSeg(x.local), cloud: apiHubEmbedSeg(x.cloud) };
+  const b = x.bundled || {};
+  apiEl('apiEmbedBundledText').textContent = `${b.baseUrl || '—'} · ${b.model || '—'} · ${b.dim ?? '—'} 维`;
+  apiHub.unitInstalled = b.unitInstalled !== false;
+  document.querySelectorAll('input[name="apiEmbedKind"]').forEach((r) => { r.checked = r.value === kind; });
+  apiHubApplyEmbedKindVisual(kind);
+  if (kind !== 'bundled') apiHubFillEmbedForm(apiHub.embedDraft[kind]);
+  apiHub.testedDim = null;
+}
+
+function apiHubSelectEmbedKind(kind) {
+  if (apiHub.embedKind === 'local' || apiHub.embedKind === 'cloud') {
+    apiHub.embedDraft[apiHub.embedKind] = apiHubReadEmbedForm();
+  }
+  apiHub.embedKind = kind;
+  apiHubApplyEmbedKindVisual(kind);
+  if (kind !== 'bundled') apiHubFillEmbedForm(apiHub.embedDraft[kind]);
+  apiHub.testedDim = null;
+  apiHubSetMsg('apiEmbedSaveMsg', '');
+  apiHubSetMsg('apiEmbedTestMsg', '');
+}
+
+async function apiHubTestEmbedding() {
+  const kind = apiHub.embedKind;
+  const body = { kind };
+  if (kind === 'local') body.local = apiHubReadEmbedForm();
+  else if (kind === 'cloud') body.cloud = apiHubReadEmbedForm();
+  const key = kind === 'bundled' ? '' : apiEl('apiEmbedKey').value.trim();
+  if (key && kind === 'local') body.localApiKey = key;
+  else if (key && kind === 'cloud') body.apiKey = key;
+  apiHubClearEmbedErrors();
+  apiHubSetMsg('apiEmbedTestMsg', '测试中…');
+  const btn = apiEl('apiEmbedTest');
+  btn.disabled = true;
+  try {
+    const r = await apiHubPost('/api/apis/embedding/test', body);
+    if (r && r.ok === true) {
+      const dim = Number(r.dim);
+      if (Number.isFinite(dim) && dim > 0) {
+        apiHub.testedDim = dim;
+        apiEl('apiEmbedDim').value = dim;
+        apiHubSetMsg('apiEmbedTestMsg', `成功：向量 ${dim} 维，耗时 ${Number(r.ms) || 0} ms`, true);
+      } else {
+        apiHubSetMsg('apiEmbedTestMsg', '成功，但返回的维度不是数字', false);
+      }
+      return;
+    }
+    if (r && r.off) { apiHubSetMsg('apiEmbedTestMsg', 'RAG 已关闭，打开后才能测试', false); return; }
+    if (r && r.field) {
+      const field = String(r.field).split('.').pop();
+      if (apiHubShowEmbedFieldError(field, r.error || '设置不对')) return;
+    }
+    const err = String((r && r.error) || '未知错误');
+    apiHubSetMsg('apiEmbedTestMsg', '失败：' + (APIHUB_TEST_ERROR[err] || err), false);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function apiHubSaveEmbedding() {
+  const kind = apiHub.embedKind;
+  const base = { kind };
+  if (kind === 'local') base.local = apiHubReadEmbedForm();
+  else if (kind === 'cloud') base.cloud = apiHubReadEmbedForm();
+  const key = kind === 'bundled' ? '' : apiEl('apiEmbedKey').value.trim();
+  if (key && kind === 'local') base.localApiKey = key;
+  else if (key && kind === 'cloud') base.apiKey = key;
+  if (apiHub.testedDim !== null) base.testedDim = apiHub.testedDim;
+  const send = (confirmRebuild) => apiHubPost('/api/apis/embedding', confirmRebuild ? { ...base, confirmRebuild: true } : { ...base });
+  apiHubClearEmbedErrors();
+  apiHubSetMsg('apiEmbedSaveMsg', '保存中…');
+  const btn = apiEl('apiEmbedSave');
+  btn.disabled = true;
+  try {
+    let r = await send(false);
+    if (r && r.ok === false && r.needRebuild) {
+      const est = r.estimate || {};
+      const n = (v) => (v === null || v === undefined ? '未知' : Number(v).toLocaleString('zh-CN'));
+      const text = `换向量模型后旧向量不能用，需要全量重建。重建期间检索只走关键词。现有 ${n(est.chunks)} 块、${n(est.summaries)} 条摘要、约 ${n(est.chars)} 字${est.cloud ? '，会按 token 计费' : ''}。摘要不会重新提炼，不花提炼的钱。换回原来的模型同样要重建一次。确定保存并重建？`;
+      if (!confirm(text)) { apiHubSetMsg('apiEmbedSaveMsg', '已取消保存'); return; }
+      apiHubSetMsg('apiEmbedSaveMsg', '保存并重建中…');
+      r = await send(true);
+    }
+    if (r && r.ok === true) {
+      apiEl('apiEmbedKey').value = '';
+      let m = '已保存';
+      if (r.restarted) m += '，memory-rag 已重启';
+      if (r.rebuild) m += '，已开始全量重建，进度见长期记忆 → 向量索引';
+      if (r.rag) apiHubApplyRag(r.rag);
+      // 刷新面板会重建表单、顺手清空提示，所以成功提示放在刷新之后。
+      await loadApiPanel();
+      apiHubSetMsg('apiEmbedSaveMsg', m, true);
+      return;
+    }
+    if (r && r.off) { apiHubSetMsg('apiEmbedSaveMsg', 'RAG 已关闭，打开后才能填写', false); return; }
+    if (r && r.needTest) { apiHubSetMsg('apiEmbedSaveMsg', '换模型前请先点「测试连接」', false); return; }
+    if (r && r.busy) { apiHubSetMsg('apiEmbedSaveMsg', '正在启停或保存，稍后再试', false); return; }
+    if (r && r.field) {
+      const field = String(r.field).split('.').pop();
+      if (apiHubShowEmbedFieldError(field, r.error || '设置不对')) return;
+    }
+    apiHubSetMsg('apiEmbedSaveMsg', '保存失败：' + ((r && r.error) || '未知错误'), false);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// ── 话题提炼（5b）──
+function apiHubRenderDistill(d) {
+  const x = d || {};
+  const shared = x.useShared !== false;
+  apiEl('apiDistillShared').checked = shared;
+  apiEl('apiDistillSharedText').hidden = !shared;
+  apiEl('apiDistillForm').hidden = shared;
+  const sh = x.shared || {};
+  apiEl('apiDistillSharedText').textContent = `当前：${sh.model || '—'} @ ${sh.baseUrl || '—'}，密钥 ${sh.hasKey ? (sh.keyHint || '已保存') : '未填写'}（人格判读那把）`;
+  if (!shared) {
+    apiEl('apiDistillBaseUrl').value = x.baseUrl || '';
+    apiEl('apiDistillModel').value = x.model || '';
+    apiEl('apiDistillKey').value = '';
+    apiEl('apiDistillKeyHint').textContent = x.hasKey ? `已保存 ${x.keyHint || ''}` : '未填写';
+  }
+  apiHubSetMsg('apiDistillMsg', '');
+}
+
+async function apiHubSaveDistill(clearKey) {
+  const shared = apiEl('apiDistillShared').checked;
+  const body = { useShared: shared };
+  if (!shared) {
+    body.baseUrl = apiEl('apiDistillBaseUrl').value.trim();
+    body.model = apiEl('apiDistillModel').value.trim();
+    const key = apiEl('apiDistillKey').value.trim();
+    if (clearKey) body.clearKey = true;
+    else if (key) body.apiKey = key;
+  }
+  const r = await apiHubPost('/api/apis/distill', body);
+  if (!r || r.ok === false) {
+    apiHubSetMsg('apiDistillMsg', '保存失败：' + ((r && r.error) || '未知错误'), false);
+    return;
+  }
+  apiEl('apiDistillKey').value = '';
+  apiHubRenderDistill({ ...(apiHub.data?.items?.distill || {}), ...r, shared: r.shared || apiHub.data?.items?.distill?.shared });
+  apiHubSetMsg('apiDistillMsg', '已保存', true);
+}
+
+// ── RAG 总开关 ──
+function apiHubSetRagFieldsEnabled(enabled) {
+  apiEl('apiEmbedFieldset').disabled = !enabled;
+  apiEl('apiDistillFieldset').disabled = !enabled;
+  apiEl('apiEmbedOffHint').hidden = enabled;
+  apiEl('apiDistillOffHint').hidden = enabled;
+}
+
+function apiHubActionBtn(text, cls, fn) {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = cls;
+  b.textContent = text;
+  b.addEventListener('click', fn);
+  return b;
+}
+
+function apiHubRagTransient(s) {
+  return Boolean(s) && (s.busy === true || ['starting', 'stopping', 'rebuilding'].includes(s.phase));
+}
+
+function apiHubApplyRag(s) {
+  if (!s || typeof s !== 'object' || s.ok === false) return;
+  apiHub.rag = s;
+  const enabled = s.enabled === true;
+  const busy = s.busy === true;
+  const sw = apiEl('apiRagSwitch');
+  sw.checked = enabled;
+  sw.disabled = busy;
+  apiEl('apiRagSwitchText').textContent = enabled ? '开' : '关';
+  apiHubSetRagFieldsEnabled(enabled);
+
+  const box = apiEl('apiRagStatus');
+  box.textContent = '';
+  const known = Object.hasOwn(APIHUB_RAG_PHASE, s.phase);
+  const [label, tone] = known ? APIHUB_RAG_PHASE[s.phase] : ['未知状态（' + (s.phase || '空') + '）', ''];
+  const dot = document.createElement('span');
+  dot.className = 'api-dot ' + tone;
+  box.appendChild(dot);
+  let text = label;
+  if (s.phase === 'starting' && s.step) text += '：' + s.step;
+  else if (s.phase === 'partial' && s.reason) text += '：' + s.reason;
+  else if (s.phase === 'failed' && s.reason) text += '：' + s.reason;
+  else if (s.phase === 'off' && s.reason) text += '：' + s.reason;
+  else if (s.phase === 'mismatch' && s.reason) text += '（' + s.reason + '）';
+  else if (s.phase === 'rebuilding' && s.job && Number.isFinite(Number(s.job.started_at))) {
+    text += '（' + new Date(Number(s.job.started_at)).toLocaleTimeString('zh-CN', { hour12: false }) + ' 开始）';
+  }
+  const span = document.createElement('span');
+  span.textContent = text;
+  box.appendChild(span);
+
+  const actions = apiEl('apiRagActions');
+  actions.textContent = '';
+  if (s.phase === 'mismatch') actions.appendChild(apiHubActionBtn('开始重建', 'danger small', apiHubRebuildNow));
+  if (s.phase === 'failed') actions.appendChild(apiHubActionBtn('重试', 'small', () => apiHubTurnRag(true)));
+
+  if (!apiHubRagTransient(s)) apiHubStopPoll();
+}
+
+function apiHubStopPoll() {
+  if (apiHub.ragPollTimer) {
+    clearTimeout(apiHub.ragPollTimer);
+    apiHub.ragPollTimer = null;
+  }
+  apiHub.ragPollMiss = 0;
+}
+
+// 启停 / 重建期间每 2 秒轮询一次；进入稳定状态或离开 #api 页就停。
+function apiHubStartPoll() {
+  if (apiHub.ragPollTimer) return;
+  const tick = async () => {
+    apiHub.ragPollTimer = null;
+    if (currentConsolePage !== 'api') { apiHubStopPoll(); return; }
+    let s = null;
+    try { s = await api('/api/rag/control'); } catch { s = null; }
+    if (!s || s.ok === false) {
+      apiHub.ragPollMiss += 1;
+      if (apiHub.ragPollMiss >= 3) { apiHubStopPoll(); return; }
+    } else {
+      apiHub.ragPollMiss = 0;
+      apiHubApplyRag(s);
+      if (!apiHubRagTransient(s)) { apiHubStopPoll(); return; }
+    }
+    apiHub.ragPollTimer = setTimeout(tick, 2000);
+  };
+  apiHub.ragPollTimer = setTimeout(tick, 2000);
+}
+
+async function apiHubRefreshRag() {
+  try {
+    const s = await api('/api/rag/control');
+    if (s && s.ok !== false) {
+      apiHubApplyRag(s);
+      if (apiHubRagTransient(s)) apiHubStartPoll();
+    }
+  } catch { /* 读不到就保持现状，下一轮轮询会补上 */ }
+}
+
+async function apiHubTurnRag(enabled) {
+  const sw = apiEl('apiRagSwitch');
+  if (!enabled && !confirm('关闭 RAG 会：语义检索退回关键词；自动想起、联想链、账本建议、话题提炼暂停。索引、摘要都保留，再打开会接着用。确定关闭？')) {
+    sw.checked = true;
+    apiEl('apiRagSwitchText').textContent = '开';
+    return;
+  }
+  apiHubSetMsg('apiRagMsg', enabled ? '正在打开…' : '正在关闭…');
+  const r = await apiHubPost('/api/rag/control', { enabled });
+  if (!r || r.ok === false) {
+    apiHubSetMsg('apiRagMsg', (enabled ? '打开失败：' : '关闭失败：') + ((r && r.error) || '未知错误'), false);
+    sw.checked = !enabled;
+    apiEl('apiRagSwitchText').textContent = enabled ? '关' : '开';
+    return;
+  }
+  apiHubSetMsg('apiRagMsg', '');
+  apiHubApplyRag(r);
+  if (apiHubRagTransient(r)) apiHubStartPoll();
+  await apiHubRefreshRag();
+}
+
+async function apiHubRebuildNow() {
+  if (!confirm('全量重建会清空向量索引并从存档重新生成，期间语义检索暂时降级为关键词检索。确定？')) return;
+  const r = await apiHubPost('/api/ltm/rag/rebuild', {});
+  if (!r || r.ok === false) {
+    if (r && r.off) {
+      apiHubSetMsg('apiRagMsg', 'RAG 已关闭，打开后才能重建', false);
+      await apiHubRefreshRag();
+      return;
+    }
+    apiHubSetMsg('apiRagMsg', '重建失败：' + ((r && r.error) || '未知错误'), false);
+    return;
+  }
+  apiHubSetMsg('apiRagMsg', '已开始全量重建', true);
+  await apiHubRefreshRag();
+}
+
+// ── 事件接线 ──
+apiEl('apiDshSave').addEventListener('click', apiHubSaveDsh);
+apiEl('apiPersonaSave').addEventListener('click', () => apiHubSavePersona(false));
+apiEl('apiPersonaClear').addEventListener('click', () => {
+  if (confirm('清除人格判读密钥？之后只用规则判读。')) apiHubSavePersona(true);
+});
+document.querySelectorAll('input[name="apiWebKeySource"]').forEach((r) => r.addEventListener('change', () => {
+  apiEl('apiWebOwnKeyRow').hidden = apiHubWebSource() !== 'own';
+}));
+apiEl('apiWebSave').addEventListener('click', apiHubSaveWeb);
+apiEl('apiTtsSave').addEventListener('click', () => apiHubSaveTts(false));
+apiEl('apiTtsClear').addEventListener('click', () => {
+  if (confirm('清除语音合成密钥？之后合成会失败，直到重新填写。')) apiHubSaveTts(true);
+});
+document.querySelectorAll('input[name="apiEmbedKind"]').forEach((r) => r.addEventListener('change', () => {
+  if (r.checked) apiHubSelectEmbedKind(r.value);
+}));
+for (const id of ['apiEmbedModel', 'apiEmbedDim', 'apiEmbedInstruct']) {
+  apiEl(id).addEventListener('input', () => { apiHub.testedDim = null; });
+}
+for (const id of ['apiEmbedAppendEos', 'apiEmbedSendDimensions']) {
+  apiEl(id).addEventListener('change', () => { apiHub.testedDim = null; });
+}
+apiEl('apiEmbedTest').addEventListener('click', apiHubTestEmbedding);
+apiEl('apiEmbedSave').addEventListener('click', apiHubSaveEmbedding);
+apiEl('apiEmbedClear').addEventListener('click', () => {
+  if (confirm('清除这把向量模型的密钥？')) {
+    const kind = apiHub.embedKind;
+    if (kind === 'bundled') return;
+    apiHubPost('/api/apis/embedding', kind === 'local' ? { kind, clearLocalKey: true } : { kind, clearKey: true }).then((r) => {
+      if (!r || r.ok === false) { apiHubSetMsg('apiEmbedSaveMsg', '清除失败：' + ((r && r.error) || '未知错误'), false); return; }
+      apiHubSetMsg('apiEmbedSaveMsg', '密钥已清除', true);
+      loadApiPanel();
+    });
+  }
+});
+apiEl('apiDistillShared').addEventListener('change', () => {
+  const shared = apiEl('apiDistillShared').checked;
+  apiEl('apiDistillSharedText').hidden = !shared;
+  apiEl('apiDistillForm').hidden = shared;
+});
+apiEl('apiDistillSave').addEventListener('click', () => apiHubSaveDistill(false));
+apiEl('apiDistillClear').addEventListener('click', () => {
+  if (confirm('清除话题提炼的密钥？之后会退回人格判读那把（如果勾着「用同一个 API」则不受影响）。')) apiHubSaveDistill(true);
+});
+apiEl('apiRagSwitch').addEventListener('change', () => {
+  const want = apiEl('apiRagSwitch').checked;
+  apiEl('apiRagSwitchText').textContent = want ? '开' : '关';
+  apiHubTurnRag(want);
+});
+if (location.hash === '#api') loadApiPanel();
+// ── /APIHUB_PATCH ───────────────────────────────────────────────────────────
 </script>
 </body>
 </html>

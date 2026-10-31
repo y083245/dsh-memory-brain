@@ -19,7 +19,7 @@
 | 🎭 | **有性格和情绪** | 被夸会高兴、被损会嘴硬，对每个人的亲近程度不一样，性格随相处慢慢变化（可先「只观察不生效」） |
 | ⏰ | **会主动** | 有「自己的时间」，会忽然想起一件旧事；答应过的约定到期了会主动来提醒 |
 | 🧩 | **会联想 & 帮她记事** | 想起一件事时顺着人和事带出相关的另一件；聊完自动整理出「值得记住的事」，由她自己决定记不记 |
-| 🖥️ | **可视化控制台** | 浏览器里看她记得什么、心情如何、花了多少钱，开关每个功能；还有每日报表 |
+| 🖥️ | **可视化控制台** | 浏览器里看她记得什么、心情如何、花了多少钱，开关每个功能；**用到的 API 在「API 管理」一页填完**（含记忆服务的总开关）；还有每日报表 |
 | 🔒 | **安全、数据在本地** | 白名单才响应、工具白名单、敏感信息拦截；聊天记录和记忆只存在你自己的电脑上 |
 
 新增功能的详细说明见 👉 **[docs/FORK_FEATURES.md](docs/FORK_FEATURES.md)**
@@ -182,8 +182,8 @@ echo "http://127.0.0.1:3100/?token=$(cat state/console-token)"
 
 ### 第 6 步（可选）：开启人格与情绪
 
-1. 打开控制台 →「**人格与情绪**」页，填入 DeepSeek 密钥（可以和 DSH 用同一个），保存。
-2. 按页面提示**确认出厂性格**，然后打开「启用」。
+1. 打开控制台 →「**API 管理**」页 →「人格判读」卡片，填入 DeepSeek 密钥（可以和 DSH 用同一个），保存。
+2. 回到「**人格与情绪**」页，按页面提示**确认出厂性格**，然后打开「启用」。
 3. 先让它跑两三天「**影子模式**」（只观察、不影响她说话），在页面上看判读得准不准。
 4. 觉得没问题，再勾选「**注入给她**」，她的情绪和性格就会开始影响说话了。
 
@@ -205,24 +205,31 @@ uv pip install --python .venv/bin/python -e .
 
 **7.2 选一种 embedding（把文字变成向量的模型）**
 
-- **有 NVIDIA 显卡（≥ 10 GB 显存）→ 本地跑**：装好 [llama.cpp](https://github.com/ggml-org/llama.cpp)，从 [Qwen/Qwen3-Embedding-8B-GGUF](https://huggingface.co/Qwen/Qwen3-Embedding-8B-GGUF) 下载 `Qwen3-Embedding-8B-Q8_0.gguf`，然后启动（保持开着）：
+三种方式走的都是 **OpenAI 兼容的 `POST /v1/embeddings` 接口**，在控制台「**API 管理**」页 → RAG 卡片里选（**先打开 RAG 开关才能填**）：
+
+- **本项目自带 llama.cpp（有 NVIDIA 显卡、≥ 10 GB 显存）**：装好 [llama.cpp](https://github.com/ggml-org/llama.cpp)，从 [Qwen/Qwen3-Embedding-8B-GGUF](https://huggingface.co/Qwen/Qwen3-Embedding-8B-GGUF) 下载 `Qwen3-Embedding-8B-Q8_0.gguf`，然后启动（保持开着）：
 
   ```bash
   llama-server -m /path/to/Qwen3-Embedding-8B-Q8_0.gguf \
     --embedding --pooling last --host 127.0.0.1 --port 8091 -ngl 99 -c 8192 -ub 8192
   ```
 
-  `config.yml` 不用改（默认就是本地）。
+  控制台里选「本项目自带 llama.cpp」即可（这也是缺省，`config.yml` 不用改）。装了第 8 步的 systemd 服务后，RAG 开关会连它一起启停。
 
-- **没有显卡 → 用云端 API**（任意 OpenAI 兼容的 embedding 接口，例如硅基流动、阿里百炼、OpenAI）：按 [memory-rag 的说明](sidecars/memory-rag/README.md#embedding-用本地还是-api) 改 `config.yml` 里的 `embedding.provider: api` 并放好密钥文件。⚠️ 这样聊天内容会发给该服务商。
+- **自己部署的本地服务（Ollama / LM Studio / vLLM / 你自己的 llama.cpp）**：例如 Ollama 先 `ollama pull bge-m3`，控制台里选「我自己部署的本地服务」，地址填 `127.0.0.1:11434`、模型填 `bge-m3`，点「测试连接」（会自动填好维度）再保存。**只能填本机地址**（`127.0.0.1` / `localhost` + 端口）；RAG 开关不会去启停你自己的服务。
 
-**7.3 启动**（保持开着）
+- **没有显卡 → 云端 API**（硅基流动、阿里百炼、智谱、OpenAI 等提供 OpenAI 兼容 embedding 的服务）：选「云端 API」，填 https 地址（例如 `https://api.siliconflow.cn/v1`）、模型和密钥，测试连接后保存。⚠️ 这样聊天内容会发给该服务商。
 
-```bash
-.venv/bin/python -m memory_rag.app      # 在 sidecars/memory-rag 目录下执行
-```
+  各家的地址、维度、每批条数上限见控制台「API 管理」页顶部的「兼容性说明」或 [memory-rag 的说明](sidecars/memory-rag/README.md)。注意：阿里百炼 `text-embedding-v4` 一次最多 10 条，要在「高级 → 每批条数」改成 10。换模型需要全量重建向量库，页面会先提示再自动做。
 
-不用改桥接的配置：桥接默认就会去连 `127.0.0.1:8093`，连不上时自动退回普通的关键词检索。聊天摘要和「值得记住的事」会用第 6 步里填的 DeepSeek 密钥来提炼（每天几毛钱）。
+**7.3 启动并打开 RAG 开关**
+
+记忆服务有一个**总开关**（`config.json` 的 `memoryRag.enabled`，**缺省是关**）：关着时桥接根本不去连它，检索用普通的关键词。
+
+- **装了第 8 步的 systemd 服务**：控制台「API 管理」页打开 RAG 开关就行，它会把记忆服务（和自带的 embedding）拉起来，页面上能看到「启动中 → 运行中」；关掉会停服务、释放显存（数据都留着）。
+- **没装**：`./start-all.sh --rag` 起服务并打开开关；或者自己在 `sidecars/memory-rag` 目录下运行 `.venv/bin/python -m memory_rag.app`（保持开着），再去控制台打开开关。
+
+聊天摘要和「值得记住的事」默认用第 6 步「人格判读」那把 DeepSeek 密钥来提炼（每天几毛钱）；想换一家或单独计费，在「API 管理」→「话题提炼」里取消「和人格判读用同一个 API」再填。
 
 </details>
 
@@ -231,7 +238,7 @@ uv pip install --python .venv/bin/python -e .
 <details>
 <summary><b>点这里展开</b></summary>
 
-- `./start-all.sh`：按顺序启动 DSH → QQ → SnowLuma → 本项目（加 `--rag` 只启动记忆服务）。脚本开头的程序路径是作者本机的，请按你的安装位置改，或用 `DSH_DIR`、`SNOW_DIR`、`QQ_BIN` 等环境变量覆盖。
+- `./start-all.sh`：按顺序启动 DSH → QQ → SnowLuma → 本项目；RAG 开关开着时连记忆服务一起起（`--rag` = 只起记忆服务并打开开关；`./stop-all.sh --rag` = 停掉并关上开关）。脚本开头的程序路径是作者本机的，请按你的安装位置改，或用 `DSH_DIR`、`SNOW_DIR`、`QQ_BIN` 等环境变量覆盖。
 - `scripts/systemd/install.sh`：把本项目和记忆服务装成 systemd 用户服务，崩溃自动拉起；加 `--enable` 开机自启（QQ 仍需人工扫码登录）。
 
 </details>
@@ -247,6 +254,7 @@ uv pip install --python .venv/bin/python -e .
 | SnowLuma 接入 QQ 失败 | 多半是 QQ 版本不是 3.2.32，或者 Node 没有第 3.2 步的权限（升级 Node 后要重新 `setcap`） |
 | 日志出现 `SnowLuma 错误：{}` / `1006` | 正常现象：首次连接时桥接在自动修正 WebSocket 令牌，随后会显示「已连接」 |
 | 报 HTTP 426 | `httpUrl` 填成了 WebSocket 的端口，改成 HTTP API 的端口 |
+| 「API 管理」页 RAG 显示「部分可用」 | 记忆服务在跑，但 embedding 没起来：看状态后面的原因（显存不足、没装 llama.cpp / 模型、地址或模型名填错）；修好前检索自动只用关键词 |
 | 开了代理（Clash 等 fake-ip 模式）后她看不到图片 | 在代理的 `fake-ip-filter` 里加上 `+.qq.com`、`+.qq.com.cn`、`+.qpic.cn`、`+.gtimg.cn` |
 
 更多「已知行为」和排查方法见 [完整说明](docs/guides/FULL_GUIDE.md)。
