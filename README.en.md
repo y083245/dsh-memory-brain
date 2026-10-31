@@ -1,5 +1,7 @@
 # QQ ↔ DeepSeek Harness Bridge (qq-bridge)
 
+> **Step-by-step deployment guide and feature overview (Chinese):** see the main [README.md](README.md). This page is the upstream English reference.
+
 > This repository is a fork of [Derpyu520/qq-bridge](https://github.com/Derpyu520/qq-bridge) (MIT); see [docs/FORK_FEATURES.md](docs/FORK_FEATURES.md) for the long-term memory, vector memory, persona, memory decay and proactive-recall features added on top of upstream.
 
 > Connect QQ messages to DeepSeek Harness (DSH) agents: QQ friends/groups become DSH conversations, and agent replies (including questions and tool approvals) are sent back to QQ.

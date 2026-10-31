@@ -14,18 +14,19 @@ qq-bridge 的向量记忆索引服务。方案见 [`docs/design/RAG_MEMORY_PLAN.
     --embedding --pooling last --host 127.0.0.1 --port 8091 -ngl 99 -c 8192 -ub 8192
   ```
 
-- Python 3.12 venv（`uv`）。本机开着 Clash fake-ip 时 uv 直连会超时，装依赖要显式走代理：
+- Python 3.12 venv（`uv`）。如果直连 PyPI 很慢或超时（例如开着 Clash 的 fake-ip 模式），装依赖时加上你的代理地址：
 
   ```bash
   cd ~/qq-bridge/sidecars/memory-rag
   uv venv --python 3.12 .venv
-  HTTPS_PROXY=http://127.0.0.1:7897 uv pip install --python .venv/bin/python -e . pytest
+  uv pip install --python .venv/bin/python -e . pytest
+  # 需要代理时：HTTPS_PROXY=http://127.0.0.1:<代理端口> uv pip install --python .venv/bin/python -e . pytest
   ```
 
 ## embedding 用本地还是 API
 
 `config.yml` 的 `embedding.provider` 决定向量从哪来，**缺省 `local`**（本机 `llama-server`），
-线上这台机器就是本地模式，行为与改动前完全一致。
+不改配置就是本地模式。
 
 - `provider: local`：原有那几项（`base_url / model / dim / instruct / append_eos / batch / timeout_s`）照旧；
   需要本机 `llama-server`（`qq-embedding`）跑着。
