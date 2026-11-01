@@ -248,6 +248,9 @@ uv pip install --python .venv/bin/python -e .
 ## 🪟 Windows 原生部署
 
 > 这一节是 **Windows 原生（不是 WSL）**的完整步骤。Linux 的 systemd 部署不受影响；Windows 上没有 systemd，编排脚本改用 **PID 文件 + taskkill /T** 管理后台进程。
+>
+> 📄 简版安装说明：[README.windows.md](README.windows.md)
+> 🤖 让 AI 代部署：把 [docs/guides/WINDOWS_AI_DEPLOY.md](docs/guides/WINDOWS_AI_DEPLOY.md) 发给它。
 
 ### 0. 准备清单
 

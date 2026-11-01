@@ -15,6 +15,8 @@
 | [../README.md](../README.md) | **主页：项目特点 + 一步一步的部署教程**（第一次部署从这里开始） | ✅ |
 | [FORK_FEATURES.md](FORK_FEATURES.md) | 本分支新增功能详解：长期记忆、向量记忆、人格与情绪、记忆代谢、主动想起、联想、账本建议、每日报表 | ✅ |
 | [guides/FULL_GUIDE.md](guides/FULL_GUIDE.md) | 完整说明（原主页 README）：配置项全表、运行模式、控制台功能、运维、已知行为、上游版本适配说明 | ✅ |
+| [../README.windows.md](../README.windows.md) | **Windows 原生（非 WSL）简版安装部署**：DSH / QQNT / SnowLuma / 一键脚本 / RAG | ✅ |
+| [guides/WINDOWS_AI_DEPLOY.md](guides/WINDOWS_AI_DEPLOY.md) | **给 AI 的 Windows 部署手册**：前置检查、精确命令、provider 探测、SnowLuma 挂载、RAG、验证清单、已知 Windows 坑 | ✅ |
 | [guides/DSH_SETUP.md](guides/DSH_SETUP.md) | DSH 端安装说明：`qq-chat` / `qq-chat-v2` preset 与三个 MCP server 怎么挂到目标设备的 DSH 上 | ✅ |
 | [guides/VOICE.md](guides/VOICE.md) | 语音发送全解：独立工具（`voice-tool/` 的图形界面与命令行）、桥接 CLI、AI 工具、控制台面板，以及**工具拆出后的配置解析顺序** | ✅ 2026 整理时已更新（工具移到上一级 `voice-tool/`） |
 | [guides/TOKEN_USAGE_CONSOLE.md](guides/TOKEN_USAGE_CONSOLE.md) | 控制台「令牌与花费」看板：数据来源、计价口径（峰谷分时）、API、配置 | ✅ |
