@@ -71,7 +71,7 @@ copy config.example.json config.json
 
 - `allow.private` 留空时她**谁都不理**，这是故意的安全默认值。
 - `accessToken` 可以先留空，桥接会从 `homeDir` 下的 OneBot 配置里自动发现。
-- SnowLuma 装在别处时，`homeDir` 改成实际目录。
+- `snowluma.homeDir` 留空也行：`start-all` 会自己找 `%USERPROFILE%\SnowLuma`、`C:\SnowLuma`，以及 C:–H: 各盘根目录下的 `SnowLuma`；装在别处再填实际目录。
 
 ### 4. 把 preset / MCP 装进 DSH，然后重启 DSH
 
@@ -80,6 +80,16 @@ node scripts\setup-dsh.mjs
 ```
 
 装完必须重启 DSH（关掉 DSH 窗口再打开，或 `dsh web --no-open` 重新起）。
+
+> setup 会把 MCP 的 `command` 写成**一个 node 的绝对路径**，DSH 每次启动都按它拉进程。
+> 如果脚本提示「当前 node 位于临时/便携目录」，请装一个系统版 Node 或显式指定：
+>
+> ```bat
+> set QQ_BRIDGE_NODE_BIN=C:\Program Files\nodejs\node.exe
+> node scripts\setup-dsh.mjs
+> ```
+>
+> 否则那个 node 被宿主回收后，DSH 里的三个 MCP 会同时起不来。
 
 ### 5. 一键启动
 
@@ -151,8 +161,11 @@ node scripts\setup-dsh.mjs
 |---|---|
 | 日志出现 `session/model-unavailable` | 桌面版 DSH 的 provider 通常是 `deepseek-account`，把 `config.json` 的 `dsh.provider` 改成它；新版桥接会自动临时回退并提示 |
 | QQ 已登录，但 OneBot 3000/3001 不起 | SnowLuma 的 `hookAutoLoad` 改为 `true` 后重启 SnowLuma，或先启动 SnowLuma 再登录 QQ |
-| `start-all.bat` 报找不到 QQ | 设置 `QQ_BIN`，例如 `set QQ_BIN=C:\Program Files\Tencent\QQNT\QQ.exe`，或写进 `config.json` 的 `orchestrator.qqBin` |
+| `start-all.bat` 报找不到 QQ | 新版会自己找 Program Files / LocalAppData / C:–H: 各盘的 `QQ`、`Tencent\QQNT`；装在别处就设 `QQ_BIN`，例如 `set QQ_BIN=C:\Program Files\Tencent\QQNT\QQ.exe`，或写进 `config.json` 的 `orchestrator.qqBin` |
+| `start-all.bat` 报找不到 SnowLuma | 设 `SNOW_DIR` 或 `config.json` 的 `orchestrator.snowDir` 指向解压目录（内含 `index.mjs` / `SnowLuma.exe`） |
+| 启动直接说「缺少配置文件」 | 还没复制示例：`copy config.example.json config.json`，再填 `ownerQQ` 与 `allow.private` |
 | 控制台 RAG 开关不生效 | 看 `%USERPROFILE%\.ai-companion-run\memory-rag.log`；确认 `.venv\Scripts\python.exe` 存在 |
+| 开着代理时向量记忆连不上本地 8091/8093 | 旧版会把发往 127.0.0.1 的请求也塞进系统代理；新版对回环地址一律绕过代理由，升级即可 |
 | 显存不足、embedding 不起 | 6～8 GB 显卡跑不动 8B embedding；用云端 embedding，或只走关键词检索 |
 
 更多排查见 [完整说明](docs/guides/FULL_GUIDE.md)。

@@ -60,6 +60,16 @@ export function findSnowLumaDir({ home = os.homedir(), platform = process.platfo
   bases.push(path.join(home, 'snowluma'), path.join(home, 'SnowLuma'));
   // Windows 文档里的常见解压位置是 C:\SnowLuma（盘符取当前 home 所在盘）。
   if (platform === 'win32') bases.push(path.join(path.parse(home).root, 'SnowLuma'));
+  // 解压到别的盘（例如 D:\SnowLuma）同样常见，磁盘空间大的机器基本都不在 C:。
+  if (platform === 'win32') {
+    const homeRoot = path.parse(home).root.toUpperCase();
+    for (const drive of drivesToProbe({ env, platform, fsImpl })) {
+      for (const name of ['SnowLuma', 'snowluma']) {
+        const candidate = `${drive}:\\${name}`;
+        if (candidate.toUpperCase() !== path.join(homeRoot, name).toUpperCase()) bases.push(candidate);
+      }
+    }
+  }
   const found = [];
   for (const base of bases) {
     if (inspectSnowLuma(base, { platform, fsImpl })) found.push(base);
@@ -75,16 +85,43 @@ export function findSnowLumaDir({ home = os.homedir(), platform = process.platfo
   return found.sort((a, b) => naturalCompare(path.basename(a), path.basename(b))).at(-1);
 }
 
+/**
+ * 值得探测的盘符（仅 Windows）。
+ *
+ * 只在 C:–H: 这段「几乎都是本地盘」的范围内找：A:/B: 是软驱位、I: 之后更可能是
+ * 移动盘或映射的网络盘，`stat` 一个断开的网络盘要等 SMB 超时，会把启动卡住几秒。
+ * SystemDrive 排在最前，调用方按返回顺序找，命中即用。
+ */
+function drivesToProbe({ env, platform, fsImpl }) {
+  if (platform !== 'win32') return [];
+  const letters = [];
+  const system = String(env.SystemDrive ?? '').trim().toUpperCase();
+  if (/^[A-Z]:$/.test(system)) letters.push(system[0]);
+  for (const letter of ['C', 'D', 'E', 'F', 'G', 'H']) {
+    if (!letters.includes(letter)) letters.push(letter);
+  }
+  return letters.filter((letter) => {
+    try { return fsImpl.statSync(`${letter}:\\`).isDirectory(); } catch { return false; }
+  });
+}
+
 /** Windows 上 QQNT 的常见安装位置；找不到也返回第一个候选，交给调用方报错。 */
 export function defaultQqBin({ platform = process.platform, env = process.env, fsImpl = fs } = {}) {
   if (platform !== 'win32') return '/opt/QQ/qq';
   const candidates = [];
   for (const key of ['ProgramW6432', 'ProgramFiles', 'ProgramFiles(x86)']) {
-    if (env[key]) candidates.push(path.join(env[key], 'Tencent', 'QQNT', 'QQ.exe'));
+    if (env[key]) candidates.push(path.win32.join(env[key], 'Tencent', 'QQNT', 'QQ.exe'));
   }
   if (env.LOCALAPPDATA) {
-    candidates.push(path.join(env.LOCALAPPDATA, 'Programs', 'Tencent', 'QQNT', 'QQ.exe'));
-    candidates.push(path.join(env.LOCALAPPDATA, 'Tencent', 'QQNT', 'QQ.exe'));
+    candidates.push(path.win32.join(env.LOCALAPPDATA, 'Programs', 'Tencent', 'QQNT', 'QQ.exe'));
+    candidates.push(path.win32.join(env.LOCALAPPDATA, 'Tencent', 'QQNT', 'QQ.exe'));
+  }
+  // 装在非系统盘/自定义目录的情况很常见（例如 D:\QQ\QQ.exe），按盘符补几个标准布局。
+  for (const drive of drivesToProbe({ env, platform, fsImpl })) {
+    candidates.push(`${drive}:\\QQ\\QQ.exe`);
+    candidates.push(path.win32.join(`${drive}:\\`, 'Tencent', 'QQNT', 'QQ.exe'));
+    candidates.push(path.win32.join(`${drive}:\\`, 'Program Files', 'Tencent', 'QQNT', 'QQ.exe'));
+    candidates.push(path.win32.join(`${drive}:\\`, 'Tencent', 'QQ', 'Bin', 'QQ.exe'));
   }
   return candidates.find((file) => isFile(file, fsImpl)) || candidates[0] || '';
 }

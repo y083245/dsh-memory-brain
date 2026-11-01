@@ -69,7 +69,7 @@ class LlamaCppEmbedder:
         self.instruct = str(cfg.get("instruct", "")).strip()
         self.append_eos = bool(cfg.get("append_eos", True))
         self.batch = max(1, int(cfg.get("batch", 32)))
-        self.client = httpx.Client(timeout=float(cfg.get("timeout_s", 30)))
+        self.client = _client_for(self.base_url, float(cfg.get("timeout_s", 30)))
         # 写进集合 metadata 的「向量口径」：任何一项变了，旧向量就不可比
         # EMBED_API_PATCH：这行是本地口径的原文，一个字符都不能动（线上库按它校验）
         self.model_id = f"{self.model}|dim={self.dim}|eos={int(self.append_eos)}|inst={self.instruct}"
@@ -121,6 +121,23 @@ def _is_loopback(host: str | None) -> bool:
         return False
 
 
+def _client_for(base_url: str, timeout: float) -> httpx.Client:
+    """按目标地址决定要不要认系统代理。
+
+    为什么回环地址必须关掉：httpx 默认 trust_env=True，会读 HTTP_PROXY/HTTPS_PROXY。
+    Windows 上装了 Clash / v2ray 这类代理的用户，shell 里通常带着代理变量，于是发往
+    `127.0.0.1:8091` 的 embedding 请求也会被塞进代理：慢、可能被改写成绝对 URI
+    （服务端看到的 path 变成 `http://127.0.0.1:8091/v1/embeddings`），而且**聊天原文
+    会离开本机**——正是「本地服务只允许回环」这条约束想避免的事。
+    远端 https 接口反过来必须保留代理设置，用户就是靠它出网的。
+    """
+    try:
+        host = urllib.parse.urlsplit(base_url).hostname
+    except ValueError:
+        host = None
+    return httpx.Client(timeout=timeout, trust_env=not _is_loopback(host))
+
+
 def _check_base_url(url: str) -> None:
     """聊天原文不能明文发出去：远端必须是 https，只有本机回环地址才允许 http。"""
     if not url:
@@ -161,7 +178,7 @@ class ApiEmbedder:
         key_file = str(cfg.get("key_file") or DEFAULT_KEY_FILE)
         kp = Path(key_file)
         self.key_path = kp if kp.is_absolute() else Path(state_dir) / kp
-        self.client = httpx.Client(timeout=float(cfg.get("timeout_s", 30)))
+        self.client = _client_for(self.base_url, float(cfg.get("timeout_s", 30)))
         # 密钥按文件 mtime 缓存，避免每个批次都读一次盘
         self._key_cache: tuple[int, str | None] | None = None
         # 最近一次请求是否失败：healthy() 靠它判断，不真的去调付费接口
@@ -383,7 +400,7 @@ class LocalOpenAIEmbedder:
         key_file = str(cfg.get("key_file") or DEFAULT_KEY_FILE)
         kp = Path(key_file)
         self.key_path = kp if kp.is_absolute() else Path(state_dir) / kp
-        self.http = http or httpx.Client(timeout=float(cfg.get("timeout_s", 30)))
+        self.http = http or _client_for(self.base_url, float(cfg.get("timeout_s", 30)))
         # 密钥与健康检查都按文件 mtime / 时间缓存，避免每批、每几秒读次盘 / 发次请求
         self._key_cache: tuple[int, str | None] | None = None
         self._health_cache: tuple[float, bool] | None = None

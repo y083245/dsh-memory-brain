@@ -13,7 +13,8 @@ import { spawnDetached, stopPid, isPidAlive, readPidFile, writePidFile } from '.
 import { resolvePython } from '../src/runtime/python.mjs';
 import { commandSpec } from '../src/runtime/commands.mjs';
 import { readRagEnabled, writeRagEnabled, isEmbeddingManaged } from '../src/runtime/rag-config.mjs';
-import { findSnowLumaDir, resolveOrchestratorPaths } from '../src/runtime/paths.mjs';
+import { findSnowLumaDir, resolveOrchestratorPaths, defaultQqBin } from '../src/runtime/paths.mjs';
+import { looksEphemeralNode, resolveStableNode } from '../src/runtime/node-bin.mjs';
 import { fetchHealth } from '../src/runtime/rag-services.mjs';
 import { createWindowsRagManager } from '../src/process-manager.mjs';
 import { assertPosixMode } from './test-mode.mjs';
@@ -228,6 +229,94 @@ await test('fetchHealth：本地假 /health 能读到 JSON，关掉后返回 nul
   assert.deepEqual(await fetchHealth(port), { ok: true });
   await new Promise((resolve) => server.close(resolve));
   assert.equal(await fetchHealth(port, { timeoutMs: 300 }), null);
+});
+
+// ── 写进配置的 node 必须是「不会消失」的那个 ───────────────────────────────
+// MCP 的 command 是长期有效的绝对路径；如果写进沙箱/临时目录里的便携 node，
+// 宿主一回收，DSH 里三个 MCP 会同时起不来（真实踩过的坑）。
+function fakeFs(files, dirs = []) {
+  const dirSet = new Set(dirs);
+  return {
+    statSync(p) {
+      if (dirSet.has(p)) return { isFile: () => false, isDirectory: () => true };
+      if (files.includes(p)) return { isFile: () => true, isDirectory: () => false };
+      const error = new Error(`ENOENT: ${p}`);
+      error.code = 'ENOENT';
+      throw error;
+    }
+  };
+}
+
+await test('looksEphemeralNode：沙箱/临时目录里的 node 会被识别，系统安装的不算', () => {
+  assert.equal(looksEphemeralNode('C:\\Users\\me\\.workbuddy\\binaries\\node\\versions\\22.22.2-6\\node.exe'), true);
+  assert.equal(looksEphemeralNode('C:\\Users\\me\\AppData\\Local\\Doubao\\User Data\\sandbox_runtime\\node\\node.exe'), true);
+  assert.equal(looksEphemeralNode('C:\\Users\\me\\AppData\\Local\\Temp\\node.exe'), true);
+  assert.equal(looksEphemeralNode('/tmp/portable-node/bin/node'), true);
+  assert.equal(looksEphemeralNode('C:\\Program Files\\nodejs\\node.exe'), false);
+  assert.equal(looksEphemeralNode('/usr/local/bin/node'), false);
+});
+
+await test('resolveStableNode：跳过临时 PATH node，改用系统安装位置', () => {
+  const tempNode = 'C:\\Temp\\portable\\node.exe';
+  const sysNode = 'C:\\Program Files\\nodejs\\node.exe';
+  const fsImpl = fakeFs([tempNode, sysNode]);
+  const picked = resolveStableNode({
+    platform: 'win32',
+    execPath: tempNode,
+    env: { PATH: 'C:\\Temp\\portable', ProgramFiles: 'C:\\Program Files' },
+    fsImpl
+  });
+  assert.equal(picked.command, sysNode);
+  assert.equal(picked.source, 'system');
+  assert.equal(picked.ephemeral, false);
+});
+
+await test('resolveStableNode：QQ_BRIDGE_NODE_BIN 显式指定最优先', () => {
+  const explicit = 'D:\\tools\\node\\node.exe';
+  const picked = resolveStableNode({
+    platform: 'win32',
+    execPath: 'C:\\Temp\\portable\\node.exe',
+    env: { QQ_BRIDGE_NODE_BIN: explicit, PATH: 'C:\\Temp\\portable' },
+    fsImpl: fakeFs([explicit])
+  });
+  assert.equal(picked.command, explicit);
+  assert.equal(picked.source, 'explicit');
+});
+
+await test('resolveStableNode：确实找不到稳定 node 时如实报告 ephemeral', () => {
+  const tempNode = 'C:\\Temp\\portable\\node.exe';
+  const picked = resolveStableNode({
+    platform: 'win32',
+    execPath: tempNode,
+    env: { PATH: 'C:\\Temp\\portable' },
+    fsImpl: fakeFs([tempNode])
+  });
+  assert.equal(picked.command, tempNode);
+  assert.equal(picked.ephemeral, true);
+});
+
+await test('defaultQqBin：QQ 装在非系统盘（D:\\QQ）时也能自动找到', () => {
+  const fsImpl = fakeFs(['D:\\QQ\\QQ.exe'], ['C:\\', 'D:\\']);
+  const found = defaultQqBin({
+    platform: 'win32',
+    env: { SystemDrive: 'C:', ProgramFiles: 'C:\\Program Files' },
+    fsImpl
+  });
+  assert.equal(found, 'D:\\QQ\\QQ.exe');
+});
+
+await test('findSnowLumaDir：解压到其它盘（D:\\SnowLuma）也能找到', () => {
+  const fsImpl = {
+    ...fakeFs(['D:\\SnowLuma\\index.mjs'], ['C:\\', 'D:\\', 'D:\\SnowLuma']),
+    readdirSync() { const error = new Error('ENOENT'); error.code = 'ENOENT'; throw error; }
+  };
+  const found = findSnowLumaDir({
+    home: 'C:\\Users\\me',
+    platform: 'win32',
+    env: { SystemDrive: 'C:' },
+    fsImpl
+  });
+  assert.equal(found, 'D:\\SnowLuma');
 });
 
 for (const entry of fs.readdirSync(ROOT)) {

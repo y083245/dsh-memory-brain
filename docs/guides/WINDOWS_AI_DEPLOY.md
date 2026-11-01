@@ -96,6 +96,16 @@ node scripts\setup-dsh.mjs
 
 看到 `dsh plugin --profile web install: OK` 即成功。**装完必须重启 DSH**。
 
+> **MCP 的 `command` 是一个长期有效的 node 绝对路径**（DSH 每次启动都按它拉进程）。
+> setup 会自己避开临时/沙箱 node，并在选不干净时打印：
+>
+> ```text
+> ⚠️ 当前 node 位于临时/便携目录，可能被宿主回收，届时 DSH 里所有 MCP 都会启动失败
+> ```
+>
+> 看到这句就先装系统版 Node，或用 `QQ_BRIDGE_NODE_BIN` 指定后再重跑 setup。
+> 同理，`dsh` CLI 不在 PATH 里时可用 `QQ_BRIDGE_DSH_BIN` 指向 `dsh.cmd`。
+
 ### 4.2 模型 provider（Windows 桌面版的关键坑）
 
 桌面版 DSH 的模型目录通常只有：
@@ -229,7 +239,11 @@ node "C:\SnowLuma\index.mjs"
 - `accessToken` 留空时，桥接会从 `homeDir/config/onebot_<uin>.json` 自动发现并写回 `config.json`。
 - `allow` 为空时桥接**拒绝所有消息**（fail-closed）。
 - `memoryRag.enabled` 想开 RAG 时设 `true`，或在控制台打开开关。
-- 路径优先级：环境变量 > `orchestrator` 配置 > 平台默认值。
+- 路径优先级：环境变量 > `orchestrator` 配置 > 平台默认值（自动探测）。
+- 自动探测范围（`orchestrator.qqBin` / `snowDir` 留空时生效）：
+  - QQ：`%ProgramFiles%\Tencent\QQNT`、`%LocalAppData%\Programs\Tencent\QQNT`，以及 **C:–H: 各盘根目录**下的 `QQ\QQ.exe`、`Tencent\QQNT\QQ.exe`、`Program Files\Tencent\QQNT\QQ.exe`（装在 `D:\QQ` 这类非系统盘也能找到，不需要手工配）。
+  - SnowLuma：`%SNOWLUMA_HOME%`、`%USERPROFILE%\snowluma`、`%USERPROFILE%\SnowLuma`、home 所在盘根、以及 C:–H: 各盘根目录下的 `SnowLuma` / `snowluma`；再按版本号自然排序取最新。
+- 只在 C:–H: 探测：A:/B: 是软驱位，I: 起更可能是移动盘或映射网络盘，`stat` 一个断开的网络盘会等 SMB 超时，把启动卡住几秒。
 
 ---
 
@@ -346,6 +360,7 @@ cd sidecars\memory-rag
 | 坑 | 现象 | 处理 |
 |---|---|---|
 | DSH provider 不匹配 | `session/model-unavailable`，QQ 完全不回 | 改 `dsh.provider=deepseek-account`；新版桥接也会自动回退并提示 |
+| MCP 全起不来 | DSH 日志只写「MCP 启动失败」 | 多半是 `cordis.patch.yml` 里的 `command` 指向了已被回收的临时/沙箱 node；重装系统 Node 后重跑 `node scripts\setup-dsh.mjs`（脚本会告警） |
 | SnowLuma 不挂已运行 QQ | OneBot 3000/3001 不起 | `hookAutoLoad=true` 后重启 SnowLuma，或先 SnowLuma 后登录 QQ |
 | Electron `.cmd` | 手工用 node 跑 `dsh.cmd` 的 JS 会缺 Electron 运行时 | 直接调 `dsh.cmd`；桥接已自动回退 `cmd.exe` |
 | venv 路径 | “找不到 Python / memory-rag 虚拟环境” | 确认 `sidecars\memory-rag\.venv\Scripts\python.exe`；代码已修复传 `.venv` 目录 |
@@ -353,6 +368,7 @@ cd sidecars\memory-rag
 | 显存不足 | embedding 跳过 | 6～8 GB 显卡用云端 embedding；或接受 BM25 |
 | Chroma 原始字节 | 已删摘要文本仍出现在 `data_level0.bin` 旧段 | 逻辑删除已由 API/ SQL 断言覆盖；Windows 测试跳过原始 Chroma 字节扫描 |
 | 临时目录短路径 | CI 里 `RUNNER~1` vs `runneradmin` | 测试已用 realpath/normcase 比较 |
+| 系统代理劫持本地请求 | 开了 Clash / v2ray，`HTTP_PROXY` 生效；本地 8091/8093 的请求被塞进代理，慢、报错，聊天原文出本机 | 新版 memory-rag 对**回环地址**一律 `trust_env=False`（远端 https 仍走代理）；桥接侧 Node fetch 默认不读代理变量 |
 | 没有桌面会话 | QQ 启动后立即退出 | 在可交互桌面登录；扫码 |
 | Git Bash 调 tasklist | `/FI` 被转成 `E:/Git/FI` | 用 Node `findPidsByImage()` 或 PowerShell |
 

@@ -418,3 +418,37 @@ def test_health_reports_provider_api(tmp_path: Path) -> None:
         assert h["ok"] is True
     finally:
         close_rag(svc)
+
+
+def test_loopback_clients_ignore_system_proxy(tmp_path: Path, monkeypatch) -> None:
+    """本机服务不能走系统代理。
+
+    Windows 上装了 Clash / v2ray 的用户 shell 里常带 HTTP_PROXY，httpx 默认
+    trust_env=True 会把发往 127.0.0.1 的请求也交给代理（表现为服务端收到的
+    path 是绝对 URI，且聊天原文离开本机）。这里直接断言客户端的 trust_env。
+    """
+    from memory_rag.embeddings import _client_for
+
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:65535")
+    monkeypatch.setenv("http_proxy", "http://127.0.0.1:65535")
+
+    local = _client_for("http://127.0.0.1:8091", 5.0)
+    try:
+        assert local.trust_env is False
+    finally:
+        local.close()
+
+    # 远端接口反过来必须继续认代理设置，否则用户出不去网
+    remote = _client_for("https://api.example.com/v1", 5.0)
+    try:
+        assert remote.trust_env is True
+    finally:
+        remote.close()
+
+    # 构造函数本身也要用上面这条口径（否则改一行构造就静默回退了）
+    cfg = dict(LOCAL, base_url="http://127.0.0.1:8091")
+    emb = LlamaCppEmbedder(cfg)
+    try:
+        assert emb.client.trust_env is False
+    finally:
+        emb.client.close()

@@ -20,6 +20,8 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import yaml from 'js-yaml';
 import { BUNDLE_DIR, PRESETS, buildPatches, patchFileFor } from './build-agent-preset-patches.mjs';
+import { commandSpec, findExecutable } from '../src/runtime/commands.mjs';
+import { resolveStableNode } from '../src/runtime/node-bin.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '..');
@@ -125,8 +127,27 @@ function yamlSingleQuote(s) {
 // 由桥接托管的 MCP 条目 id：脚本对这三个 id 拥有所有权，可安全地按 id 增删。
 const MANAGED_MCP_IDS = ['mcp-snowluma', 'mcp-snowluma-host', 'mcp-web-search-safe'];
 
+// MCP 的 command 是「写一次、长期用」的绝对路径：DSH 每次启动都按它拉进程。
+// 所以不能直接用 process.execPath —— 便携版/沙箱里的 node 被回收后，三个 MCP
+// 会同时失效，日志只会说「MCP 启动失败」。优先换成系统安装的 node。
+const MCP_NODE = resolveStableNode();
+
+function reportMcpNode() {
+  if (MCP_NODE.source === 'explicit') {
+    log(`MCP node（QQ_BRIDGE_NODE_BIN）：${MCP_NODE.command}`);
+    return;
+  }
+  if (MCP_NODE.ephemeral) {
+    log(`⚠️ 当前 node 位于临时/便携目录，可能被宿主回收，届时 DSH 里所有 MCP 都会启动失败：`);
+    log(`   ${MCP_NODE.command}`);
+    log('   建议安装系统版 Node，或显式指定：set QQ_BRIDGE_NODE_BIN=C:\\Program Files\\nodejs\\node.exe');
+    return;
+  }
+  log(`MCP node：${MCP_NODE.command}（${MCP_NODE.source}）`);
+}
+
 function mcpEntries() {
-  const node = process.execPath;
+  const node = MCP_NODE.command;
   const servers = {
     'mcp-snowluma': { serverName: 'snowluma', script: path.join(REPO_ROOT, 'src', 'mcp-snowluma-safe.js'), toolCallTimeoutMs: 725000 },
     'mcp-snowluma-host': { serverName: 'snowluma-host', script: path.join(REPO_ROOT, 'src', 'mcp-host-server.js') },
@@ -324,36 +345,60 @@ function autoInstallProfileBundles() {
     log('auto-install skipped: QQ_BRIDGE_SKIP_DSH_INSTALL=1');
     return;
   }
-  const windows = process.platform === 'win32';
-  // Node cannot spawn npm's .cmd shim directly. Keep the shell command constant;
-  // the validated (no quotes/control chars) profile travels through one quoted
-  // environment expansion, with delayed expansion disabled to preserve '!'.
-  const cmd = windows ? (process.env.ComSpec || 'cmd.exe') : 'dsh';
-  const args = windows
-    ? ['/d', '/v:off', '/s', '/c', 'dsh.cmd plugin --profile "%QQ_BRIDGE_SETUP_PROFILE%" install']
-    : ['plugin', '--profile', PROFILE, 'install'];
-  const r = spawnSync(cmd, args, {
+  // 不再硬编码 'dsh.cmd'：dsh 可能装在非 PATH 目录、也可能是原生 dsh.exe。
+  // QQ_BRIDGE_DSH_BIN 允许显式指定，其余交给 commandSpec 处理 Windows 的 .cmd 垫片
+  // （Electron 启动器回退 cmd.exe，普通 npm 垫片解析成 node + JS）。
+  const dshName = String(process.env.QQ_BRIDGE_DSH_BIN ?? '').trim() || 'dsh';
+  let spec;
+  try {
+    spec = commandSpec(dshName, ['plugin', '--profile', PROFILE, 'install'], { env: process.env });
+  } catch (error) {
+    log(`auto-install 未能准备命令（${error?.message ?? error}）。`);
+    log(`若 DSH 启动报“cannot resolve profile bundle”，请手动执行：dsh plugin --profile ${PROFILE} install`);
+    return;
+  }
+  const manual = findExecutable(dshName, { env: process.env });
+  let command = spec.command;
+  let args = spec.args;
+  let spawnEnv = process.env;
+  let verbatim = Boolean(spec.windowsVerbatimArguments);
+  if (spec.via === 'cmd-shim') {
+    // 走 cmd.exe 时**不能**把 profile 直接拼进命令行：cmd 会对命令行再做一次
+    // %VAR% 展开，`test&name%CD%!` 这样的 profile 会被改写甚至执行。改成固定命令行
+    // + 环境变量单次展开（/v:off 保留 '!'），profile 已经在上面校验过不含引号。
+    const exe = /\s/.test(spec.resolved) ? `"${spec.resolved}"` : spec.resolved;
+    command = process.env.ComSpec || 'cmd.exe';
+    args = ['/d', '/v:off', '/s', '/c', `${exe} plugin --profile "%QQ_BRIDGE_SETUP_PROFILE%" install`];
+    spawnEnv = { ...process.env, QQ_BRIDGE_SETUP_PROFILE: PROFILE };
+    verbatim = true;
+  }
+  const r = spawnSync(command, args, {
     encoding: 'utf8',
     timeout: 120000,
     windowsHide: true,
-    windowsVerbatimArguments: windows,
-    ...(windows ? { env: { ...process.env, QQ_BRIDGE_SETUP_PROFILE: PROFILE } } : {}),
+    env: spawnEnv,
+    ...(verbatim ? { windowsVerbatimArguments: true } : {}),
   });
   if (r.error) {
     log(`auto-install failed to start/complete（${r.error.code || r.error.message}）。`);
-    log(`若 DSH 启动报“cannot resolve profile bundle”，请手动执行：dsh plugin --profile ${PROFILE} install`);
+    log(manual
+      ? `已找到 dsh：${manual}；若 DSH 启动报“cannot resolve profile bundle”，请手动执行：dsh plugin --profile ${PROFILE} install`
+      : `PATH 里没有 dsh，可用 QQ_BRIDGE_DSH_BIN 指定 dsh.cmd 的完整路径，然后重跑；或手动执行：dsh plugin --profile ${PROFILE} install`);
     return;
   }
   if (r.status === 0) {
     log(`dsh plugin --profile ${PROFILE} install: OK`);
   } else {
     log(`dsh plugin --profile ${PROFILE} install 返回退出码 ${r.status}（若 DSH 启动报 bundle 解析失败，请手动重跑该命令）`);
+    const hint = String(r.stderr ?? '').trim().split(/\r?\n/).slice(-3).join(' | ');
+    if (hint) log(`  输出：${hint}`);
   }
 }
 
 // Validate the existing YAML before changing any presets or configuration.
 const cordisPatch = prepareCordisPatch();
 regeneratePresetPatches();
+reportMcpNode();
 patchCordis(cordisPatch);
 const links = {};
 for (const name of BUNDLE_NAMES) links[name] = ensureBundle(name);

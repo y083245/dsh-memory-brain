@@ -24,6 +24,11 @@ function fixture(name, patch = '') {
   fs.copyFileSync(path.join(root, 'scripts/setup-dsh.mjs'), path.join(repo, 'scripts/setup-dsh.mjs'));
   // setup-dsh.mjs 直接从仓库源生成 bundle patch，生成器必须一起进夹具。
   fs.copyFileSync(path.join(root, 'scripts/build-agent-preset-patches.mjs'), path.join(repo, 'scripts/build-agent-preset-patches.mjs'));
+  // setup-dsh 用 src/runtime 解析 node 与 .cmd 垫片，夹具要保持同样的模块布局。
+  fs.mkdirSync(path.join(repo, 'src/runtime'), { recursive: true });
+  for (const file of ['commands.mjs', 'node-bin.mjs']) {
+    fs.copyFileSync(path.join(root, 'src/runtime', file), path.join(repo, 'src/runtime', file));
+  }
   fs.cpSync(path.join(root, 'dsh'), path.join(repo, 'dsh'), { recursive: true });
   fs.cpSync(path.join(root, 'plugins'), path.join(repo, 'plugins'), { recursive: true });
   fs.cpSync(parserRoot, path.join(repo, 'node_modules/js-yaml'), { recursive: true });

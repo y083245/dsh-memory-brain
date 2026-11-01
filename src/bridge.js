@@ -695,6 +695,16 @@ function normalizeIdList(value) {
 // ── 配置 ────────────────────────────────────────────────────────────────────
 function loadConfig() {
   const p = path.join(ROOT, 'config.json');
+  // 全新 clone 最常见的第一次失败：没复制 config.example.json 就直接双击 start.bat。
+  // 这种情况下把「该怎么办」写在错误里，而不是让用户对着 ENOENT 堆栈猜。
+  if (!fs.existsSync(p)) {
+    const copyHint = process.platform === 'win32'
+      ? 'copy config.example.json config.json'
+      : 'cp config.example.json config.json';
+    const error = new Error(`缺少配置文件 ${p}\n  先复制一份示例：${copyHint}\n  然后至少填 ownerQQ 和 allow.private（留空 = 谁都不理）`);
+    error.userFacing = true;
+    throw error;
+  }
   const file = readJsonSafe(p, null, true);
   if (!file || typeof file !== 'object' || Array.isArray(file)) throw new Error(`配置格式错误：${p}`);
   const cfg = {
@@ -13855,6 +13865,11 @@ process.on('uncaughtException', (error) => {
 process.on('exit', () => releaseLock());
 
 main().catch((error) => {
+  // userFacing：可预期的使用错误（例如还没建 config.json），只打人话，不打堆栈。
+  if (error?.userFacing) {
+    console.error(`[bridge] 启动失败：${error.message}`);
+    process.exit(1);
+  }
   console.error('[bridge] 启动失败:', error);
   process.exit(1);
 });
