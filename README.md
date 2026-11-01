@@ -47,7 +47,7 @@
 
 ## 🚀 部署教程（Linux，第一次大约 1 小时）
 
-> 本教程按作者实际在跑的环境写（Ubuntu + Linux QQ）。基础聊天功能也能在 Windows 上跑，见 [完整说明](docs/guides/FULL_GUIDE.md)；记忆服务和一键脚本只在 Linux 上测过。
+> 本教程按作者实际在跑的环境写（Ubuntu + Linux QQ）。[windows教程](https://github.com/y083245/dsh-memory-brain/tree/windows-native)，见 [完整说明](docs/guides/FULL_GUIDE.md)；记忆服务和一键脚本只在 Linux 上测过。
 >
 > 下面所有命令都在**终端**里输入（Ubuntu 按 `Ctrl + Alt + T` 打开）。`#` 开头的是说明，不用输入。
 
