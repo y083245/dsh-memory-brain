@@ -50,6 +50,13 @@ import fs from 'node:fs';
   assert.ok(batText.includes('harden-state-acl.mjs'), 'start.bat 必须在启动桥接前调用 ACL 助手');
   // 助手必须排在 node src/bridge.js 之前，否则"启动时收紧"就不成立
   assert.ok(batText.indexOf('harden-state-acl.mjs') < batText.indexOf('node src/bridge.js'), 'ACL 助手必须先于桥接启动');
+  // Windows 一键脚本也必须是纯 ASCII + CRLF（.gitattributes 保证检出格式）。
+  for (const name of ['start-all.bat', 'stop-all.bat']) {
+    const text = fs.readFileSync(path.join(root, name), 'latin1');
+    assert.equal([...fs.readFileSync(path.join(root, name))].filter((b) => b > 127).length, 0, `${name} 必须保持纯 ASCII`);
+    assert.equal(text.match(/(?<!\r)\n/g)?.length ?? 0, 0, `${name} 必须使用 CRLF`);
+    assert.ok(text.includes('scripts\\start-all.mjs') || text.includes('scripts\\stop-all.mjs'), `${name} 必须转发到 Node 实现`);
+  }
   console.log('state ACL hardening: helper is non-blocking, recursion-guarded, and wired into start.bat');
 }
 
