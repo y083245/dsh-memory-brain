@@ -138,6 +138,11 @@ node -e "import('./src/dsh-client.js').then(async m=>{const a=new m.NodeApiClien
 
 ## 4. 把 preset / MCP 装进 DSH
 
+> ⚠️ **DSH 第一次装、`%USERPROFILE%\.dsh\profiles\web` 还不存在时**，先做第 5 步起一次
+> `dsh web --no-open`（3080 起来后 Ctrl+C），再回来执行本节。否则 setup-dsh 会自建一个
+> 缺 base bundle 的 profile，DSH 从此起不来（pending / waiting for service 后退出）。
+> 已经在用的 profile 不受影响。
+
 ```bat
 node scripts\setup-dsh.mjs
 ```

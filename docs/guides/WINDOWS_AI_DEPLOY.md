@@ -18,6 +18,62 @@
 
 ---
 
+## 0.5 ⚠️ 已知缺陷与规避（2026-11-01 审计，本文写作时**尚未修复**）
+
+下面 6 条是 Windows 原生部署审计确认的问题。第 1、2 条会让**全新机器直接起不来**——
+遇到时不要浪费时间怀疑代理 / QQ / 端口，那是代码缺陷。
+
+### 1. 全新机器上 setup-dsh 会把 DSH 弄成起不来（最严重，必现）
+
+- 位置：`scripts/setup-dsh.mjs:294` `patchProfilePackage()`。`profiles/web` 不存在时它按默认模板
+  自建 `package.json`，`dsh.profile.bundles` 只写进本项目的 `qq-mode-console` / `qq-agent-presets`，
+  缺 `@deepseek-ai/dsh-base`、`@deepseek-ai/dsh-web-app`。
+- 现象：DSH 启动后 `pending (waiting for service: tools / settings / agentPresets)` 然后退出；
+  桥接控制台永远 `dshReady: false`。
+- **规避（必须）**：先让 DSH 自己建 profile —— 跑一次 `dsh web --no-open`（3080 起来后 Ctrl+C），
+  确认 `%USERPROFILE%\.dsh\profiles\web\package.json` 的 `bundles` 里已有
+  `@deepseek-ai/dsh-base` 和 `@deepseek-ai/dsh-web-app`，**再**跑 `node scripts\setup-dsh.mjs`。
+- 本机没踩到是因为 profile 早就存在；测试也从不覆盖「profile 不存在」这个分支。
+
+### 2. cmd.exe 引号处理错误（垫片路径含空格时 DSH 起不来）
+
+- 位置：`src/runtime/commands.mjs:92-99`（`/d /v:off /s /c` + `quoteForCmd` 只给单个参数加引号），
+  `scripts/setup-dsh.mjs:372-378` 又复制了一份同样的写法。
+- 原因：`cmd /s /c` 会剥掉整行首尾引号。垫片路径含空格时（典型：
+  `%ProgramFiles%\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd`）被截断成 `C:\Program`。
+- 现象：DSH 起不来；`setup-dsh` 里的 `dsh plugin --profile ... install` 也失败。
+- **规避**：把 DSH 装在**不含空格**的路径（例如 `E:\deepseek-harness`），或用 `QQ_BRIDGE_DSH_BIN`
+  指向无空格路径。修复方式已知（整行再包一层引号），本次未改。
+
+### 3. SnowLuma 的 `错误：{}` 把真实错误吞掉
+
+- 位置：`src/bridge.js:13805`。`error` 没有 `code/message/reason/type` 时走
+  `JSON.stringify(error)`，得到 `"{}"`——非空字符串，所以后面的 `|| '(无详情)'` 是死代码。
+- 影响：连不上 SnowLuma 时看不到原始错误，恰恰是最需要诊断的场景。
+  排查时改看 SnowLuma 自己的日志（`%USERPROFILE%\.ai-companion-run\snowluma.log`）。
+
+### 4. 贴纸同步抢在 token 自愈之前
+
+- 启动时 WS 未就绪 → 贴纸同步走 HTTP 兜底，此时 `accessToken` 还是空，必然 unauthorized；
+  自愈成功后也不会重新同步一次。只是日志噪音，不影响聊天。
+
+### 5. 工程结构上的不合适
+
+- `src/bridge.js` 单文件 13875 行，`catch {}` 50 处（`src/tts-api.js` 10 处、`src/voice-core.js` 9 处），
+  错误静默消失，排障只能靠日志猜。
+- `qq-tool-restrict` 每次拉起 agent 都逐个调 `tools.restrict()` 82 次，其中 78 次必然抛错并写诊断文件；
+  真正的失败和预期失败混在同一行日志里（边界本身靠执行期 guard 是对的，实现方式在制造噪声）。
+- `setup-dsh` 会整份重排 `%USERPROFILE%\.dsh\profiles\web\cordis.patch.yml`（丢注释、动全局配置），
+  虽有时间戳备份，仍属高侵入。
+
+### 6. 测试覆盖缺口
+
+- `npm test` 81/81 全过，但上面第 1、2 条都逃过了：测试里造的临时路径不带空格，
+  也从不验证「profile 不存在」的分支。这正是这两个 bug 能活到现在的原因。
+  补测试时至少要有：含空格的 `.cmd` 垫片路径、缺失 profile 时 setup-dsh 的行为。
+
+---
+
 ## 1. 前置检查
 
 ```bat
@@ -82,6 +138,10 @@ copy "%USERPROFILE%\.dsh\.credentials.yaml" "%DSH_HOME%\" >nul
 ## 4. DSH 端
 
 ### 4.1 运行 setup-dsh（真实部署）
+
+> ⚠️ **全新机器先跑一次 `dsh web --no-open`**（3080 起来后 Ctrl+C），让 DSH 自己生成
+> `%USERPROFILE%\.dsh\profiles\web`。否则 setup-dsh 会自建一个缺 base bundle 的 profile，
+> DSH 从此起不来（详见 §0.5 第 1 条）。
 
 ```bat
 set DSH_HOME=%USERPROFILE%\.dsh
