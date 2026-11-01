@@ -9298,13 +9298,38 @@ async function main() {
   // 四种 QQ 模式共用 DSH 会话，统一强制使用多模态模型 DeepSeek-V41-Flash（id: deepseek-flash）；
   // 它同时支持 text/image 输入，取代已下线的 deepseek-v4-flash-vision-exp。
   const modelAppliedSessions = new Map(); // sessionId -> 已应用的 modelSelectionEpoch
+  // DSH 的模型目录随安装形态变化：npm 全局安装常见 deepseek-official，
+  // 桌面版 DSH（Electron）实测只有 deepseek-account。config.json 里写的是前者时，
+  // selectModel 会一直报 model-unavailable。这里缓存一次目录默认值，失败后临时回退，
+  // 并明确提示用户改 config.json（不自动改用户配置）。
+  let catalogDefaultModelCache; // undefined=未查；null=查不到
+  async function catalogDefaultModel() {
+    if (catalogDefaultModelCache !== undefined) return catalogDefaultModelCache;
+    try {
+      const catalog = unwrap(await fetchModelCatalog(), 'session.modelCatalog');
+      const fallback = catalog?.default;
+      if (fallback && typeof fallback.provider === 'string' && typeof fallback.model === 'string'
+        && fallback.provider && fallback.model) {
+        catalogDefaultModelCache = { provider: fallback.provider, model: fallback.model };
+      } else {
+        const group = (Array.isArray(catalog?.groups) ? catalog.groups : []).find((item) => item?.models?.length);
+        const first = group?.models?.[0];
+        catalogDefaultModelCache = group?.id && first?.id ? { provider: String(group.id), model: String(first.id) } : null;
+      }
+    } catch (error) {
+      log(`读取 DSH 模型目录失败，无法自动回退模型：${error?.message ?? error}`);
+      catalogDefaultModelCache = null;
+    }
+    return catalogDefaultModelCache;
+  }
+
   // 返回 'applied' | 'not-found' | 'failed'。
   // 'not-found' 表示 DSH 侧会话已经不存在（DSH 重启、异常退出、归档竞态），
   // 本地映射已失效，调用方必须退役重建，否则每条消息都会对着一个不存在的会话重试。
   async function ensureChatModel(sessionId) {
     if (modelAppliedSessions.get(sessionId) === modelSelectionEpoch) return 'applied';
-    const provider = String(cfg.dsh?.provider || 'deepseek-official');
-    const model = String(cfg.dsh?.model || 'deepseek-flash');
+    let provider = String(cfg.dsh?.provider || 'deepseek-official');
+    let model = String(cfg.dsh?.model || 'deepseek-flash');
     const effort = String(cfg.dsh?.reasoningEffort || REASONING_EFFORT_DEFAULT);
     let lastError = null;
     for (let attempt = 1; attempt <= 2; attempt += 1) {
@@ -9316,6 +9341,14 @@ async function main() {
       } catch (error) {
         lastError = error;
         log(`设置会话模型失败 ${sessionId}（第 ${attempt}/2 次）: ${error?.message ?? error}`);
+        if (attempt === 1 && /model[- ]?unavailable|select an available model/i.test(String(error?.message ?? error))) {
+          const fallback = await catalogDefaultModel();
+          if (fallback && (fallback.provider !== provider || fallback.model !== model)) {
+            log(`config.json 的 DSH 模型 ${provider}/${model} 不在当前 DSH 目录中；本次临时改用 ${fallback.provider}/${fallback.model}。建议把 config.json 的 dsh.provider / dsh.model 改成这一组`);
+            provider = fallback.provider;
+            model = fallback.model;
+          }
+        }
         if (attempt < 2) await sleep(1000);
       }
     }
