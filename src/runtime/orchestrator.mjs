@@ -29,7 +29,6 @@ import { resolveOrchestratorPaths } from './paths.mjs';
 import {
   EMBED_PORT,
   RAG_PORT,
-  fetchHealth,
   gpuFreeMiB,
   startEmbeddingService,
   startMemoryRagService
@@ -65,11 +64,10 @@ export function createLogger(stream = process.stdout) {
 }
 
 function parseArgs(argv, { stop = false } = {}) {
-  const out = { ragOnly: false, stopDsh: false, startRag: false, unknown: [] };
+  const out = { ragOnly: false, stopDsh: false, unknown: [] };
   for (const arg of argv) {
     if (arg === '--rag') {
       out.ragOnly = true;
-      out.startRag = true;
     } else if (stop && arg === '--all') {
       out.stopDsh = true;
     } else {
@@ -216,13 +214,15 @@ async function stopService({
   const pid = readPidFile(pidFile);
   if (pid) {
     const result = await stopPidFile({ pidFile, patterns, platform, timeoutMs: 10000, label });
-    if (result.ok) {
-      if (!result.missing && !result.stale) ok(`${label} 已停止`);
-      else ok(`${label} 未运行`);
-      return result.ok;
+    if (result.ok && !result.missing && !result.stale) {
+      ok(`${label} 已停止`);
+      return true;
     }
-    warn(result.reason || `${label} 未停止（PID ${pid}）`);
-    return false;
+    if (!result.ok) {
+      warn(result.reason || `${label} 未停止（PID ${pid}）`);
+      return false;
+    }
+    // PID 文件陈旧：已经删掉了，继续按端口 / 镜像名 / 命令行兜底。
   }
   // 没有 PID 文件时，先确认端口上确实有服务在监听，再按镜像名 / 命令行兜底。
   // 否则 Windows 上「按 python.exe 找 PID」会把用户其它 Python 进程一起杀掉。
@@ -357,38 +357,46 @@ async function startRagSection({ paths, ragEnabled, log, ok, warn, platform = pr
   } else if (await isPortOpen(EMBED_PORT)) {
     ok(`embedding 已在运行（${EMBED_PORT}）`);
   } else {
-    const result = await startEmbeddingService({
-      runDir: paths.runDir,
-      embedBin: paths.embedBin,
-      embedModel: paths.embedModel,
-      managed: true,
-      log,
-      platform,
-      cwd: paths.home,
-      waitSeconds: ragWaitSeconds
-    });
-    if (result.skipped === 'no-gpu-info') warn('查不到显存空闲量（nvidia-smi 不可用），跳过 embedding；检索会自动只走 BM25');
-    else if (result.skipped === 'low-vram') warn(`显存空闲 ${result.freeMiB} MiB < 10000 MiB，跳过 embedding；检索会自动只走 BM25`);
-    else if (result.skipped === 'missing-files') warn('找不到 llama-server 或 embedding 模型，跳过 embedding；检索会自动只走 BM25');
-    else if (result.healthy) ok(`embedding 已就绪（${EMBED_PORT}）`);
-    else if (result.started) warn(`embedding 60s 内没就绪，检索会自动降级为只走 BM25；看日志：${path.join(paths.runDir, 'embed.log')}`);
+    try {
+      const result = await startEmbeddingService({
+        runDir: paths.runDir,
+        embedBin: paths.embedBin,
+        embedModel: paths.embedModel,
+        managed: true,
+        log,
+        platform,
+        cwd: paths.home,
+        waitSeconds: ragWaitSeconds
+      });
+      if (result.skipped === 'no-gpu-info') warn('查不到显存空闲量（nvidia-smi 不可用），跳过 embedding；检索会自动只走 BM25');
+      else if (result.skipped === 'low-vram') warn(`显存空闲 ${result.freeMiB} MiB < 10000 MiB，跳过 embedding；检索会自动只走 BM25`);
+      else if (result.skipped === 'missing-files') warn('找不到 llama-server 或 embedding 模型，跳过 embedding；检索会自动只走 BM25');
+      else if (result.healthy) ok(`embedding 已就绪（${EMBED_PORT}）`);
+      else if (result.started) warn(`embedding 60s 内没就绪，检索会自动降级为只走 BM25；看日志：${path.join(paths.runDir, 'embed.log')}`);
+    } catch (error) {
+      warn(`embedding 启动失败：${error?.message ?? error}；检索会自动只走 BM25`);
+    }
   }
 
   if (await isPortOpen(RAG_PORT)) {
     ok(`memory-rag 已在运行（${RAG_PORT}）`);
   } else {
-    const result = await startMemoryRagService({
-      runDir: paths.runDir,
-      ragDir: paths.ragDir,
-      python: paths.ragPython,
-      log,
-      platform,
-      cwd: paths.ragDir,
-      waitSeconds: ragWaitSeconds
-    });
-    if (result.skipped === 'missing-python') warn('找不到 Python / memory-rag 虚拟环境，跳过；检索会自动降级');
-    else if (result.healthy) ok(`memory-rag 已就绪（${RAG_PORT}）`);
-    else if (result.started) warn(`memory-rag 60s 内没就绪，检索会降级为关键词；看日志：${path.join(paths.runDir, 'memory-rag.log')}`);
+    try {
+      const result = await startMemoryRagService({
+        runDir: paths.runDir,
+        ragDir: paths.ragDir,
+        python: paths.ragPython,
+        log,
+        platform,
+        cwd: paths.ragDir,
+        waitSeconds: ragWaitSeconds
+      });
+      if (result.skipped === 'missing-python') warn('找不到 Python / memory-rag 虚拟环境，跳过；检索会自动降级');
+      else if (result.healthy) ok(`memory-rag 已就绪（${RAG_PORT}）`);
+      else if (result.started) warn(`memory-rag 60s 内没就绪，检索会降级为关键词；看日志：${path.join(paths.runDir, 'memory-rag.log')}`);
+    } catch (error) {
+      warn(`memory-rag 启动失败：${error?.message ?? error}；检索会降级为关键词`);
+    }
   }
 }
 

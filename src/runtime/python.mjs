@@ -29,12 +29,13 @@ export function resolvePython({
     );
     if (isFile(candidate, fsImpl)) return { command: candidate, args: [], source: 'venv', name: 'venv-python' };
   }
-  const names = platform === 'win32' ? ['py', 'python', 'python3'] : ['python3', 'python', 'py'];
+  // 与需求一致的回退顺序：py → python → python3。
+  const names = ['py', 'python', 'python3'];
   for (const name of names) {
     const command = findExecutable(name, { env, platform, fsImpl });
     if (!command) continue;
     // py 是 Windows 启动器，显式选 Python 3；python/python3 已是解释器本身。
-    return { command, args: name === 'py' ? ['-3'] : [], source: 'system', name };
+    return { command, args: name === 'py' && platform === 'win32' ? ['-3'] : [], source: 'system', name };
   }
   return null;
 }
