@@ -2835,7 +2835,7 @@ section.card fieldset { min-width:0 }
         <div class="meta err" id="apiEmbedErrKind" hidden></div>
 
         <div class="meta" id="apiEmbedBundled">自带向量模型：<span id="apiEmbedBundledText">—</span></div>
-        <div class="meta" id="apiEmbedBundledHint" hidden>没装 qq-embedding 服务，开关会改用 start-all.sh</div>
+        <div class="meta" id="apiEmbedBundledHint" hidden>没装 qq-embedding 系统服务，开关会改用本地启动脚本 / PID 文件管理</div>
 
         <div id="apiEmbedForm" hidden>
           <label for="apiEmbedBaseUrl">接口地址</label>
@@ -6617,7 +6617,7 @@ function ltmRagRender(d) {
   const h = d.health || {};
   if (d.reachable === false) {
     // 服务停着也要能看见遗忘请求：删存档时队列里还留着没消化的 key。
-    ltmLine(box, '服务：不可达（没在运行？需要时在远程跑 start-all.sh --rag）');
+    ltmLine(box, '服务：不可达（没在运行？需要时在远程跑 start-all.sh --rag，Windows 用 start-all.bat --rag）');
   } else {
     ltmLine(box, '服务：' + (h.ok ? '正常' : '异常'));
     ltmLine(box, ltmRagModelText(h));

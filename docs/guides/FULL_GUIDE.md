@@ -209,6 +209,8 @@ node scripts/setup-dsh.mjs
    看到 `SnowLuma 已连接` 即成功；然后 QQ 上给机器人账号发条消息测试。
    Windows 想要「崩溃自动重启」请改用 `start.bat`（见下节）。
 
+> **Windows 原生用户**：`start.bat` 只是桥接守护；完整的一键编排（DSH → QQ → SnowLuma → 桥接 → 可选 RAG）请用 `start-all.bat` / `stop-all.bat`，路径可用环境变量或 `config.json` 的 `orchestrator` 段覆盖。详见根目录 README 的「Windows 原生部署」一节。`scripts/systemd/` 仅适用于 Linux；Windows 用 `~/.ai-companion-run/*.pid` 管理进程。
+
 ## 运行与运维
 
 ```bash

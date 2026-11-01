@@ -23,6 +23,17 @@ qq-bridge 的向量记忆索引服务。方案见 [`docs/design/RAG_MEMORY_PLAN.
   # 需要代理时：HTTPS_PROXY=http://127.0.0.1:<代理端口> uv pip install --python .venv/bin/python -e . pytest
   ```
 
+  Windows 原生（不是 WSL）用 `.venv\Scripts\python.exe`：
+
+  ```bat
+  cd /d %USERPROFILE%\qq-bridge\sidecars\memory-rag
+  uv venv --python 3.12 .venv
+  uv pip install --python .venv\Scripts\python.exe -e . pytest
+  ```
+
+  `start-all.bat` / 控制台 RAG 开关会自动解析这个路径；没有 venv 时依次回退 `py`、`python`、`python3`。
+  本地 llama-server 在 Windows 上是 `llama-server.exe`，路径用 `EMBED_BIN` / `EMBED_MODEL` 或 `config.json` 的 `orchestrator` 段指定。
+
 ## embedding 用本地还是 API
 
 `config.yml` 的 `embedding.provider` 决定向量从哪来，**缺省 `local`**（本机 `llama-server`），
@@ -131,6 +142,13 @@ llama.cpp 的 `llama-server`，固定 `127.0.0.1:8091`，启动参数 `--embeddi
 .venv/bin/python -m memory_rag.app                        # HTTP 服务，127.0.0.1:8093，每 60 秒增量索引
 .venv/bin/python -m pytest -q                             # 单测（假 embedding，不需要 GPU）
 .venv/bin/python eval/run.py                              # 评估集跑分（用例在 state/long-memory/rag/eval/cases.jsonl）
+```
+
+Windows 把 `.venv/bin/python` 换成 `.venv\Scripts\python.exe` 即可，例如：
+
+```bat
+.venv\Scripts\python.exe -m memory_rag.app
+.venv\Scripts\python.exe -m pytest -q
 ```
 
 ## HTTP 接口

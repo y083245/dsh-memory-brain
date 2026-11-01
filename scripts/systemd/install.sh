@@ -16,6 +16,12 @@
 # 路径可用环境变量覆盖：NODE_BIN、PNPM_HOME、EMBED_BIN、EMBED_MODEL。
 set -euo pipefail
 
+# systemd 只存在于 Linux；Windows 原生（Git Bash 的 MINGW）没有 systemctl --user。
+case "$(uname -s)" in
+  Linux) ;;
+  *) echo "[fail] scripts/systemd/install.sh 只支持 Linux；Windows 请用 start-all.bat / stop-all.bat（PID 文件管理）" >&2; exit 1 ;;
+esac
+
 SRC_DIR="$(cd "$(dirname "$0")" && pwd)"
 BRIDGE_DIR="$(cd "$SRC_DIR/../.." && pwd)"
 UNIT_DIR="$HOME/.config/systemd/user"

@@ -26,6 +26,23 @@ const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'qqb-test-rag-scripts-'));
 const FAKE_BIN = path.join(ROOT, 'fakebin');
 fs.mkdirSync(FAKE_BIN, { recursive: true });
 
+// CI 的 Python 不一定装了 PyYAML。rag-config.py 只用它读 config.yml 的
+// `embedding.provider`，这里放一个最小替身，避免测试依赖机器的 pip 状态。
+const PYYAML_DIR = path.join(ROOT, 'pyyaml');
+fs.mkdirSync(PYYAML_DIR, { recursive: true });
+fs.writeFileSync(path.join(PYYAML_DIR, 'yaml.py'), [
+  'def safe_load(stream):',
+  '    text = stream.read() if hasattr(stream, "read") else str(stream)',
+  '    provider = None',
+  '    for line in text.splitlines():',
+  '        s = line.strip()',
+  '        if s.startswith("provider:"):',
+  '            provider = s.split(":", 1)[1].strip()',
+  '    embedding = {"provider": provider} if provider else {}',
+  '    return {"embedding": embedding}',
+  '',
+].join('\n'));
+
 function fakeCommand(name, body) {
   const file = path.join(FAKE_BIN, name);
   fs.writeFileSync(file, `#!/bin/bash\nmkdir -p "$HOME/.fake-log"\n${body}\n`, { mode: 0o755 });
@@ -53,6 +70,7 @@ function envFor(home, extra = {}) {
     HOME: home,
     PATH: `${FAKE_BIN}:${path.dirname(process.execPath)}:/usr/bin:/bin`,
     XDG_RUNTIME_DIR: path.join(home, 'run'),
+    PYTHONPATH: [PYYAML_DIR, process.env.PYTHONPATH].filter(Boolean).join(path.delimiter),
     EMBED_BIN: path.join(home, 'llama.cpp', 'build', 'bin', 'llama-server'),
     EMBED_MODEL: path.join(home, 'models', 'fake-embedding.gguf'),
     // 测试不真的等 60 秒：编排脚本认这两个环境变量。

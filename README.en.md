@@ -84,6 +84,12 @@ npm start
 
 Or double-click `start.bat` on Windows (guard mode with auto-restart).
 
+> **Windows native (not WSL):** `start.bat` only guards the bridge process. For the full stack use
+> `start-all.bat` / `stop-all.bat` (DSH → QQ → SnowLuma → bridge → optional RAG). Paths can be
+> overridden with environment variables or `config.json`'s `orchestrator` section. Windows uses
+> `%USERPROFILE%\.ai-companion-run\*.pid` instead of systemd. Full steps are in the Chinese
+> README section “Windows 原生部署”.
+
 ## DSH Setup on Another Device
 
 The bridge and console can run without extra DSH setup, but the two DSH chat presets (`qq-chat` and `qq-chat-v2`) and the MCP servers must be installed into DSH once per machine:

@@ -47,7 +47,7 @@
 
 ## 🚀 部署教程（Linux，第一次大约 1 小时）
 
-> 本教程按作者实际在跑的环境写（Ubuntu + Linux QQ）。基础聊天功能也能在 Windows 上跑，见 [完整说明](docs/guides/FULL_GUIDE.md)；记忆服务和一键脚本只在 Linux 上测过。
+> 本教程按作者实际在跑的环境写（Ubuntu + Linux QQ）。**Windows 原生（不是 WSL）**的完整步骤见下方 [「Windows 原生部署」](#-windows-原生部署)；一键脚本、记忆服务和 systemd 的差异都在那里说明。
 >
 > 下面所有命令都在**终端**里输入（Ubuntu 按 `Ctrl + Alt + T` 打开）。`#` 开头的是说明，不用输入。
 
@@ -238,10 +238,154 @@ uv pip install --python .venv/bin/python -e .
 <details>
 <summary><b>点这里展开</b></summary>
 
-- `./start-all.sh`：按顺序启动 DSH → QQ → SnowLuma → 本项目；RAG 开关开着时连记忆服务一起起（`--rag` = 只起记忆服务并打开开关；`./stop-all.sh --rag` = 停掉并关上开关）。脚本开头的程序路径是作者本机的，请按你的安装位置改，或用 `DSH_DIR`、`SNOW_DIR`、`QQ_BIN` 等环境变量覆盖。
-- `scripts/systemd/install.sh`：把本项目和记忆服务装成 systemd 用户服务，崩溃自动拉起；加 `--enable` 开机自启（QQ 仍需人工扫码登录）。
+- `./start-all.sh`：按顺序启动 DSH → QQ → SnowLuma → 本项目；RAG 开关开着时连记忆服务一起起（`--rag` = 只起记忆服务并打开开关；`./stop-all.sh --rag` = 停掉并关上开关）。实现在 `scripts/start-all.mjs` / `stop-all.mjs`（Windows 用 `start-all.bat` / `stop-all.bat`）；程序路径可用 `DSH_DIR`、`SNOW_DIR`、`QQ_BIN` 等环境变量或 `config.json` 的 `orchestrator` 段覆盖。
+- `scripts/systemd/install.sh`（**仅 Linux**）：把本项目和记忆服务装成 systemd 用户服务，崩溃自动拉起；加 `--enable` 开机自启（QQ 仍需人工扫码登录）。Windows 没有 systemd，改用 PID 文件管理，见下一节。
 
 </details>
+
+---
+
+## 🪟 Windows 原生部署
+
+> 这一节是 **Windows 原生（不是 WSL）**的完整步骤。Linux 的 systemd 部署不受影响；Windows 上没有 systemd，编排脚本改用 **PID 文件 + taskkill /T** 管理后台进程。
+
+### 0. 准备清单
+
+- Windows 10/11（x64），能长期开机；QQ 要扫码登录，建议有桌面会话
+- **Node.js 24**（<https://nodejs.org/> 或 nvm-windows）；`node -v` 显示 `v24.x`
+- 一个**专门给 AI 用的 QQ 小号**（不要用大号）
+- **QQNT**（建议 3.2.32；版本不匹配会让 SnowLuma 注入失败）
+- **SnowLuma Windows 包**：从 [SnowLuma Releases](https://github.com/SnowLuma/SnowLuma/releases) 下载 `SnowLuma-v*-win-x64.zip`（完整版自带 Node；Lite 版需要本机 Node 22.13+），解压到例如 `C:\SnowLuma`
+- （可选）DeepSeek API 密钥；10 GB 以上显存的 NVIDIA 显卡 + llama.cpp（本地 embedding）；Python 3.12 + [uv](https://docs.astral.sh/uv/)（memory-rag）
+
+### 1. 安装并启动 DSH
+
+```bat
+npm install -g @deepseek-ai/dsh@0.2.1-rc.3
+dsh web --no-open
+```
+
+浏览器打开 <http://127.0.0.1:3080>，在「设置 → 模型」里填 DeepSeek 密钥。这个窗口保持开着。
+
+> 也可以把 DSH 源码 clone 到 `%USERPROFILE%\deepseek-harness`，用 `pnpm dsh web` 启动；`start-all.mjs` 会优先用这个目录，找不到时回退到 PATH 里的全局 `dsh`。
+
+### 2. 安装 QQ + SnowLuma
+
+1. 安装 QQNT，用小号扫码登录，保持 QQ 开着。
+2. 解压 SnowLuma 到 `C:\SnowLuma`，双击 `launcher.bat`（或 `SnowLuma.exe`）启动。
+3. 浏览器打开 SnowLuma WebUI（一般 <http://127.0.0.1:5099>），按引导同意条款、改密码、接入已登录的 QQ。
+4. 在 OneBot 设置里开启：
+   - **WebSocket 服务端**（默认 `3001`）
+   - **HTTP API**（默认 `3000`）
+   记下端口和 accessToken。
+
+### 3. 安装本项目
+
+```bat
+git clone https://github.com/y083245/dsh-memory-brain.git
+cd dsh-memory-brain
+npm ci
+copy config.example.json config.json
+```
+
+编辑 `config.json`：
+
+```jsonc
+{
+  "ownerQQ": 10001,
+  "allow": { "private": [10001], "groups": [20001] },
+  "snowluma": {
+    "wsUrl": "ws://127.0.0.1:3001",
+    "httpUrl": "http://127.0.0.1:3000",
+    "accessToken": "HTTP API 的令牌",
+    "homeDir": "C:\\SnowLuma"
+  }
+}
+```
+
+`homeDir` 用于换 QQ 账号后自动发现 OneBot token；填 SnowLuma 解压目录。
+
+### 4. 把 preset / MCP 装进 DSH
+
+```bat
+node scripts\setup-dsh.mjs
+```
+
+然后**重启 DSH**（回到第 1 步的窗口按 `Ctrl+C`，再执行 `dsh web --no-open`）。
+
+### 5. 一键启动 / 停止
+
+```bat
+start-all.bat
+```
+
+它会按顺序启动 DSH → QQ → SnowLuma → 等 OneBot（3000/3001）→ qq-bridge；已经在跑的环节自动跳过。日志和 PID 文件在 `%USERPROFILE%\.ai-companion-run\`：
+
+```text
+bridge.log  dsh.log  qq.log  snowluma.log  embed.log  memory-rag.log  gsv.log
+bridge.pid  dsh.pid  qq.pid  snowluma.pid  embed.pid  memory-rag.pid  gsv.pid
+```
+
+停止：
+
+```bat
+stop-all.bat            rem 停桥接、向量记忆、SnowLuma、QQ（DSH 保留）
+stop-all.bat --all      rem 连 DSH 一起停
+stop-all.bat --rag      rem 只停向量记忆并关闭 RAG 开关
+```
+
+启动 RAG：
+
+```bat
+start-all.bat --rag
+rem 或：set START_RAG=1 && start-all.bat
+```
+
+> **`start.bat` 与 `start-all.bat` 的区别**：`start.bat` 是旧版的「桥接守护」——只启动 `src/bridge.js` 并崩溃自动重启；`restart.bat` 同理。`start-all.bat` 才是完整的一键编排。旧用法保持可用。
+
+### 6. 路径覆盖
+
+`start-all.mjs` 的默认值尽量跨平台，但你的安装位置可能不同。优先级：**环境变量 > `config.json` 的 `orchestrator` 段 > 平台默认值**。
+
+```bat
+set DSH_DIR=%USERPROFILE%\deepseek-harness
+set SNOW_DIR=C:\SnowLuma
+set QQ_BIN=C:\Program Files\Tencent\QQNT\QQ.exe
+set EMBED_BIN=%USERPROFILE%\llama.cpp\build\bin\llama-server.exe
+set EMBED_MODEL=%USERPROFILE%\models\Qwen3-Embedding-8B-Q8_0.gguf
+start-all.bat
+```
+
+也可以写进 `config.json`（键名是 `dshDir` / `snowDir` / `qqBin` / `gsvDir` / `embedBin` / `embedModel` / `runDir` / `nodeBin` / `pnpmBin` / `dshCommand`）。`QQ_BIN` 未设置时会自动探测常见 QQNT 安装位置；`SNOW_DIR` 未设置时会在 `%USERPROFILE%\snowluma`、`%USERPROFILE%\SnowLuma`、`C:\SnowLuma` 里找最新可启动目录。
+
+### 7. 记忆服务 memory-rag（可选）
+
+```bat
+cd sidecars\memory-rag
+uv venv --python 3.12 .venv
+uv pip install --python .venv\Scripts\python.exe -e .
+```
+
+`start-all.mjs` / 控制台开关会优先使用 `sidecars\memory-rag\.venv\Scripts\python.exe`；没有 venv 时依次回退到 `py`、`python`、`python3`。
+
+embedding 两种方式：
+
+- **本地 llama.cpp**：装好 llama.cpp，下载 `Qwen3-Embedding-8B-Q8_0.gguf`，在 `config.json` 的 `orchestrator` 里设 `embedBin` / `embedModel`；控制台「API 管理」里选「本项目自带 llama.cpp」。
+- **自己部署 / 云端**：在控制台选「我自己部署的本地服务」或「云端 API」，按页面测试连接并保存。这种模式下 Windows 不会去启停你的 embedding。
+
+### 8. 升级 / 迁移
+
+- 升级 Node 或移动仓库后，重新运行 `node scripts\setup-dsh.mjs`（DSH 里存的是绝对路径/junction）。
+- `state\`、`config.json`、`audio\` 是用户数据；迁移时一起带走。
+- Windows 没有 systemd，所以**没有开机自启**。需要的话用「任务计划程序」在登录时运行 `start-all.bat`；QQ 仍需人工扫码登录。
+
+### 9. Windows 上的测试
+
+```bat
+npm test
+```
+
+会跑跨平台单元测试（自动跳过需要真实 DSH/QQ/浏览器的 e2e）。Linux 专属的假 systemd 测试会在 Windows 上明确 SKIP 并说明原因。
 
 ---
 
@@ -256,6 +400,8 @@ uv pip install --python .venv/bin/python -e .
 | 报 HTTP 426 | `httpUrl` 填成了 WebSocket 的端口，改成 HTTP API 的端口 |
 | 「API 管理」页 RAG 显示「部分可用」 | 记忆服务在跑，但 embedding 没起来：看状态后面的原因（显存不足、没装 llama.cpp / 模型、地址或模型名填错）；修好前检索自动只用关键词 |
 | 开了代理（Clash 等 fake-ip 模式）后她看不到图片 | 在代理的 `fake-ip-filter` 里加上 `+.qq.com`、`+.qq.com.cn`、`+.qpic.cn`、`+.gtimg.cn` |
+| Windows `start-all.bat` 报「没找到 QQ」 | QQNT 不在默认安装位置。设置 `QQ_BIN`（例如 `set QQ_BIN=C:\Program Files\Tencent\QQNT\QQ.exe`）或写进 `config.json` 的 `orchestrator.qqBin` |
+| Windows 控制台 RAG 开关能点但服务没起 | 看 `%USERPROFILE%\.ai-companion-run\memory-rag.log`；确认 `sidecars\memory-rag\.venv\Scripts\python.exe` 存在，或系统里有 `py` / `python` / `python3`。Windows 没有 systemd，开关通过 PID 文件启停 |
 
 更多「已知行为」和排查方法见 [完整说明](docs/guides/FULL_GUIDE.md)。
 

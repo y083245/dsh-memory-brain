@@ -2,6 +2,7 @@
 
     .venv/bin/python eval/run.py              # 先增量索引，再跑全部配置
     .venv/bin/python eval/run.py --rebuild    # 改了切块参数后，全量重建再跑
+    # Windows: .venv\Scripts\python.exe eval\run.py [--rebuild]
 
 命中的判定：返回的块（核心范围，不含前后扩展）和期望的行范围有重叠，就算命中；
 多个期望范围的用例，命中任意一个即可。「应无结果」用例不进 recall/MRR，只检查隔离。
