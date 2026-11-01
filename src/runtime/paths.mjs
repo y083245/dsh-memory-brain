@@ -31,6 +31,17 @@ function cfgString(oc, key) {
   return typeof value === 'string' && value.trim() ? value.trim() : '';
 }
 
+/**
+ * 平台参数决定路径语义。
+ *
+ * 这几个函数都带 `platform` 参数，测试会在 Linux 上伪造 win32 去覆盖 Windows 盘符逻辑；
+ * 如果这里用宿主的 `path.join`，`D:\SnowLuma` 会被拼成 `D:\SnowLuma/index.mjs`，
+ * 在 Linux 上永远命中不了（CI 就红在这里）。传什么 platform 就用什么语义。
+ */
+function pathFor(platform) {
+  return platform === 'win32' ? path.win32 : path.posix;
+}
+
 /** 版本号自然排序（SnowLuma-v2.10 排在 v2.9 后面）。 */
 export function naturalCompare(a, b) {
   return String(a).localeCompare(String(b), 'en', { numeric: true, sensitivity: 'base' });
@@ -39,12 +50,13 @@ export function naturalCompare(a, b) {
 /** 一个 SnowLuma 目录是否可启动；返回启动方式或 null。 */
 export function inspectSnowLuma(dir, { platform = process.platform, fsImpl = fs } = {}) {
   if (!dir || !isDir(dir, fsImpl)) return null;
-  const index = path.join(dir, 'index.mjs');
+  const p = pathFor(platform);
+  const index = p.join(dir, 'index.mjs');
   if (isFile(index, fsImpl)) return { kind: 'node', cwd: dir, args: ['./index.mjs'] };
   if (platform === 'win32') {
-    const exe = path.join(dir, 'SnowLuma.exe');
+    const exe = p.join(dir, 'SnowLuma.exe');
     if (isFile(exe, fsImpl)) return { kind: 'exe', cwd: dir, args: [] };
-    const launcher = path.join(dir, 'launcher.bat');
+    const launcher = p.join(dir, 'launcher.bat');
     if (isFile(launcher, fsImpl)) return { kind: 'cmd', cwd: dir, args: [] };
   }
   return null;
@@ -55,18 +67,19 @@ export function inspectSnowLuma(dir, { platform = process.platform, fsImpl = fs 
  * 版本升级后目录名会变，所以不依赖固定版本号。
  */
 export function findSnowLumaDir({ home = os.homedir(), platform = process.platform, env = process.env, fsImpl = fs } = {}) {
+  const p = pathFor(platform);
   const bases = [];
   if (env.SNOWLUMA_HOME) bases.push(env.SNOWLUMA_HOME);
-  bases.push(path.join(home, 'snowluma'), path.join(home, 'SnowLuma'));
+  bases.push(p.join(home, 'snowluma'), p.join(home, 'SnowLuma'));
   // Windows 文档里的常见解压位置是 C:\SnowLuma（盘符取当前 home 所在盘）。
-  if (platform === 'win32') bases.push(path.join(path.parse(home).root, 'SnowLuma'));
+  if (platform === 'win32') bases.push(p.join(p.parse(home).root, 'SnowLuma'));
   // 解压到别的盘（例如 D:\SnowLuma）同样常见，磁盘空间大的机器基本都不在 C:。
   if (platform === 'win32') {
-    const homeRoot = path.parse(home).root.toUpperCase();
+    const homeRoot = p.parse(home).root.toUpperCase();
     for (const drive of drivesToProbe({ env, platform, fsImpl })) {
       for (const name of ['SnowLuma', 'snowluma']) {
         const candidate = `${drive}:\\${name}`;
-        if (candidate.toUpperCase() !== path.join(homeRoot, name).toUpperCase()) bases.push(candidate);
+        if (candidate.toUpperCase() !== p.join(homeRoot, name).toUpperCase()) bases.push(candidate);
       }
     }
   }
@@ -77,12 +90,12 @@ export function findSnowLumaDir({ home = os.homedir(), platform = process.platfo
     try { entries = fsImpl.readdirSync(base, { withFileTypes: true }); } catch { continue; }
     for (const entry of entries) {
       if (!entry.isDirectory()) continue;
-      const dir = path.join(base, entry.name);
+      const dir = p.join(base, entry.name);
       if (inspectSnowLuma(dir, { platform, fsImpl })) found.push(dir);
     }
   }
   if (!found.length) return '';
-  return found.sort((a, b) => naturalCompare(path.basename(a), path.basename(b))).at(-1);
+  return found.sort((a, b) => naturalCompare(p.basename(a), p.basename(b))).at(-1);
 }
 
 /**
@@ -159,7 +172,7 @@ export function findDshCli({ env = process.env, platform = process.platform, hom
   for (const drive of drivesToProbe({ env, platform, fsImpl })) {
     candidates.push(`${drive}:\\deepseek-harness\\resources\\runtime\\cli\\bin\\dsh.cmd`);
   }
-  candidates.push(path.join(home, 'deepseek-harness', 'resources', 'runtime', 'cli', 'bin', 'dsh.cmd'));
+  candidates.push(path.win32.join(home, 'deepseek-harness', 'resources', 'runtime', 'cli', 'bin', 'dsh.cmd'));
   return candidates.find((file) => isFile(file, fsImpl)) || '';
 }
 
