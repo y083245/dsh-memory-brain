@@ -23,3 +23,22 @@ jobs:
       - run: npm ci
       # e2e / probe（真实 DSH、QQ、SnowLuma、浏览器）不在这里跑；见 scripts/test-unit.mjs 的排除表。
       - run: npm test
+
+  memory-rag:
+    name: memory-rag (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: sidecars/memory-rag/pyproject.toml
+      - run: python -m pip install -e ./sidecars/memory-rag pytest
+      - run: python -m pytest -q
+        working-directory: sidecars/memory-rag

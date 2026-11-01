@@ -73,6 +73,16 @@ await test('resolveOrchestratorPaths：config.orchestrator 被环境变量覆盖
   });
   assert.equal(fromEnv.runDir, path.join(root, 'env-run'));
   assert.equal(fromEnv.qqBin, path.join(root, 'env-qq.exe'));
+
+  // sidecars/memory-rag 的 venv 必须解析到 .venv 里面（不是项目根目录）。
+  const venvSub = process.platform === 'win32' ? 'Scripts' : 'bin';
+  const venvExe = process.platform === 'win32' ? 'python.exe' : 'python';
+  const venvPython = path.join(root, 'sidecars', 'memory-rag', '.venv', venvSub, venvExe);
+  fs.mkdirSync(path.dirname(venvPython), { recursive: true });
+  fs.writeFileSync(venvPython, '');
+  const withVenv = resolveOrchestratorPaths({ root, env: {}, home: root, platform: process.platform });
+  assert.equal(withVenv.ragPython.source, 'venv');
+  assert.equal(withVenv.ragPython.command, venvPython);
 });
 
 await test('resolvePython：优先 venv，Windows/Linux 各自的目录结构', () => {
@@ -128,6 +138,17 @@ await test('commandSpec：Windows .cmd 垫片优先解析成 node + JS 入口', 
   assert.deepEqual(spec.args.slice(1), ['a']);
 });
 
+await test('commandSpec：Electron 的 .cmd 垫片不能被当成普通 node 垫片', () => {
+  const dir = tempDir('electron-shim');
+  const js = path.join(dir, 'cli.js');
+  fs.writeFileSync(js, '');
+  const cmd = path.join(dir, 'dsh.cmd');
+  fs.writeFileSync(cmd, '@echo off\r\nset "ELECTRON_RUN_AS_NODE=1"\r\n"%~dp0electron.exe" "%~dp0cli.js" %*\r\n');
+  const spec = commandSpec(cmd, ['web'], { platform: 'win32', env: { ComSpec: 'cmd.exe' }, nodeBin: process.execPath });
+  assert.equal(spec.via, 'cmd-shim');
+  assert.equal(spec.command, 'cmd.exe');
+});
+
 await test('PID 文件 + detached 启动 + stopPid 真的收掉子进程', async () => {
   const runDir = tempDir('run');
   const logFile = path.join(runDir, 'child.log');
@@ -179,6 +200,22 @@ await test('Windows RAG 管理器：pid 模式、installed=false、启停走注�
   assert.deepEqual(spawns, ['embed.log', 'memory-rag.log']);
   await manager.stop({ managed: true });
   assert.deepEqual(stops, ['memory-rag', 'embedding']);
+});
+
+await test('fetchHealth：慢 /health（>3s）也能读到（Windows memory-rag 实测约 4s）', async () => {
+  const server = http.createServer((req, res) => {
+    setTimeout(() => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, embedding: { healthy: false } }));
+    }, 3500);
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+  const started = Date.now();
+  const data = await fetchHealth(port);
+  assert.ok(Date.now() - started >= 3000, '这个用例要真的跨过旧 3 秒超时');
+  assert.equal(data?.embedding?.healthy, false);
+  await new Promise((resolve) => server.close(resolve));
 });
 
 await test('fetchHealth：本地假 /health 能读到 JSON，关掉后返回 null', async () => {

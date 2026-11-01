@@ -49,6 +49,11 @@ class Indexer:
         self.vstore = vstore
         self.wm_file = self.paths.rag / "watermarks.json"
         self.lock = threading.Lock()
+        # watermarks.json 的读（/health -> lag -> pending_rows）与写（_save_wm 的 os.replace）
+        # 必须串行：Windows 上 os.replace 目标文件正被别的线程以普通读方式打开时会
+        # WinError 5（拒绝访问），而 health 每 2 秒就会读一次。单独一把 RLock，避免
+        # 与索引主锁 self.lock 形成非重入死锁。
+        self.wm_lock = threading.RLock()
         self.last: dict = {"at": None, "chunks": 0, "error": None}
         self._people_mtime = None
         self.names = NameBook(self.paths.people, self.paths.archive)
@@ -58,14 +63,16 @@ class Indexer:
     # ---------------------------------------------------------------- 水位
 
     def watermarks(self) -> dict:
-        try:
-            return json.loads(self.wm_file.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return {}
+        with self.wm_lock:
+            try:
+                return json.loads(self.wm_file.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return {}
 
     def _save_wm(self, wm: dict) -> None:
-        self.wm_file.parent.mkdir(parents=True, exist_ok=True)
-        _write_json_atomic(self.wm_file, wm)
+        with self.wm_lock:
+            self.wm_file.parent.mkdir(parents=True, exist_ok=True)
+            _write_json_atomic(self.wm_file, wm)
 
     def _start(self, key: str, wm: dict) -> tuple[str | None, int, int]:
         w = wm.get(key)
@@ -177,7 +184,8 @@ class Indexer:
             # 块重新写入后由提炼线程的对账按「块编号 + 原文哈希」挂回，不重复调模型（规格 A1-a）。
             self.db.clear(keep_l2=True)
             self.vstore.reset()
-            try:
-                self.wm_file.unlink()
-            except FileNotFoundError:
-                pass
+            with self.wm_lock:
+                try:
+                    self.wm_file.unlink()
+                except FileNotFoundError:
+                    pass

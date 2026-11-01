@@ -43,6 +43,10 @@ export function findExecutable(name, { env = process.env, platform = process.pla
 export function resolveShimScript(shimPath, { fsImpl = fs } = {}) {
   let text;
   try { text = fsImpl.readFileSync(shimPath, 'utf8'); } catch { return null; }
+  // Electron 自带的 CLI（例如 DSH 桌面版 dsh.cmd）虽然也以 .js 结尾，
+  // 但必须由它自己的 exe + ELECTRON_RUN_AS_NODE 启动；用 process.execPath 跑会缺 Electron 运行时。
+  // 这类垫片交给 cmd.exe（下面的 ComSpec 分支）执行。
+  if (/ELECTRON_RUN_AS_NODE/i.test(text) || !/(%_prog%|\bnode(?:\.exe)?\b)/i.test(text)) return null;
   const patterns = [
     /%dp0%\\([^"\r\n]+?\.(?:js|cjs|mjs))/i,
     /%~dp0\\([^"\r\n]+?\.(?:js|cjs|mjs))/i,

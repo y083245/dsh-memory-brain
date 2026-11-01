@@ -26,7 +26,9 @@ export { EMBEDDING_UNIT, MEMORY_RAG_UNIT, STEP };
 const DEFAULT_RAG_URL = 'http://127.0.0.1:8093';
 const HEALTH_TIMEOUT_MS = 150000; // 与 embedding 单元的 TimeoutStartSec 一致（§3.2）
 const HEALTH_POLL_MS = 2000; // 规格 §3.2：每 2 秒查一次
-const HEALTH_REQUEST_TIMEOUT_MS = 3000;
+// Windows 上 memory-rag 的 /health 在 embedding 未启动时要等 embedder 的超时（实测约 4s），
+// 3s 会让服务明明起来了却永远判为不可达。
+const HEALTH_REQUEST_TIMEOUT_MS = 10000;
 const EMBED_LOG_TAIL_BYTES = 4096;
 
 /**

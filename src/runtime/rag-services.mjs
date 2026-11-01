@@ -18,7 +18,7 @@ function isFile(file) {
 }
 
 /** 读 /health；连不上或非 2xx 返回 null（不会抛）。 */
-export async function fetchHealth(port, { timeoutMs = 3000, fetchImpl = globalThis.fetch } = {}) {
+export async function fetchHealth(port, { timeoutMs = 10000, fetchImpl = globalThis.fetch } = {}) {
   if (typeof fetchImpl !== 'function') return null;
   try {
     const response = await fetchImpl(`http://127.0.0.1:${port}/health`, {
@@ -38,7 +38,7 @@ export async function fetchHealth(port, { timeoutMs = 3000, fetchImpl = globalTh
  * 为什么不是只等端口：llama-server 刚监听时模型可能还没加载完（/health 503），
  * memory-rag 也可能先起来、embedding 还没就绪。
  */
-export async function waitForHealth(port, seconds, { fetchImpl, accept = (data) => !!data, intervalMs = 1000, timeoutMs = 3000 } = {}) {
+export async function waitForHealth(port, seconds, { fetchImpl, accept = (data) => !!data, intervalMs = 1000, timeoutMs = 10000 } = {}) {
   const deadline = Date.now() + Math.max(0, Number(seconds) || 0) * 1000;
   for (;;) {
     const data = await fetchHealth(port, { timeoutMs, fetchImpl });
@@ -49,7 +49,7 @@ export async function waitForHealth(port, seconds, { fetchImpl, accept = (data) 
   }
 }
 
-export async function embeddingReady({ timeoutMs = 2000, fetchImpl } = {}) {
+export async function embeddingReady({ timeoutMs = 5000, fetchImpl } = {}) {
   const data = await fetchHealth(EMBED_PORT, { timeoutMs, fetchImpl });
   return !!data;
 }

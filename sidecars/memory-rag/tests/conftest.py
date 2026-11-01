@@ -69,7 +69,7 @@ def write_archive(state: Path, key: str, rows: list[tuple], month: str = "2026-1
 def state(tmp_path: Path) -> Path:
     s = tmp_path / "state"
     (s / "long-memory" / "archive").mkdir(parents=True)
-    (s / "long-memory" / "people.json").write_text(json.dumps({"version": 1, "people": {"111": {"name": "平安"}}}, ensure_ascii=False))
+    (s / "long-memory" / "people.json").write_text(json.dumps({"version": 1, "people": {"111": {"name": "平安"}}}, ensure_ascii=False), encoding="utf-8")
     return s
 
 

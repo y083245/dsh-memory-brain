@@ -76,6 +76,7 @@ audio/
 __pycache__/
 .pytest_cache/
 *.pyc
+*.egg-info/
 
 # 语音工具的个人配置（真实参考音频路径与音色），只发布 voice-config.example.json
 voice-config.json

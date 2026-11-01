@@ -16,5 +16,10 @@ dependencies = [
 [dependency-groups]
 dev = ["pytest"]
 
+# 顶层同时有 eval/ 与 memory_rag/，setuptools 的自动发现会拒绝 flat-layout；
+# 显式声明要安装的包（Windows / 新版 setuptools 上 `uv pip install -e .` 会直接失败）。
+[tool.setuptools.packages.find]
+include = ["memory_rag*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

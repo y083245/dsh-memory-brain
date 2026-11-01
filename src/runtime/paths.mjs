@@ -168,13 +168,13 @@ export function resolveOrchestratorPaths({
     qqBin,
     qqArgs,
     gsvDir,
-    gsvPython: resolvePython({ venvDir: gsvDir, platform, env, fsImpl }),
+    gsvPython: resolvePython({ venvDir: path.join(gsvDir, '.venv'), platform, env, fsImpl }),
     embedBin,
     embedModel,
     nodeBin,
     pnpmBin,
     ragDir,
-    ragPython: resolvePython({ venvDir: ragDir, platform, env, fsImpl }),
+    ragPython: resolvePython({ venvDir: path.join(ragDir, '.venv'), platform, env, fsImpl }),
     startRag: env.START_RAG === '1',
     startGsv: env.START_GSV === '1'
   };
