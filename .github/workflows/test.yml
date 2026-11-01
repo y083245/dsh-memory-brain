@@ -40,5 +40,9 @@ jobs:
           cache: pip
           cache-dependency-path: sidecars/memory-rag/pyproject.toml
       - run: python -m pip install -e ./sidecars/memory-rag pytest
-      - run: python -m pytest -q
+      - run: python -m pytest -q --junitxml=pytest.xml
+        working-directory: sidecars/memory-rag
+      # 公开仓库的原始日志要管理员权限才能下载；失败时把用例名/断言写成 annotation。
+      - if: failure()
+        run: python ../../scripts/ci-pytest-summary.py pytest.xml
         working-directory: sidecars/memory-rag
