@@ -127,7 +127,15 @@ export function resolveOrchestratorPaths({
   const embedModel = pick('EMBED_MODEL', 'embedModel', path.join(home, 'models', 'Qwen3-Embedding-8B-Q8_0.gguf'));
   const rawNodeBin = pick('NODE_BIN', 'nodeBin', execPath);
   const nodeBin = path.isAbsolute(rawNodeBin) ? rawNodeBin : (findExecutable(rawNodeBin, { env, platform, fsImpl }) || rawNodeBin);
-  const rawPnpmBin = pick('PNPM_BIN', 'pnpmBin', findExecutable('pnpm', { env, platform, fsImpl }) || 'pnpm');
+  const pnpmHome = env.PNPM_HOME || path.join(home, platform === 'win32' ? 'AppData' : '.local', platform === 'win32' ? 'Local' : 'share', 'pnpm');
+  const pnpmCandidates = platform === 'win32'
+    ? [path.join(pnpmHome, 'pnpm.exe'), path.join(pnpmHome, 'pnpm.cmd'), path.join(pnpmHome, 'bin', 'pnpm.exe'), path.join(pnpmHome, 'bin', 'pnpm.cmd')]
+    : [path.join(pnpmHome, 'bin', 'pnpm'), path.join(pnpmHome, 'pnpm')];
+  const rawPnpmBin = pick(
+    'PNPM_BIN',
+    'pnpmBin',
+    findExecutable('pnpm', { env, platform, fsImpl }) || pnpmCandidates.find((file) => isFile(file, fsImpl)) || 'pnpm'
+  );
   const pnpmBin = path.isAbsolute(rawPnpmBin) ? rawPnpmBin : (findExecutable(rawPnpmBin, { env, platform, fsImpl }) || rawPnpmBin);
   const ragDir = path.join(root, 'sidecars', 'memory-rag');
 

@@ -31,7 +31,8 @@ import {
   RAG_PORT,
   gpuFreeMiB,
   startEmbeddingService,
-  startMemoryRagService
+  startMemoryRagService,
+  waitForHealth
 } from './rag-services.mjs';
 
 const DSH_PORT = 3080;
@@ -254,10 +255,10 @@ function spawnErrorHint(error) {
   return error?.message ?? String(error);
 }
 
-async function spawnService({ spec, cwd, logFile, label, log, err, platform }) {
+async function spawnService({ spec, cwd, logFile, label, log, err, platform, env = process.env }) {
   try {
     log(`启动 ${label}：${describeCommand(spec)}`);
-    const spawned = await spawnDetached({ ...spec, cwd, logFile, platform });
+    const spawned = await spawnDetached({ ...spec, cwd, logFile, platform, env });
     return spawned.pid;
   } catch (error) {
     err(`${label} 启动失败：${spawnErrorHint(error)}`);
@@ -331,7 +332,9 @@ async function startRagSection({ paths, ragEnabled, log, ok, warn, platform = pr
         log('启动 embedding 服务（systemd：qq-embedding.service，约占用 9 GB 显存）...');
         const started = await systemdStart('qq-embedding.service', { env });
         if (started.code !== 0) warn('systemctl 启动 qq-embedding 失败，看：systemctl --user status qq-embedding');
-        else if (await waitForPort(EMBED_PORT, embedWaitSeconds)) ok(`embedding 已就绪（${EMBED_PORT}）`);
+        else if (await waitForHealth(EMBED_PORT, embedWaitSeconds, {
+          accept: (data) => data && (data.status === 'ok' || data.ok === true)
+        })) ok(`embedding 已就绪（${EMBED_PORT}）`);
         else warn(`embedding 没就绪，检索会自动降级为只走 BM25；看日志：${path.join(paths.runDir, 'embed.log')}`);
       }
     }
@@ -345,7 +348,9 @@ async function startRagSection({ paths, ragEnabled, log, ok, warn, platform = pr
       log('启动 memory-rag 索引服务（systemd：qq-memory-rag.service）...');
       const started = await systemdStart('qq-memory-rag.service', { env });
       if (started.code !== 0) warn('systemctl 启动 qq-memory-rag 失败，看：systemctl --user status qq-memory-rag');
-      else if (await waitForPort(RAG_PORT, ragWaitSeconds)) ok(`memory-rag 已就绪（${RAG_PORT}）`);
+      else if (await waitForHealth(RAG_PORT, ragWaitSeconds, {
+        accept: (data) => data && Object.prototype.hasOwnProperty.call(data, 'embedding')
+      })) ok(`memory-rag 已就绪（${RAG_PORT}）`);
       else warn(`memory-rag 60s 内没就绪，检索会降级为关键词；看日志：${path.join(paths.runDir, 'memory-rag.log')}`);
     }
     return;
@@ -465,12 +470,20 @@ async function startDsh({ paths, log, ok, err, platform }) {
     return false;
   }
   const spec = commandSpec(command, args, { platform, env: paths.env, nodeBin: paths.nodeBin });
+  // 与旧脚本一致：非交互环境（systemd / 远程 shell）不一定加载了 nvm 与 pnpm 的 PATH。
+  const dshEnv = { ...paths.env };
+  const extraPath = [];
+  if (path.isAbsolute(paths.nodeBin)) extraPath.push(path.dirname(paths.nodeBin));
+  if (dshEnv.PNPM_HOME) extraPath.push(path.join(dshEnv.PNPM_HOME, 'bin'), dshEnv.PNPM_HOME);
+  extraPath.push(path.join(paths.home, '.local', 'share', 'pnpm', 'bin'));
+  dshEnv.PATH = [...extraPath, dshEnv.PATH || ''].filter(Boolean).join(path.delimiter);
   const pid = await spawnService({
     spec,
     cwd,
     logFile: path.join(paths.runDir, 'dsh.log'),
     label: 'DSH',
-    log, err, platform
+    log, err, platform,
+    env: dshEnv
   });
   if (!pid) return false;
   writePidFile(path.join(paths.runDir, 'dsh.pid'), pid);
@@ -501,12 +514,23 @@ async function startQq({ paths, log, ok, err, platform }) {
     return false;
   }
   const spec = commandSpec(paths.qqBin, paths.qqArgs, { platform, env: paths.env, nodeBin: paths.nodeBin });
+  // 旧脚本在 Linux 上给 QQ 补了图形会话环境变量；从 systemd/非交互 shell 调起来时
+  // DISPLAY / DBUS 可能不在环境里，这里保持同样的缺省。
+  const qqEnv = { ...paths.env };
+  if (platform !== 'win32') {
+    qqEnv.DISPLAY = qqEnv.DISPLAY || ':0';
+    if (typeof process.getuid === 'function') {
+      qqEnv.XDG_RUNTIME_DIR = qqEnv.XDG_RUNTIME_DIR || `/run/user/${process.getuid()}`;
+      qqEnv.DBUS_SESSION_BUS_ADDRESS = qqEnv.DBUS_SESSION_BUS_ADDRESS || `unix:path=/run/user/${process.getuid()}/bus`;
+    }
+  }
   const pid = await spawnService({
     spec,
     cwd: paths.home,
     logFile: path.join(paths.runDir, 'qq.log'),
     label: 'QQ',
-    log, err, platform
+    log, err, platform,
+    env: qqEnv
   });
   if (!pid) return false;
   writePidFile(path.join(paths.runDir, 'qq.pid'), pid);
@@ -555,7 +579,8 @@ async function startSnowLuma({ paths, log, ok, err, platform }) {
     cwd: launch.cwd,
     logFile: path.join(paths.runDir, 'snowluma.log'),
     label: 'SnowLuma',
-    log, err, platform
+    log, err, platform,
+    env: paths.env
   });
   if (!pid) return false;
   writePidFile(path.join(paths.runDir, 'snowluma.pid'), pid);
@@ -600,7 +625,8 @@ async function startBridge({ paths, log, ok, err, platform }) {
     cwd: paths.root,
     logFile: bridgeLog,
     label: 'qq-bridge',
-    log, err, platform
+    log, err, platform,
+    env: paths.env
   });
   if (!pid) return false;
   writePidFile(bridgePid, pid);
@@ -637,7 +663,8 @@ async function startGsv({ paths, log, ok, warn, platform }) {
     cwd: paths.gsvDir,
     logFile: path.join(paths.runDir, 'gsv.log'),
     label: 'GPT-SoVITS API',
-    log, err: warn, platform
+    log, err: warn, platform,
+    env: paths.env
   });
   if (!pid) return;
   writePidFile(path.join(paths.runDir, 'gsv.pid'), pid);
@@ -703,6 +730,21 @@ export async function runStart({
   }
   if (!isFile(path.join(root, 'src', 'bridge.js'))) {
     err(`找不到桥接主程序：${path.join(root, 'src', 'bridge.js')}`);
+    return 1;
+  }
+  // 与旧脚本一样尽早发现明显的路径错误：DSH / SnowLuma 没装时先别去起 QQ。
+  if (!(await isPortOpen(DSH_PORT))) {
+    const { command } = paths.dshCommand;
+    const resolved = path.isAbsolute(command)
+      ? (isFile(command) ? command : null)
+      : findExecutable(command, { env, platform });
+    if (!resolved && command !== paths.nodeBin) {
+      err(`找不到 DSH 启动命令：${command}（可用 DSH_DIR 或 config.json 的 orchestrator.dshCommand 指定）`);
+      return 1;
+    }
+  }
+  if (!(await isPortOpen(SNOW_PORT)) && !paths.snowLaunch) {
+    err(`找不到 SnowLuma 目录：${paths.snowDir || '(空)'}。可用 SNOW_DIR 或 config.json 的 orchestrator.snowDir 指定`);
     return 1;
   }
   ok(`node: ${paths.nodeBin}`);

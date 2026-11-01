@@ -169,7 +169,7 @@ await test('Windows RAG 管理器：pid 模式、installed=false、启停走注�
       isFile: () => true,
       spawnDetached: async (options) => { spawns.push(path.basename(options.logFile)); return { pid: 4000 + spawns.length }; },
       writePidFile: () => {},
-      waitForPort: async () => true,
+      waitForHealth: async () => true,
       stopPidFile: async ({ label }) => { stops.push(label); return { ok: true }; }
     }
   });

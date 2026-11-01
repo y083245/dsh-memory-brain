@@ -5,7 +5,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { commandSpec } from './commands.mjs';
-import { isPortOpen, waitForPort } from './ports.mjs';
+import { isPortOpen } from './ports.mjs';
 import { execFileP, readPidFile, isPidAlive, spawnDetached, stopPidFile, writePidFile } from './process.mjs';
 
 export const EMBED_PORT = 8091;
@@ -30,6 +30,22 @@ export async function fetchHealth(port, { timeoutMs = 3000, fetchImpl = globalTh
     return data && typeof data === 'object' && !Array.isArray(data) ? data : {};
   } catch {
     return null;
+  }
+}
+
+/**
+ * 轮询 /health 直到 accept(data) 为真或超时。
+ * 为什么不是只等端口：llama-server 刚监听时模型可能还没加载完（/health 503），
+ * memory-rag 也可能先起来、embedding 还没就绪。
+ */
+export async function waitForHealth(port, seconds, { fetchImpl, accept = (data) => !!data, intervalMs = 1000, timeoutMs = 3000 } = {}) {
+  const deadline = Date.now() + Math.max(0, Number(seconds) || 0) * 1000;
+  for (;;) {
+    const data = await fetchHealth(port, { timeoutMs, fetchImpl });
+    if (data && accept(data)) return true;
+    const left = deadline - Date.now();
+    if (left <= 0) return false;
+    await new Promise((resolve) => setTimeout(resolve, Math.min(intervalMs, left)));
   }
 }
 
@@ -87,7 +103,10 @@ export async function startEmbeddingService({
     platform
   });
   (deps.writePidFile ?? writePidFile)(path.join(runDir, EMBED_PID), spawned.pid);
-  const healthy = await (deps.waitForPort ?? waitForPort)(EMBED_PORT, waitSeconds);
+  const healthy = await (deps.waitForHealth ?? waitForHealth)(EMBED_PORT, waitSeconds, {
+    fetchImpl: deps.fetchImpl,
+    accept: (data) => data && (data.status === 'ok' || data.ok === true)
+  });
   log(`[rag] embedding 已启动（PID ${spawned.pid}）${healthy ? '，端口已就绪' : '，端口未就绪'}`);
   return { started: true, pid: spawned.pid, healthy };
 }
@@ -120,7 +139,10 @@ export async function startMemoryRagService({
     platform
   });
   (deps.writePidFile ?? writePidFile)(path.join(runDir, RAG_PID), spawned.pid);
-  const healthy = await (deps.waitForPort ?? waitForPort)(RAG_PORT, waitSeconds);
+  const healthy = await (deps.waitForHealth ?? waitForHealth)(RAG_PORT, waitSeconds, {
+    fetchImpl: deps.fetchImpl,
+    accept: (data) => data && Object.prototype.hasOwnProperty.call(data, 'embedding')
+  });
   log(`[rag] memory-rag 已启动（PID ${spawned.pid}）${healthy ? '，端口已就绪' : '，端口未就绪'}`);
   return { started: true, pid: spawned.pid, healthy };
 }
