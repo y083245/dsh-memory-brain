@@ -403,6 +403,7 @@ npm test
 | Windows `start-all.bat` 报「没找到 QQ」 | QQNT 不在默认安装位置。设置 `QQ_BIN`（例如 `set QQ_BIN=C:\Program Files\Tencent\QQNT\QQ.exe`）或写进 `config.json` 的 `orchestrator.qqBin` |
 | Windows 控制台 RAG 开关能点但服务没起 | 看 `%USERPROFILE%\.ai-companion-run\memory-rag.log`；确认 `sidecars\memory-rag\.venv\Scripts\python.exe` 存在，或系统里有 `py` / `python` / `python3`。Windows 没有 systemd，开关通过 PID 文件启停 |
 | 日志出现 `session/model-unavailable: Select an available model` | `config.json` 的 `dsh.provider` 不在当前 DSH 的模型目录里。桌面版 DSH 通常是 `deepseek-account`，npm 全局版常见 `deepseek-official`。新版桥接会自动临时回退到 DSH 目录默认值并提示；按提示改 `dsh.provider` / `dsh.model` 可消除告警 |
+| QQ 已登录，但 SnowLuma 日志没有 `login detected`、OneBot 3000/3001 不起 | 如果 **QQ 先登录、SnowLuma 后启动**，`E:\snowluma\config\runtime.json` 的 `hookAutoLoad` 为 `false` 时不会挂载已运行的 QQ。把它改成 `true` 后重启 SnowLuma；或者先启动 SnowLuma，再登录 QQ |
 
 更多「已知行为」和排查方法见 [完整说明](docs/guides/FULL_GUIDE.md)。
 
