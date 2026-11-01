@@ -35,6 +35,7 @@ else:
 from conftest import (  # noqa: E402  （顺序有意为之：环境变量要先设置）
     FAR_FUTURE, ROOT, T0, FakeEmbedder, write_archive, write_forget_request,
 )
+from conftest import is_under_temp
 
 PRIVATE = "private:111"
 GROUP = "group:900"
@@ -486,7 +487,7 @@ def service(monkeypatch, state):
     monkeypatch.setenv("MEMORY_RAG_STATE_DIR", str(state))
     svc = Service(str(ROOT / "config.yml"), embedder=FakeEmbedder())
     assert svc.cfg["paths"].state == state
-    assert str(svc.cfg["paths"].state).startswith(tempfile.gettempdir())
+    assert is_under_temp(svc.cfg["paths"].state)
     return svc
 
 

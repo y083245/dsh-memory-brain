@@ -34,6 +34,7 @@ else:
 from conftest import (  # noqa: E402  （顺序有意为之：环境变量要先设置）
     FAR_FUTURE, ROOT, FakeEmbedder, tombstone, write_archive, write_forget_request,
 )
+from conftest import is_under_temp
 
 PRIVATE = "private:111"
 GROUP = "group:222"
@@ -112,7 +113,7 @@ def service(monkeypatch, state):
     svc = Service(str(ROOT / "config.yml"), embedder=FakeEmbedder())
     # 必须落在临时目录里：绝不允许读写真实 state/
     assert svc.cfg["paths"].state == state
-    assert str(svc.cfg["paths"].state).startswith(tempfile.gettempdir())
+    assert is_under_temp(svc.cfg["paths"].state)
     return svc
 
 

@@ -38,6 +38,7 @@ else:
 from conftest import (  # noqa: E402  （顺序有意为之：环境变量要先设置）
     FAR_FUTURE, ROOT, T0, FakeEmbedder, close_rag, write_archive, write_persona_config,
 )
+from conftest import is_under_temp
 
 PRIVATE = "private:111"
 GROUP = "group:222"
@@ -150,7 +151,7 @@ def service(monkeypatch, state):
     monkeypatch.setenv("MEMORY_RAG_STATE_DIR", str(state))
     svc = Service(str(ROOT / "config.yml"), embedder=FakeEmbedder())
     assert svc.cfg["paths"].state == state
-    assert str(svc.cfg["paths"].state).startswith(tempfile.gettempdir())
+    assert is_under_temp(svc.cfg["paths"].state)
     yield svc
     # SUGGEST_PATCH：Service 里的 Chroma 客户端和 SQLite 连接用完要关，否则句柄随用例累积
     close_rag(svc)
