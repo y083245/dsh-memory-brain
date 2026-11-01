@@ -560,6 +560,16 @@ async function checkSnowLumaCap(nodeBin, { err, platform = process.platform }) {
   return false;
 }
 
+/**
+ * SnowLuma 启动环境：默认打开 SNOWLUMA_HOOK_AUTOLOAD，让它注入 start-all 刚拉起的 QQ。
+ * 用户已在环境里显式设置（任意非空值）时原样保留。
+ */
+export function snowLumaEnv(env = process.env) {
+  const out = { ...env };
+  if (!String(out.SNOWLUMA_HOOK_AUTOLOAD ?? '').trim()) out.SNOWLUMA_HOOK_AUTOLOAD = '1';
+  return out;
+}
+
 async function startSnowLuma({ paths, log, ok, err, platform }) {
   if (await isPortOpen(SNOW_PORT)) {
     ok(`SnowLuma 已在运行（${SNOW_PORT}）`);
@@ -574,13 +584,18 @@ async function startSnowLuma({ paths, log, ok, err, platform }) {
   const command = launch.kind === 'node' ? paths.nodeBin : path.join(paths.snowDir,
     launch.kind === 'exe' ? 'SnowLuma.exe' : 'launcher.bat');
   const spec = commandSpec(command, launch.args, { platform, env: paths.env, nodeBin: paths.nodeBin });
+  // 启动器要负责让 SnowLuma 注入刚起来的 QQ：`hookAutoLoad` 只看启动那一刻已经存在的
+  // QQ 进程，而这里刚 spawn 的 QQ 往往还在登录窗口。SnowLuma 的 env 覆盖优先于
+  // runtime.json，且不会被它启动时重写掉，所以用 env 打开自动注入；
+  // 用户显式设了 SNOWLUMA_HOOK_AUTOLOAD 就尊重用户的值。
+  const snowEnv = snowLumaEnv(paths.env);
   const pid = await spawnService({
     spec,
     cwd: launch.cwd,
     logFile: path.join(paths.runDir, 'snowluma.log'),
     label: 'SnowLuma',
     log, err, platform,
-    env: paths.env
+    env: snowEnv
   });
   if (!pid) return false;
   writePidFile(path.join(paths.runDir, 'snowluma.pid'), pid);
@@ -762,10 +777,12 @@ export async function runStart({
   log('等待 QQ 登录并打开 OneBot（最多 180 秒）...');
   log('  如果 QQ 弹出扫码窗口，请现在扫码');
   if (!(await waitForPorts(ONEBOT_PORTS, 180))) {
-    err('OneBot 没起来，通常是 QQ 还没登录完');
+    err('OneBot 没起来：要么 QQ 还没登录完，要么 SnowLuma 没注入到 QQ 进程');
     console.error('  1) 看一下 QQ 窗口，扫码/确认登录');
     console.error('  2) 登录完成后重新运行本脚本（已启动的会自动跳过）');
-    console.error(`  3) SnowLuma 日志：${path.join(paths.runDir, 'snowluma.log')}`);
+    console.error('  3) 日志里没有 "[Hook] login detected" 说明 SnowLuma 没挂上 QQ：');
+    console.error('     stop-all.bat 后重新 start-all.bat（本脚本会用 SNOWLUMA_HOOK_AUTOLOAD=1 重启 SnowLuma）');
+    console.error(`  4) SnowLuma 日志：${path.join(paths.runDir, 'snowluma.log')}`);
     for (const line of tailLines(path.join(paths.runDir, 'snowluma.log'))) console.error(`     ${line}`);
     return 1;
   }

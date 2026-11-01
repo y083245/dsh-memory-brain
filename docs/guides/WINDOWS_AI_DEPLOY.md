@@ -106,41 +106,40 @@ node scripts\setup-dsh.mjs
 > 看到这句就先装系统版 Node，或用 `QQ_BRIDGE_NODE_BIN` 指定后再重跑 setup。
 > 同理，`dsh` CLI 不在 PATH 里时可用 `QQ_BRIDGE_DSH_BIN` 指向 `dsh.cmd`。
 
-### 4.2 模型 provider（Windows 桌面版的关键坑）
+### 4.2 模型 provider（配错就完全收不到回复）
 
-桌面版 DSH 的模型目录通常只有：
-
-```text
-provider = deepseek-account
-models   = deepseek-flash / deepseek-v4-pro
-```
-
-而 `config.example.json` 默认是 `deepseek-official`，直接使用会得到：
+`config.json` 的 `dsh.provider` 必须在当前 DSH 的模型目录里，否则会得到：
 
 ```text
 session/model-unavailable: Select an available model before sending a message.
 ```
 
-新版桥接会在 `ensureChatModel()` 里自动读取 DSH `session/modelCatalog`，失败时临时回退到目录默认值并打印：
+**不要照抄文档里的 provider 名字**——它取决于 DSH 装了什么账号/provider。先查（DSH 起好之后）：
 
-```text
-config.json 的 DSH 模型 deepseek-official/deepseek-flash 不在当前 DSH 目录中；本次临时改用 deepseek-account/deepseek-flash
+```bat
+node -e "import('./src/dsh-client.js').then(async m=>{const a=new m.NodeApiClient('http://127.0.0.1:3080');const c=m.unwrap(await a.callUnary('session/modelCatalog',{}),'catalog');console.log(c.default,c.routableProviders)})"
 ```
 
-部署时仍应把 `config.json` 固定成实际 provider：
+本机（2026-11-01，DSH 0.2.1-rc.5 web profile）实测输出：
+
+```text
+{ provider: 'deepseek-official', model: 'deepseek-flash', reasoningEffort: 'max' } [ 'deepseek-official' ]
+```
+
+别的机器常见 `deepseek-account` / `deepseek-flash`。把查到的值写进 `config.json`：
 
 ```jsonc
 "dsh": {
-  "provider": "deepseek-account",
+  "provider": "deepseek-official",
   "model": "deepseek-flash",
   "reasoningEffort": "max"
 }
 ```
 
-也可以让 AI 现场查目录：
+新版桥接会在 `ensureChatModel()` 里读 `session/modelCatalog`，不匹配时临时回退到目录默认值并打印：
 
-```bat
-node -e "import('./src/dsh-client.js').then(async m=>{const a=new m.NodeApiClient('http://127.0.0.1:3080');const c=m.unwrap(await a.callUnary('session/modelCatalog',{}),'catalog');console.log(c.default,c.routableProviders)})"
+```text
+config.json 的 DSH 模型 xxx/yyy 不在当前 DSH 目录中；本次临时改用 <目录默认>/<默认模型>
 ```
 
 ### 4.3 启动 DSH
@@ -155,8 +154,16 @@ dsh web --no-open
 node -e "fetch('http://127.0.0.1:3080').then(r=>console.log(r.status)).catch(e=>console.log('ERR',e.message))"
 ```
 
+> ⚠️ **不要用桌面版 GUI 代替 `dsh web`**：桌面版 GUI 的 API 绑定在**随机端口**上
+> （实测 62662），不监听 3080；桥接只认 `config.json` 的 `dsh.baseUrl`（默认 3080）。
+> 只开 GUI 的结果是控制台 `dshReady:false`、`连接 DSH 事件流…` 后立刻
+> `DSH 事件流已结束（本次收到 0 帧）`。GUI 可以和 `dsh web` 同时开着，互不影响（不同 profile）。
+
 > 桌面版 `dsh.cmd` 是 Electron 启动器（含 `ELECTRON_RUN_AS_NODE=1` 和 `DeepSeek Harness.exe`）。
 > 桥接的 `commandSpec()` 已识别这类垫片并回退 `cmd.exe`；如果手工启动，直接调 `dsh.cmd` 即可。
+> `dsh` 不在 PATH 时不需要手工配：`findDshCli()` 会按
+> PATH → `%ProgramFiles%`/`%LOCALAPPDATA%\Programs` 下的 `DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd`
+> → 各盘 `deepseek-harness\...` 的顺序找；也可用 `QQ_BRIDGE_DSH_BIN` 显式指定。
 
 ---
 
@@ -181,15 +188,21 @@ node -e "import('./src/runtime/process.mjs').then(async m=>console.log(await m.f
 
 1. 解压 `SnowLuma-v*-win-x64-lite.zip` 到例如 `C:\SnowLuma`。
 2. 把已有的 `config` 目录一并放进去（需要保留 `onebot_<QQ号>.json`）。
-3. **如果 QQ 先登录、SnowLuma 后启动**，修改 `C:\SnowLuma\config\runtime.json`：
+3. **自动注入 QQ 只能靠环境变量 `SNOWLUMA_HOOK_AUTOLOAD`，不能改 `config\runtime.json`**：
 
-```json
-{
-  "hookAutoLoad": true
-}
+```bat
+set SNOWLUMA_HOOK_AUTOLOAD=1
+node "C:\SnowLuma\index.mjs"
 ```
 
-否则 SnowLuma 不会注入已经运行的 QQ，OneBot 3000/3001 永远不会起。
+> 实测（2026-11-01，SnowLuma 2.3.3 win-x64-lite）：把 `runtime.json` 的 `hookAutoLoad` 改成
+> `true`，SnowLuma 启动时会把它重写回 `false`，日志里也不会出现
+> `hook auto-load enabled`，QQ 永远挂不上，OneBot 3000/3001 不起。
+> 环境变量优先于 `runtime.json` 且不会被重写，是唯一可靠的启动器侧开关。
+> `start-all.bat` / `scripts/start-all.mjs` 起 SnowLuma 时已经默认注入该变量（用户显式设置则尊重用户值）。
+
+关键是这个开关**只影响启动那一刻之后发现的 QQ 进程**：QQ 先登录、SnowLuma 后启动，必须开着它，
+否则 SnowLuma 不会回头去挂已经运行的 QQ。
 
 4. 启动：
 
@@ -359,9 +372,10 @@ cd sidecars\memory-rag
 
 | 坑 | 现象 | 处理 |
 |---|---|---|
-| DSH provider 不匹配 | `session/model-unavailable`，QQ 完全不回 | 改 `dsh.provider=deepseek-account`；新版桥接也会自动回退并提示 |
+| DSH provider 不匹配 | `session/model-unavailable`，QQ 完全不回 | 按 §4.2 的 `session/modelCatalog` 查到 `default`，改 `dsh.provider` / `dsh.model`；新版桥接也会自动回退并提示 |
 | MCP 全起不来 | DSH 日志只写「MCP 启动失败」 | 多半是 `cordis.patch.yml` 里的 `command` 指向了已被回收的临时/沙箱 node；重装系统 Node 后重跑 `node scripts\setup-dsh.mjs`（脚本会告警） |
-| SnowLuma 不挂已运行 QQ | OneBot 3000/3001 不起 | `hookAutoLoad=true` 后重启 SnowLuma，或先 SnowLuma 后登录 QQ |
+| SnowLuma 不挂 QQ | OneBot 3000/3001 不起；日志只有 `awaiting login` 或什么都没有 | 用 `SNOWLUMA_HOOK_AUTOLOAD=1` 重启 SnowLuma（start-all 已默认注入）；改 `runtime.json` 会被重置，没用 |
+| stop-all 后 start-all 卡在 OneBot | 同上，stop-all 杀了 QQ，新 QQ 没被挂上 | 已修：`start-all` 起 SnowLuma 时注入 `SNOWLUMA_HOOK_AUTOLOAD=1`；仍失败就扫码登录后重跑 start-all |
 | Electron `.cmd` | 手工用 node 跑 `dsh.cmd` 的 JS 会缺 Electron 运行时 | 直接调 `dsh.cmd`；桥接已自动回退 `cmd.exe` |
 | venv 路径 | “找不到 Python / memory-rag 虚拟环境” | 确认 `sidecars\memory-rag\.venv\Scripts\python.exe`；代码已修复传 `.venv` 目录 |
 | 健康超时 | 服务已起但一直“未就绪” | Windows 上 /health 约 4s，代码超时已 10s；旧版本需升级 |

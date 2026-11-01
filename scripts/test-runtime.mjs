@@ -13,7 +13,8 @@ import { spawnDetached, stopPid, isPidAlive, readPidFile, writePidFile } from '.
 import { resolvePython } from '../src/runtime/python.mjs';
 import { commandSpec } from '../src/runtime/commands.mjs';
 import { readRagEnabled, writeRagEnabled, isEmbeddingManaged } from '../src/runtime/rag-config.mjs';
-import { findSnowLumaDir, resolveOrchestratorPaths, defaultQqBin } from '../src/runtime/paths.mjs';
+import { findSnowLumaDir, resolveOrchestratorPaths, defaultQqBin, findDshCli } from '../src/runtime/paths.mjs';
+import { snowLumaEnv } from '../src/runtime/orchestrator.mjs';
 import { looksEphemeralNode, resolveStableNode } from '../src/runtime/node-bin.mjs';
 import { fetchHealth } from '../src/runtime/rag-services.mjs';
 import { createWindowsRagManager } from '../src/process-manager.mjs';
@@ -317,6 +318,66 @@ await test('findSnowLumaDir：解压到其它盘（D:\\SnowLuma）也能找到',
     fsImpl
   });
   assert.equal(found, 'D:\\SnowLuma');
+});
+
+await test('findDshCli：QQ_BRIDGE_DSH_BIN 显式指定原样返回（允许裸命令名）', () => {
+  assert.equal(findDshCli({ platform: 'win32', env: { QQ_BRIDGE_DSH_BIN: 'dsh-custom' }, fsImpl: fakeFs([], []) }), 'dsh-custom');
+});
+
+await test('findDshCli：PATH 里没有 dsh 时按桌面版标准安装目录找到', () => {
+  const cli = 'C:\\Program Files\\DeepSeek Harness\\resources\\runtime\\cli\\bin\\dsh.cmd';
+  const fsImpl = fakeFs([cli], ['C:\\', 'C:\\Program Files']);
+  const found = findDshCli({
+    platform: 'win32',
+    env: { ProgramFiles: 'C:\\Program Files' },
+    home: 'C:\\Users\\me',
+    fsImpl
+  });
+  assert.equal(found, cli);
+});
+
+await test('findDshCli：便携版装在非系统盘（E:\\deepseek-harness）也能找到', () => {
+  const cli = 'E:\\deepseek-harness\\resources\\runtime\\cli\\bin\\dsh.cmd';
+  const fsImpl = fakeFs([cli], ['C:\\', 'E:\\']);
+  const found = findDshCli({
+    platform: 'win32',
+    env: { SystemDrive: 'C:' },
+    home: 'C:\\Users\\me',
+    fsImpl
+  });
+  assert.equal(found, cli);
+});
+
+await test('findDshCli：确实找不到时返回空串，交给调用方回退裸命令名', () => {
+  assert.equal(findDshCli({ platform: 'win32', env: {}, home: 'C:\\Users\\me', fsImpl: fakeFs([], []) }), '');
+});
+
+await test('resolveOrchestratorPaths：默认 dshCommand 用找到的桌面版 CLI，并带 --no-open', () => {
+  const root = tempDir('repo-dsh');
+  const cli = 'C:\\Program Files\\DeepSeek Harness\\resources\\runtime\\cli\\bin\\dsh.cmd';
+  const fsImpl = fakeFs([cli], [root, 'C:\\', 'C:\\Program Files']);
+  const paths = resolveOrchestratorPaths({
+    root,
+    env: { ProgramFiles: 'C:\\Program Files' },
+    home: root,
+    platform: 'win32',
+    fsImpl
+  });
+  assert.equal(paths.dshCommand.command, cli);
+  assert.deepEqual(paths.dshCommand.args, ['web', '--no-open']);
+});
+
+await test('snowLumaEnv：启动 SnowLuma 时默认打开自动注入（否则 start-all 刚拉起的 QQ 不会被挂上）', () => {
+  const env = snowLumaEnv({ PATH: 'x' });
+  assert.equal(env.SNOWLUMA_HOOK_AUTOLOAD, '1');
+  assert.equal(env.PATH, 'x');
+});
+
+await test('snowLumaEnv：用户显式设置的值（包括关闭）原样保留', () => {
+  assert.equal(snowLumaEnv({ SNOWLUMA_HOOK_AUTOLOAD: '0' }).SNOWLUMA_HOOK_AUTOLOAD, '0');
+  assert.equal(snowLumaEnv({ SNOWLUMA_HOOK_AUTOLOAD: 'false' }).SNOWLUMA_HOOK_AUTOLOAD, 'false');
+  // 空串等于没设，按默认打开。
+  assert.equal(snowLumaEnv({ SNOWLUMA_HOOK_AUTOLOAD: '  ' }).SNOWLUMA_HOOK_AUTOLOAD, '1');
 });
 
 for (const entry of fs.readdirSync(ROOT)) {

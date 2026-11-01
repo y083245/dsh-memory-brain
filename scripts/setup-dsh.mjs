@@ -22,6 +22,7 @@ import yaml from 'js-yaml';
 import { BUNDLE_DIR, PRESETS, buildPatches, patchFileFor } from './build-agent-preset-patches.mjs';
 import { commandSpec, findExecutable } from '../src/runtime/commands.mjs';
 import { resolveStableNode } from '../src/runtime/node-bin.mjs';
+import { findDshCli } from '../src/runtime/paths.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '..');
@@ -346,9 +347,11 @@ function autoInstallProfileBundles() {
     return;
   }
   // 不再硬编码 'dsh.cmd'：dsh 可能装在非 PATH 目录、也可能是原生 dsh.exe。
-  // QQ_BRIDGE_DSH_BIN 允许显式指定，其余交给 commandSpec 处理 Windows 的 .cmd 垫片
+  // QQ_BRIDGE_DSH_BIN 允许显式指定；否则 findDshCli 会按 PATH → 桌面版标准安装目录 →
+  // 各盘便携目录的顺序找（桌面版装完不加 PATH 是常态）。
+  // 找到之后交给 commandSpec 处理 Windows 的 .cmd 垫片
   // （Electron 启动器回退 cmd.exe，普通 npm 垫片解析成 node + JS）。
-  const dshName = String(process.env.QQ_BRIDGE_DSH_BIN ?? '').trim() || 'dsh';
+  const dshName = findDshCli({ env: process.env }) || 'dsh';
   let spec;
   try {
     spec = commandSpec(dshName, ['plugin', '--profile', PROFILE, 'install'], { env: process.env });

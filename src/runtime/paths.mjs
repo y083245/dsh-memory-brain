@@ -126,6 +126,43 @@ export function defaultQqBin({ platform = process.platform, env = process.env, f
   return candidates.find((file) => isFile(file, fsImpl)) || candidates[0] || '';
 }
 
+/**
+ * 找 dsh CLI。
+ *
+ * 为什么不能只用 `findExecutable('dsh')`：桌面版装完后 `dsh` **不一定**在 PATH 里
+ * （本机是用户手工把 `resources\runtime\cli\bin` 加进去的）。在没有 PATH 条目的机器上，
+ * setup-dsh 只能打印「请手动执行」，start-all 直接报「找不到 DSH 启动命令」——
+ * 而这恰恰是照文档装桌面版的用户的默认状态。
+ *
+ * 顺序：QQ_BRIDGE_DSH_BIN 显式指定 > PATH > 桌面版标准安装目录 > 各盘的便携目录。
+ * 显式指定原样返回（允许是裸命令名），其余只返回确实存在的文件；都没有返回 ''。
+ */
+export function findDshCli({ env = process.env, platform = process.platform, home = os.homedir(), fsImpl = fs } = {}) {
+  const explicit = String(env.QQ_BRIDGE_DSH_BIN ?? '').trim();
+  if (explicit) return explicit;
+  const fromPath = findExecutable('dsh', { env, platform, fsImpl });
+  if (fromPath) return fromPath;
+  if (platform !== 'win32') return '';
+
+  const bin = (root) => path.win32.join(root, 'DeepSeek Harness', 'resources', 'runtime', 'cli', 'bin', 'dsh.cmd');
+  const candidates = [];
+  for (const key of ['ProgramW6432', 'ProgramFiles', 'ProgramFiles(x86)']) {
+    if (env[key]) candidates.push(bin(env[key]));
+  }
+  if (env.LOCALAPPDATA) {
+    // Electron 安装器的默认落点（用户级安装）。
+    candidates.push(bin(path.win32.join(env.LOCALAPPDATA, 'Programs')));
+    candidates.push(bin(env.LOCALAPPDATA));
+  }
+  if (env.APPDATA) candidates.push(path.win32.join(env.APPDATA, 'npm', 'dsh.cmd'));
+  // 开发/绿色版目录（本机就是 <盘>:\deepseek-harness）。
+  for (const drive of drivesToProbe({ env, platform, fsImpl })) {
+    candidates.push(`${drive}:\\deepseek-harness\\resources\\runtime\\cli\\bin\\dsh.cmd`);
+  }
+  candidates.push(path.join(home, 'deepseek-harness', 'resources', 'runtime', 'cli', 'bin', 'dsh.cmd'));
+  return candidates.find((file) => isFile(file, fsImpl)) || '';
+}
+
 function defaultEmbedBin({ platform, home, fsImpl }) {
   const exe = platform === 'win32' ? 'llama-server.exe' : 'llama-server';
   const candidates = [
@@ -186,10 +223,13 @@ export function resolveOrchestratorPaths({
   if (custom.length) {
     dshCommand = { command: custom[0], args: custom.slice(1), cwd: isDir(dshDir, fsImpl) ? dshDir : root };
   } else if (isFile(path.join(dshDir, 'package.json'), fsImpl)) {
-    dshCommand = { command: pnpmBin, args: ['dsh', 'web'], cwd: dshDir };
+    dshCommand = { command: pnpmBin, args: ['dsh', 'web', '--no-open'], cwd: dshDir };
   } else {
-    // 全局安装的 dsh（Windows 上通常是 dsh.cmd；commandSpec 会解析成 node + JS 入口）。
-    dshCommand = { command: 'dsh', args: ['web'], cwd: root };
+    // 全局安装 / 桌面版自带的 dsh CLI（Windows 上通常是 dsh.cmd；commandSpec 会解析成
+    // node + JS 入口或回退 cmd.exe）。桌面版 API 端口是随机的，桥接只认 3080，
+    // 所以这里走 `dsh web` 而不是「让用户打开桌面版 GUI」。
+    // `--no-open` 避免每次编排都在浏览器里弹一个窗口。
+    dshCommand = { command: findDshCli({ env, platform, home, fsImpl }) || 'dsh', args: ['web', '--no-open'], cwd: root };
   }
 
   return {

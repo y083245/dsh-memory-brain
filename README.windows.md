@@ -4,6 +4,8 @@
 > Linux（systemd）部署请看主 [README.md](README.md)。
 
 > 🤖 **让 AI 帮你部署**：把 [docs/guides/WINDOWS_AI_DEPLOY.md](docs/guides/WINDOWS_AI_DEPLOY.md) 这份文档发给 AI，里面写了完整命令、验证方法和部署注意事项。
+>
+> 🧰 **想自己一步步手动起每个服务**（不用 start-all.bat，每个服务一个窗口，方便看日志）：看 [docs/guides/WINDOWS_MANUAL_DEPLOY.md](docs/guides/WINDOWS_MANUAL_DEPLOY.md)。
 
 ---
 
@@ -22,16 +24,28 @@
 
 ## 二、按顺序安装
 
-### 1. 打开 DSH
+### 1. 启动 DSH 的 Web 服务
 
-桌面版直接打开 DeepSeek Harness；或者用命令行：
+**桥接连的是 `dsh web`（固定 <http://127.0.0.1:3080>），不是桌面版 GUI 窗口。**
+桌面版 GUI 虽然也在本机跑一个 API，但端口**每次启动都随机**（实测见过 62662），
+桥接不会去猜，所以只开 GUI 会出现「控制台 `dshReady: false`、QQ 不回」。
+
+二选一：
 
 ```bat
+rem 方式 A：桌面版已经装了，直接用自带的 CLI（路径不用手动配）
+dsh web --no-open
+
+rem 方式 B：没装桌面版，全局安装
 npm install -g @deepseek-ai/dsh@0.2.1-rc.3
 dsh web --no-open
 ```
 
 浏览器打开 <http://127.0.0.1:3080>，在「设置 → 模型」里填 DeepSeek API 密钥。这个窗口保持开着。
+
+> 如果 `dsh` 不在 PATH 里（桌面版安装器通常不会加），`start-all.bat` 和
+> `setup-dsh` 会自动去 `%ProgramFiles%\DeepSeek Harness\resources\runtime\cli\bin\`
+> 和各盘的 `deepseek-harness\...` 里找；也可以用 `QQ_BRIDGE_DSH_BIN` / `DSH_DIR` 指定。
 
 ### 2. 登录 QQ 和 SnowLuma
 
@@ -40,7 +54,13 @@ dsh web --no-open
 3. 浏览器打开 SnowLuma WebUI（一般是 <http://127.0.0.1:5099>），按引导同意条款、改密码、接入 QQ。
 4. 在 OneBot 设置里开启 **WebSocket 服务端（3001）** 和 **HTTP API（3000）**。
 
-> ⚠️ 如果 **QQ 先登录、SnowLuma 后启动**，请把 `C:\SnowLuma\config\runtime.json` 里的 `hookAutoLoad` 改成 `true`，否则 SnowLuma 不会挂载已经运行的 QQ。
+> ⚠️ SnowLuma 只会在启动那一刻去挂**已经存在**的 QQ。QQ 先登录、SnowLuma 后启动时，
+> 要么在启动 SnowLuma 前设 `set SNOWLUMA_HOOK_AUTOLOAD=1`，要么直接在 WebUI 的自动化设置里
+> 打开自动注入。
+>
+> **别去改 `config\runtime.json` 的 `hookAutoLoad`**：实测 SnowLuma 启动时会把这个文件重置写回
+> 默认值，改了不生效。`start-all.bat` 起 SnowLuma 时已经自动带上 `SNOWLUMA_HOOK_AUTOLOAD=1`，
+> 一键启动不需要你操心。
 
 ### 3. 安装本项目
 
@@ -159,8 +179,9 @@ node scripts\setup-dsh.mjs
 
 | 现象 | 处理 |
 |---|---|
-| 日志出现 `session/model-unavailable` | 桌面版 DSH 的 provider 通常是 `deepseek-account`，把 `config.json` 的 `dsh.provider` 改成它；新版桥接会自动临时回退并提示 |
-| QQ 已登录，但 OneBot 3000/3001 不起 | SnowLuma 的 `hookAutoLoad` 改为 `true` 后重启 SnowLuma，或先启动 SnowLuma 再登录 QQ |
+| 日志出现 `session/model-unavailable` | `config.json` 的 provider/model 不在当前 DSH 的模型目录里。用 `session/modelCatalog` 查到的 `default` 为准（本机实测 `deepseek-official/deepseek-flash`，其它机器常见 `deepseek-account`）；新版桥接会自动临时回退并提示 |
+| 控制台 `dshReady: false`，3080 没在监听 | 只开了 DSH 桌面版 GUI：它的 API 端口每次随机，桥接只认 3080。改用 `dsh web --no-open`，或让 `start-all.bat` 起 |
+| QQ 已登录，但 OneBot 3000/3001 不起 | SnowLuma 没挂上 QQ。日志里没有 `[Hook] login detected` 就是这个原因：`stop-all.bat` 后重跑 `start-all.bat`（会用 `SNOWLUMA_HOOK_AUTOLOAD=1` 重启 SnowLuma）。改 `runtime.json` 无效，它会被重置 |
 | `start-all.bat` 报找不到 QQ | 新版会自己找 Program Files / LocalAppData / C:–H: 各盘的 `QQ`、`Tencent\QQNT`；装在别处就设 `QQ_BIN`，例如 `set QQ_BIN=C:\Program Files\Tencent\QQNT\QQ.exe`，或写进 `config.json` 的 `orchestrator.qqBin` |
 | `start-all.bat` 报找不到 SnowLuma | 设 `SNOW_DIR` 或 `config.json` 的 `orchestrator.snowDir` 指向解压目录（内含 `index.mjs` / `SnowLuma.exe`） |
 | 启动直接说「缺少配置文件」 | 还没复制示例：`copy config.example.json config.json`，再填 `ownerQQ` 与 `allow.private` |
