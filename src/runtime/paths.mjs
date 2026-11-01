@@ -58,6 +58,8 @@ export function findSnowLumaDir({ home = os.homedir(), platform = process.platfo
   const bases = [];
   if (env.SNOWLUMA_HOME) bases.push(env.SNOWLUMA_HOME);
   bases.push(path.join(home, 'snowluma'), path.join(home, 'SnowLuma'));
+  // Windows 文档里的常见解压位置是 C:\SnowLuma（盘符取当前 home 所在盘）。
+  if (platform === 'win32') bases.push(path.join(path.parse(home).root, 'SnowLuma'));
   const found = [];
   for (const base of bases) {
     if (inspectSnowLuma(base, { platform, fsImpl })) found.push(base);
@@ -123,8 +125,10 @@ export function resolveOrchestratorPaths({
   const gsvDir = pick('GSV_DIR', 'gsvDir', path.join(home, 'gpt-sovits'));
   const embedBin = pick('EMBED_BIN', 'embedBin', defaultEmbedBin({ platform, home, fsImpl }));
   const embedModel = pick('EMBED_MODEL', 'embedModel', path.join(home, 'models', 'Qwen3-Embedding-8B-Q8_0.gguf'));
-  const nodeBin = pick('NODE_BIN', 'nodeBin', execPath);
-  const pnpmBin = pick('PNPM_BIN', 'pnpmBin', findExecutable('pnpm', { env, platform, fsImpl }) || 'pnpm');
+  const rawNodeBin = pick('NODE_BIN', 'nodeBin', execPath);
+  const nodeBin = path.isAbsolute(rawNodeBin) ? rawNodeBin : (findExecutable(rawNodeBin, { env, platform, fsImpl }) || rawNodeBin);
+  const rawPnpmBin = pick('PNPM_BIN', 'pnpmBin', findExecutable('pnpm', { env, platform, fsImpl }) || 'pnpm');
+  const pnpmBin = path.isAbsolute(rawPnpmBin) ? rawPnpmBin : (findExecutable(rawPnpmBin, { env, platform, fsImpl }) || rawPnpmBin);
   const ragDir = path.join(root, 'sidecars', 'memory-rag');
 
   const snowLaunch = inspectSnowLuma(snowDir, { platform, fsImpl });
