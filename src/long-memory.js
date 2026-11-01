@@ -980,7 +980,9 @@ export function createLongMemory({ stateDir, redact = (s) => s, log = () => {}, 
     // 行号要单独记（空行、坏行也占行号），debug.hits 需要它。
     const rows = [];
     for (const f of archiveFiles(key)) {
-      const rel = path.relative(ARCHIVE_DIR, f);
+      // debug.hits / memory-rag / rowsAt 的引用口径统一是 POSIX 风格的相对路径；
+      // Windows 的 path.relative 会给反斜杠，不归一的话 reviewHistoryHits 永远找不到行。
+      const rel = path.relative(ARCHIVE_DIR, f).split(path.sep).join('/');
       const lines = fs.readFileSync(f, 'utf8').split('\n');
       for (let n = 0; n < lines.length; n += 1) {
         if (!lines[n]) continue;

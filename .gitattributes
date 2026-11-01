@@ -1,0 +1,13 @@
+# 统一换行：源码/脚本/文档在 Linux 与 Windows 上都按 LF 检出。
+# 为什么必须显式声明：Windows 默认 core.autocrlf=true，没有这个文件时 .sh 会被检出成
+# CRLF（Git Bash 执行时报 `$'\r': command not found`），生成器写 LF 再与磁盘逐字节比较的
+# 测试（test-agent-preset-patches）也会失败。
+* text=auto eol=lf
+
+# 批处理必须保持 CRLF：cmd.exe 对 LF-only 的 .bat/.cmd 行为不稳定，且
+# test-audit-setup-guards 会结构级断言 start.bat 的 CRLF。
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 图片等二进制由 text=auto 自动识别，这里只显式钉住已知二进制。
+*.png binary

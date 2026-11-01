@@ -7,37 +7,27 @@
 // 桥接里只留接线，规则全在这里。
 //
 // 安全纪律（非常重要）：
-//   - 启停只走 `execFile`（固定参数、不经 shell、不拼用户输入），单元名与脚本名都写死。
+//   - 启停只走注入的 execFile / 进程管理器（固定参数、不经 shell、不拼用户输入），
+//     单元名与脚本名都写死。
 //   - `execFile` 是**注入**的：测试一律用假的；默认实现 `defaultRagExec` 在
 //     `QQB_NO_SYSTEMCTL=1` 时直接返回失败，**一个子进程都不 spawn**——防止测试路径误停线上服务。
 //   - 任何异常都不冒到桥接进程外面：后台任务的失败只记进 reason，状态由下一次 state() 现算。
+//
+// Windows 没有 systemd：createProcessManager 会选 PID 实现（detached spawn + ~/.ai-companion-run/*.pid，
+// 停止时 taskkill /T）。Linux 仍走原来的 systemd / start-all.sh 两条路。
 import { execFile as nodeExecFile } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { createProcessManager } from './process-manager.mjs';
+import { EMBEDDING_UNIT, MEMORY_RAG_UNIT, STEP } from './rag-constants.js';
 
-// 单元名写死：绝不接受外部传入的单元名（§3.4）。
-export const MEMORY_RAG_UNIT = 'qq-memory-rag';
-export const EMBEDDING_UNIT = 'qq-embedding';
+export { EMBEDDING_UNIT, MEMORY_RAG_UNIT, STEP };
 
 const DEFAULT_RAG_URL = 'http://127.0.0.1:8093';
-const DEFAULT_EMBEDDING_URL = 'http://127.0.0.1:8091';
 const HEALTH_TIMEOUT_MS = 150000; // 与 embedding 单元的 TimeoutStartSec 一致（§3.2）
 const HEALTH_POLL_MS = 2000; // 规格 §3.2：每 2 秒查一次
 const HEALTH_REQUEST_TIMEOUT_MS = 3000;
 const EMBED_LOG_TAIL_BYTES = 4096;
-// APIHUB_PATCH：`systemctl stop` 要等单元把进程收干净（llama-server 卸模型可能要几十秒），
-// 20 秒的默认超时会被打断，给到 60 秒。
-const STOP_TIMEOUT_MS = 60000;
-// APIHUB_PATCH：script 模式要跑完整个 start-all.sh / stop-all.sh --rag（里面还会等健康），
-// 180 秒内没结束才当作失败。
-const SCRIPT_TIMEOUT_MS = 180000;
-
-export const STEP = Object.freeze({
-  startEmbedding: '正在启动向量模型（qq-embedding）…',
-  startRag: '正在启动 memory-rag…',
-  wait: '正在等待服务就绪…',
-  stop: '正在停止…'
-});
 
 /**
  * 默认的 `execFile`：跑一条命令，把结果归一成 `{ code, stdout, stderr }`，**不抛**。
@@ -71,14 +61,6 @@ function clampInt(value, min, max, fallback) {
   return Math.min(max, Math.max(min, Math.round(n)));
 }
 
-function pad2(n) { return String(n).padStart(2, '0'); }
-
-/** systemd-run 的 unit 名用本地时间戳（规格 §3.4：qqb-rag-YYYYmmddHHMMSS）。 */
-function localStamp(ms) {
-  const d = new Date(ms);
-  return `${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}${pad2(d.getHours())}${pad2(d.getMinutes())}${pad2(d.getSeconds())}`;
-}
-
 /** 忙时抛的错（路由据 `.code === 'busy'` 回 409）。 */
 function busyError() {
   const error = new Error('正在启停向量记忆，请稍候');
@@ -88,9 +70,9 @@ function busyError() {
 
 /**
  * @param {object} deps
- * @param {string} deps.root          仓库根（找 start-all.sh / stop-all.sh）
+ * @param {string} deps.root          仓库根（Linux script 模式找 start-all.sh / stop-all.sh）
  * @param {string} deps.stateDir      state/
- * @param {string} deps.runDir        ~/.ai-companion-run（读 embed.log）
+ * @param {string} deps.runDir        ~/.ai-companion-run（读 embed.log / PID 文件）
  * @param {() => boolean} deps.readEnabled   启动时读一次 config.json 的 memoryRag.enabled
  * @param {(v:boolean) => void} deps.writeEnabled 写回；失败抛错
  * @param {(cmd:string,args:string[],opts?:object) => Promise<{code:number,stdout:string,stderr:string}>} deps.execFile
@@ -98,6 +80,8 @@ function busyError() {
  * @param {() => string} deps.embeddingKind  'bundled'|'local'|'cloud'|'legacy-local'|'legacy-api'
  * @param {string} [deps.ragUrl]      memory-rag 地址（桥接从 config.json 的 memoryRag.url 传）
  * @param {object} [deps.rag]         memory-rag 客户端（只用于 rebuild()）
+ * @param {string} [deps.platform]    默认 process.platform；测试可显式传 'linux' / 'win32'
+ * @param {object} [deps.manager]     测试可注入的进程管理器；默认按平台创建
  * @param {number} [deps.healthTimeoutMs] / [deps.healthPollMs]  测试用可控时钟
  */
 export function createRagControl({
@@ -113,6 +97,9 @@ export function createRagControl({
   rag = null,
   log = () => {},
   now = Date.now,
+  platform = process.platform,
+  manager = null,
+  paths = null,
   healthTimeoutMs = HEALTH_TIMEOUT_MS,
   healthPollMs = HEALTH_POLL_MS
 } = {}) {
@@ -125,23 +112,21 @@ export function createRagControl({
   let busyOp = null; // null | 'start' | 'stop' | 'save-embedding'
   let step = null;
 
-  let modeCache = null; // 'systemd' | 'script'，缓存到桥接重启
-  let systemdRunCache = null;
+  let modeCache = null; // 'systemd' | 'script' | 'pid'，缓存到桥接重启
 
   const timeoutMs = clampInt(healthTimeoutMs, 1, 600000, HEALTH_TIMEOUT_MS);
   const pollMs = clampInt(healthPollMs, 1, 60000, HEALTH_POLL_MS);
 
-  // APIHUB_PATCH：opts 透传给注入的 execFile（defaultRagExec 里 `{ timeout: 20000, ...opts }`
-  // 允许按命令覆盖超时）；start / restart 走 `--no-block`，不等单元真正就绪。
-  async function run(cmd, args = [], opts = {}) {
-    try {
-      const result = await execFile(cmd, args, opts);
-      if (!result || typeof result !== 'object') return { code: 1, stdout: '', stderr: '' };
-      return { code: Number(result.code) || 0, stdout: String(result.stdout ?? ''), stderr: String(result.stderr ?? '') };
-    } catch {
-      return { code: 1, stdout: '', stderr: '' };
-    }
-  }
+  const processManager = manager ?? createProcessManager({
+    platform,
+    root,
+    runDir,
+    paths,
+    execFile,
+    fetchImpl,
+    now,
+    log
+  });
 
   const managed = () => {
     const kind = kindOf();
@@ -154,16 +139,8 @@ export function createRagControl({
 
   async function detectMode() {
     if (modeCache) return modeCache;
-    const r = await run('systemctl', ['--user', 'cat', MEMORY_RAG_UNIT]);
-    modeCache = r.code === 0 ? 'systemd' : 'script';
+    try { modeCache = await processManager.detectMode(); } catch { modeCache = platform === 'win32' ? 'pid' : 'script'; }
     return modeCache;
-  }
-
-  async function hasSystemdRun() {
-    if (systemdRunCache !== null) return systemdRunCache;
-    const r = await run('systemd-run', ['--version']);
-    systemdRunCache = r.code === 0;
-    return systemdRunCache;
   }
 
   function withTimeout(signalMs) {
@@ -182,20 +159,6 @@ export function createRagControl({
       return data && typeof data === 'object' && !Array.isArray(data) ? data : null;
     } catch {
       return null;
-    }
-  }
-
-  /** 自带模式在 script 部署里没有单元可问，只能看 :8091 的健康（llama-server 自带 /health）。 */
-  async function embeddingReachable() {
-    if (typeof fetchImpl !== 'function') return false;
-    try {
-      const response = await fetchImpl(`${DEFAULT_EMBEDDING_URL}/health`, {
-        method: 'GET',
-        signal: withTimeout(2000)
-      });
-      return !!response && !!response.ok;
-    } catch {
-      return false;
     }
   }
 
@@ -223,15 +186,13 @@ export function createRagControl({
     }
   }
 
-  /** 单元是否在跑（script 模式没有单元：memory-rag 看健康、embedding 看 :8091）。 */
+  /** 单元是否在跑（具体判断交给进程管理器：systemd / 健康 / PID 文件）。 */
   async function unitStatus(unit, health, mode) {
-    if (mode === 'systemd') {
-      const r = await run('systemctl', ['--user', 'is-active', unit]);
-      const state = String(r.stdout ?? '').trim();
-      return { active: r.code === 0, state };
+    try {
+      return await processManager.status(unit, health, mode);
+    } catch {
+      return { active: false, state: '' };
     }
-    if (unit === MEMORY_RAG_UNIT) return { active: !!health, state: health ? 'active' : '' };
-    return { active: await embeddingReachable(), state: '' };
   }
 
   /** 现算状态（规格 §3.1 / 接口约定 §4.1 的判定顺序，第一条命中即定）。 */
@@ -332,53 +293,16 @@ export function createRagControl({
     }
   }
 
-  async function runScript(name) {
-    const script = path.join(root, name);
-    const args = ['--rag'];
-    if (await hasSystemdRun()) {
-      // 套一层 scope：拉起的进程不落在桥接自己的 cgroup 里，桥接重启时不会被带走（坑 21）。
-      const unit = `qqb-rag-${localStamp(now())}`;
-      return run('systemd-run', ['--user', '--scope', '--collect', `--unit=${unit}`, script, ...args], { timeout: SCRIPT_TIMEOUT_MS });
-    }
-    return run(script, args, { timeout: SCRIPT_TIMEOUT_MS });
-  }
-
   async function doStart() {
-    const mode = await detectMode();
-    if (mode === 'script') {
-      step = STEP.startRag;
-      await runScript('start-all.sh');
-      step = STEP.wait;
-      await waitHealthy();
-      return;
-    }
-    if (managed()) {
-      step = STEP.startEmbedding;
-      await run('systemctl', ['--user', 'reset-failed', EMBEDDING_UNIT]);
-      // ExecCondition 不满足时单元会自己回到 inactive（不报错），继续起 memory-rag，
-      // 状态最终由 state() 判成 partial —— 这正是规格 §3.2 第 3 条。
-      // APIHUB_PATCH：`--no-block` —— qq-embedding 的 ExecStartPost 要等模型加载完（最长约 150 秒），
-      // 阻塞式 start 会被 20 秒超时打断，结果码是假的失败，后面的命令也跟着卡。就绪与否全靠 waitHealthy()。
-      await run('systemctl', ['--user', '--no-block', 'start', EMBEDDING_UNIT]);
-    }
     step = STEP.startRag;
-    await run('systemctl', ['--user', 'reset-failed', MEMORY_RAG_UNIT]);
-    await run('systemctl', ['--user', '--no-block', 'start', MEMORY_RAG_UNIT]);
+    await processManager.start({ managed: managed(), onStep: (value) => { step = value; } });
     step = STEP.wait;
     await waitHealthy();
   }
 
   async function doStop() {
-    const mode = await detectMode();
     step = STEP.stop;
-    if (mode === 'script') {
-      await runScript('stop-all.sh');
-      return;
-    }
-    // 停要阻塞（脚本退出后 state() 才能读到真实状态），所以只放宽超时，不加 --no-block。
-    await run('systemctl', ['--user', 'stop', MEMORY_RAG_UNIT], { timeout: STOP_TIMEOUT_MS });
-    // 「自己部署的本地服务」/ 云端模式不碰 qq-embedding（§3.2 关闭第 3 条）。
-    if (managed()) await run('systemctl', ['--user', 'stop', EMBEDDING_UNIT], { timeout: STOP_TIMEOUT_MS });
+    await processManager.stop({ managed: managed(), onStep: (value) => { step = value; } });
   }
 
   /**
@@ -427,31 +351,13 @@ export function createRagControl({
    * 调用方已经在 withLock 里，这里不再拿锁。
    */
   async function restartMemoryRag({ embeddingBefore, embeddingAfter } = {}) {
-    const mode = await detectMode();
     const beforeManaged = embeddingBefore === 'bundled' || embeddingBefore === 'legacy-local';
     const afterManaged = embeddingAfter === 'bundled' || embeddingAfter === 'legacy-local';
-    if (mode === 'script') {
-      step = STEP.stop;
-      await runScript('stop-all.sh');
-      step = STEP.startRag;
-      await runScript('start-all.sh');
-      step = STEP.wait;
-      await waitHealthy();
-      return;
-    }
-    if (afterManaged && !beforeManaged) {
-      step = STEP.startEmbedding;
-      await run('systemctl', ['--user', 'reset-failed', EMBEDDING_UNIT]);
-      // APIHUB_PATCH：同上 —— 起 embedding 不等就绪，`--no-block`。
-      await run('systemctl', ['--user', '--no-block', 'start', EMBEDDING_UNIT]);
-    } else if (!afterManaged && beforeManaged) {
-      step = STEP.stop;
-      await run('systemctl', ['--user', 'stop', EMBEDDING_UNIT], { timeout: STOP_TIMEOUT_MS });
-    }
-    step = STEP.startRag;
-    await run('systemctl', ['--user', 'reset-failed', MEMORY_RAG_UNIT]);
-    // APIHUB_PATCH：restart 也加 `--no-block`，就绪由后面的 waitHealthy() 判断。
-    await run('systemctl', ['--user', '--no-block', 'restart', MEMORY_RAG_UNIT]);
+    await processManager.restart({
+      beforeManaged,
+      afterManaged,
+      onStep: (value) => { step = value; }
+    });
     step = STEP.wait;
     await waitHealthy();
   }
@@ -461,11 +367,13 @@ export function createRagControl({
     return rag ? rag.rebuild() : Promise.resolve(null);
   }
 
-  /** 单元装没装（控制台显示 bundled 的「已安装」）。 */
+  /** 单元装没装（控制台显示 bundled 的「已安装」；Windows 的 PID 模式恒为 false）。 */
   async function unitInstalled(unit) {
-    const name = unit === EMBEDDING_UNIT ? EMBEDDING_UNIT : MEMORY_RAG_UNIT;
-    const r = await run('systemctl', ['--user', 'cat', name]);
-    return r.code === 0;
+    try {
+      return await processManager.installed(unit);
+    } catch {
+      return false;
+    }
   }
 
   return {

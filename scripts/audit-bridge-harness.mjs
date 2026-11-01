@@ -42,6 +42,7 @@ import { createDailyReport, isErrorLine, dayOf } from '../src/daily-report.js';
 // APIHUB_PATCH：RAG 总开关与「API 管理」后端（bridge.js 顶层 import，同样要注入）。
 // defaultRagExec 一定要换成下面的替身：真实现会调 `systemctl --user`，在这台机器上会停掉线上 RAG。
 import { createRagControl } from '../src/rag-control.js';
+import { isPortOpen } from '../src/runtime/ports.mjs';
 import { createApiHub, readEmbeddingKind } from '../src/api-hub.js';
 import * as dshCredentials from '../src/dsh-credentials.js';
 
@@ -235,8 +236,8 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
   const context = vm.createContext({
     fs, os, path, http, crypto, fileURLToPath, URL, Buffer, AbortSignal, console: { log() {}, error() {} },
     fetch: fakeFetch,
-    // 锁文件探测用（bridge.js 顶层的 consolePortInUse）；
-    // 固定桩掉：测试不应该真去 netstat 宿主机。
+    // 锁文件探测用（bridge.js 顶层的 consolePortInUse）；固定桩掉，测试不连宿主机的端口。
+    isPortOpen: async () => false,
     execFileSync: () => '',
     // process 桩要带 env：voice-core / bridge 会读 process.env.FFMPEG_PATH、FFPROBE_PATH 等。
     // 之前只给 pid/platform/kill/exit，导致 `process.env.FFMPEG_PATH` 直接抛 TypeError。
@@ -256,7 +257,10 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     createMemoryDecay,
     createDailyReport, isErrorLine, dayOf,
     // APIHUB_PATCH：RAG 开关 / API 管理 / DSH 凭据（bridge.js 顶层 import；默认 execFile 换替身）。
-    createRagControl, defaultRagExec: fakeRagExec, createApiHub, readEmbeddingKind, dshCredentials,
+    // 这些用例验证的是 systemd / script 编排；显式固定成 Linux，避免在 Windows 宿主上
+    // 选到 PID 进程管理器、绕过假 execFile 的断言。
+    createRagControl: (options = {}) => createRagControl({ ...options, platform: 'linux' }),
+    defaultRagExec: fakeRagExec, createApiHub, readEmbeddingKind, dshCredentials,
     ...markdown, ...sensitive, ...wait, ...safeFetch, ...forward, ...slang, ...sticker,
     ...modelPrices, ...tokenLedger, ...voiceLib, ...stateAcl, ...presetPrompt,
     // 桥接的出图出口会调归一化（体积/动图抽帧）：VM 里必须能拿到这几个函数。

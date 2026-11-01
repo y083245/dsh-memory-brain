@@ -69,6 +69,9 @@ function makeCtl(overrides = {}) {
       root,
       stateDir,
       runDir,
+      // 这些用例验证的是 Linux 的 systemd / script 两条路；Windows 的 PID 管理器单独测，
+      // 不在这里靠真实进程碰运气。
+      platform: overrides.platform ?? 'linux',
       writeEnabled: () => {},
       ...overrides.deps,
       execFile: overrides.deps?.execFile ?? exec,

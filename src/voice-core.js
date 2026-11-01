@@ -131,13 +131,15 @@ export function safeJoinLibrary(voiceDir, relPath) {
   const rel = String(relPath ?? '').replace(/\\/g, '/').replace(/^\/+/, '');
   if (!rel || rel.includes('\0')) return null;
   const abs = path.resolve(root, rel);
-  const within = abs === root || abs.startsWith(root + path.sep);
+  // Windows 文件系统大小写不敏感，包含判断也要按小写比较。
+  const norm = (value) => (process.platform === 'win32' ? value.toLowerCase() : value);
+  const within = norm(abs) === norm(root) || norm(abs).startsWith(norm(root) + path.sep);
   if (!within) return null;
   // 符号链接可能指向库外：用 realpath 再校验一次（文件不存在时按父目录判）
   try {
     const real = fs.realpathSync(abs);
     const realRoot = fs.realpathSync(root);
-    if (real !== realRoot && !real.startsWith(realRoot + path.sep)) return null;
+    if (norm(real) !== norm(realRoot) && !norm(real).startsWith(norm(realRoot) + path.sep)) return null;
     return real;
   } catch {
     return abs;

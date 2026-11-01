@@ -10,7 +10,6 @@ import os from 'node:os';
 import http from 'node:http';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { execFileSync } from 'node:child_process';
 import yaml from 'js-yaml';
 import { extractPresetPrefix, presetPromptBlockers, presetPromptWarnings, renderPresetPromptYaml } from './preset-prompt.js';
 import { GEN1_ROLE_LINE_RE, parseRoleSections, roleCharStats, roleSectionReport, selectRoleText } from './role-card.js';
@@ -26,6 +25,7 @@ import { normalizeImageForModel } from './media-normalize.js';
 import { AUDIO_EXTS, cleanupTemp, describeAudio, formatBytes, formatDuration, inspectAudio, listAudioFiles, parseTargetKey, processAudioVolume, resolveAudioProcessing, resolveAudioSource, safeJoinLibrary } from './send-voice-lib.js';
 import { discoverSnowLumaConnection, persistSnowLumaEndpoint, persistToken } from './snowluma-conn.js';
 import { hardenDir, manualDirCommand } from './state-acl.mjs';
+import { isPortOpen } from './runtime/ports.mjs';
 import { extractForwardIds, forwardIdFromData, sanitizeForwardId, formatForwardResponse } from './forward.js';
 import { resolvePriceTable } from './model-prices.js';
 import { createTokenLedger } from './token-ledger.js';
@@ -1117,23 +1117,19 @@ const LOCK_FILE = path.join(STATE_DIR, 'bridge.lock');
  * 但桥接一定绑定控制台端口（绑不上会自己 exit 2），所以端口占用是一个可靠的判据。
  * 同步探测一次，只在启动期的可疑分支里跑，不影响正常运行。
  */
-function consolePortInUse() {
+async function consolePortInUse() {
   try {
     const cfg = readJsonSafe(path.join(ROOT, 'config.json'), {});
     const port = Number(cfg?.consolePort) || 3100;
-    if (process.platform === 'win32') {
-      const out = execFileSync('netstat', ['-ano', '-p', 'TCP'], { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] });
-      return new RegExp(`[:.]${port}\\s+\\S+\\s+LISTENING`, 'i').test(out);
-    }
-    const out = execFileSync('sh', ['-c', 'ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null || true'], { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] });
-    return new RegExp(`[:.]${port}\\s`).test(out);
+    // 统一用 node:net 连一次回环端口：不依赖 ss / netstat 的本地化输出与平台差异。
+    return await isPortOpen(port, { timeoutMs: 1000 });
   } catch {
     // 探测不出来时保守认为「有人在跑」，宁可让用户手动删锁，也不要冒双实例的风险。
     return true;
   }
 }
 
-function acquireLock() {
+async function acquireLock() {
   fs.mkdirSync(STATE_DIR, { recursive: true });
   // 原子创建锁文件：把 PID 一次性写入（flag 'wx'），避免“先建空文件再写 PID”的窗口被第二个进程当作过期锁偷走。
   const tryCreate = () => {
@@ -1161,7 +1157,7 @@ function acquireLock() {
           process.kill(pid, 0);
           // 没抛异常只说明「存在某个持有该 PID 的进程」，不能证明那就是桥接
           // （PID 被回收给别的程序时会误判），所以再加一道端口探测。
-          if (!consolePortInUse()) stale = true;
+          if (!(await consolePortInUse())) stale = true;
         } catch (error) {
           if (error.code === 'ESRCH') {
             stale = true;
@@ -1171,7 +1167,7 @@ function acquireLock() {
             // 一旦锁文件里的 PID 被系统回收给一个受保护进程，桥接就永久起不来，
             // 而且提示信息把人引向「已有实例在运行」这个错误方向。
             // 这里改成按「疑似过期」处理，但要先确认控制台端口没有被占用。
-            if (consolePortInUse()) {
+            if (await consolePortInUse()) {
               console.error(`[bridge] 控制台端口已被占用，判定已有实例在运行（锁文件 PID ${pid} 无权限探测）。`);
               process.exit(2);
             }
@@ -1455,7 +1451,7 @@ async function main() {
   const cfg = loadConfig();
   fs.mkdirSync(STATE_DIR, { recursive: true });
   hardenStateDirAcl();
-  acquireLock();
+  await acquireLock();
   loadState();
 
   // ── 群聊黑话/网络用语学习（slang） ──────────────────────────────────────
@@ -8867,7 +8863,9 @@ async function main() {
       const homeDir = cfg.snowluma?.homeDir ? String(cfg.snowluma.homeDir) : null;
       if (!homeDir) return false;
       const realHome = fs.realpathSync(homeDir);
-      return real === realHome || real.startsWith(realHome + path.sep);
+      // Windows 文件系统大小写不敏感：同一路径可能以不同大小写返回，不能按字节比较。
+      const norm = (value) => (process.platform === 'win32' ? value.toLowerCase() : value);
+      return norm(real) === norm(realHome) || norm(real).startsWith(norm(realHome) + path.sep);
     } catch {
       return false;
     }

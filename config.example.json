@@ -25,6 +25,19 @@
   "sessionCwd": "",
   "agentPreset": "qq-chat",
   "workspaceTitle": "QQ 聊天",
+  "orchestrator": {
+    "_comment": "start-all.mjs / stop-all.mjs 的程序路径。留空 = 用平台默认值；同名环境变量优先（DSH_DIR / SNOW_DIR / QQ_BIN / GSV_DIR / EMBED_BIN / EMBED_MODEL / QQB_RUN_DIR / NODE_BIN / PNPM_BIN）。dshCommand 是数组，例如 [\"pnpm\",\"dsh\",\"web\"]；留空时自动判断 DSH_DIR 里是否有 package.json。",
+    "dshDir": "",
+    "snowDir": "",
+    "qqBin": "",
+    "gsvDir": "",
+    "embedBin": "",
+    "embedModel": "",
+    "runDir": "",
+    "nodeBin": "",
+    "pnpmBin": "",
+    "dshCommand": []
+  },
   "allow": {
     "private": [],
     "groups": []

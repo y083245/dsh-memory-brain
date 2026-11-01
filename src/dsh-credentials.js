@@ -355,6 +355,8 @@ function isValidKey(value) {
  * 读 DSH 密钥的状态（同步、不抛）。
  * 文件不存在 → 可写、没有密钥（写的时候新建）。文件有组 / 其他权限位时**不读内容**
  * （与 DSH 的 `assertOwnerOnly` 同一条规矩：全世界可读的凭据文件不该再被服务）。
+ * Windows 上 `stat.mode` 恒为 0666（chmod 只切只读位、不反映 ACL），所以不做这条
+ * POSIX 权限判断；文件保护由目录 ACL / DSH 自身负责，否则控制台在 Windows 上永远写不了密钥。
  *
  * @param {{ file?: string }} [options]
  * @returns {{ hasKey: boolean, keyHint: string, writable: boolean, reason: string|null }}
@@ -367,7 +369,7 @@ export function readDshKeyStatus({ file = dshCredentialsPath() } = {}) {
     if (error?.code === 'ENOENT') return { hasKey: false, keyHint: '', writable: true, reason: null };
     return { hasKey: false, keyHint: '', writable: false, reason: '读不了凭据文件' };
   }
-  if ((stat.mode & GROUP_OTHER_BITS) !== 0) {
+  if (process.platform !== 'win32' && (stat.mode & GROUP_OTHER_BITS) !== 0) {
     return { hasKey: false, keyHint: '', writable: false, reason: '凭据文件权限不是 600' };
   }
   let text;
@@ -429,7 +431,8 @@ export async function writeDshKey(apiKey, {
     } catch (error) {
       if (error?.code !== 'ENOENT') return { ok: false, code: 'io', error: '读不了凭据文件' };
     }
-    if (statMode !== null && (statMode & GROUP_OTHER_BITS) !== 0) {
+    // Windows 的 mode 位不代表 ACL（chmod 只切只读位），不能拿它拒绝写入。
+    if (statMode !== null && process.platform !== 'win32' && (statMode & GROUP_OTHER_BITS) !== 0) {
       return { ok: false, code: 'perm', error: '凭据文件权限不是 600，先 chmod 600 再写' };
     }
 
