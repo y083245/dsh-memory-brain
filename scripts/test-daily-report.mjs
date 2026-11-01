@@ -16,6 +16,7 @@ import {
   speechStats,
   SPEECH
 } from '../src/daily-report.js';
+import { assertPosixMode } from './test-mode.mjs';
 
 let failures = 0;
 async function test(name, run) {
@@ -313,8 +314,8 @@ await test('计数：flush 后新实例读回并继续累加、未知名字忽�
   first.flush();
 
   const countersFile = path.join(state, 'daily-report', 'counters.json');
-  assert.equal(fs.statSync(countersFile).mode & 0o777, 0o600);
-  assert.equal(fs.statSync(path.dirname(countersFile)).mode & 0o777, 0o700);
+  assertPosixMode(countersFile, 0o600);
+  assertPosixMode(path.dirname(countersFile), 0o700);
   const saved = JSON.parse(fs.readFileSync(countersFile, 'utf8'));
   assert.equal(saved.version, 1);
   assert.equal(saved.days['2026-10-30'].ownLifeDay, 3);

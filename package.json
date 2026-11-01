@@ -10,6 +10,8 @@
   },
   "scripts": {
     "start": "node src/bridge.js",
+    "test": "node scripts/test-unit.mjs",
+    "test:unit": "node scripts/test-unit.mjs",
     "test:audit": "node scripts/test-audit.mjs",
     "test:token": "node scripts/test-token-economy.mjs && node scripts/test-reply-wait.mjs && node scripts/test-qq-model-view.mjs && node scripts/test-qq-preset-contract.mjs",
     "test:tokens": "node scripts/test-token-usage.mjs",

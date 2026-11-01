@@ -20,6 +20,7 @@ import net from 'node:net';
 import path from 'node:path';
 import { bridgeHarness } from './audit-bridge-harness.mjs';
 import { createMemoryRagClient } from '../src/memory-rag-client.js';
+import { assertPosixMode } from './test-mode.mjs';
 
 const CONSOLE = { 'x-console-token': 'fixture-console-token' };
 const OWNER = '123';
@@ -337,8 +338,8 @@ await test('shadow：与 off 的提示词逐字相同；/recall 收到来信；�
 
         const dir = shadowDir(h);
         const file = path.join(dir, shadowFiles(h)[0]);
-        assert.equal(fs.statSync(dir).mode & 0o777, 0o700, '目录权限 700');
-        assert.equal(fs.statSync(file).mode & 0o777, 0o600, '文件权限 600');
+        assertPosixMode(dir, 0o700, '目录权限 700');
+        assertPosixMode(file, 0o600, '文件权限 600');
         const raw = fs.readFileSync(file, 'utf8');
         assert.ok(!raw.includes('独角兽来信词汇QQQ'), '日志不得出现来信原文');
         assert.ok(!raw.includes('摘要独特词WWW'), '日志不得出现摘要原文');
@@ -597,7 +598,7 @@ await test('控制台：现查来信与摘要、墓碑显示已删除、stats �
 
     // 标注文件权限 600。
     const labelsFile = path.join(shadowDir(h), 'labels.json');
-    assert.equal(fs.statSync(labelsFile).mode & 0o777, 0o600);
+    assertPosixMode(labelsFile, 0o600);
   } finally { await h.close(); await rag.close(); }
 });
 

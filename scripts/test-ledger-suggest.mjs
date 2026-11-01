@@ -4,11 +4,12 @@
 // 覆盖任务书第 1～6 条：挑选 / 块格式 / 计次与采用 / 失败兜底 / 状态文件 / mode=off。
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { createLedgerSuggest } from '../src/ledger-suggest.js';
+import { assertPosixMode } from './test-mode.mjs';
 
-const TMP_ROOT = '/tmp/worker-S2';
-fs.mkdirSync(TMP_ROOT, { recursive: true });
+const TMP_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'worker-S2-'));
 const tempDirs = [];
 const tempDir = (prefix) => {
   const dir = fs.mkdtempSync(path.join(TMP_ROOT, `${prefix}-`));
@@ -256,7 +257,7 @@ await test('状态文件：600、不含原文、14 天清理、读坏了能自�
   assert.equal(await mod.plan(KEY), null, '唯一一条已过期 → 这次没有块');
 
   const raw = fs.readFileSync(statePath, 'utf8');
-  assert.equal(fs.statSync(statePath).mode & 0o777, 0o600, '状态文件权限 600');
+  assertPosixMode(statePath, 0o600, '状态文件权限 600');
   assert.ok(!raw.includes('这条候选原文不该落盘'), '状态文件不得含候选原文');
   const state = JSON.parse(raw);
   assert.equal(state.items[OLD_ADOPTED], undefined, '不是 open 且 statusAt 超过 14 天 → 清掉');

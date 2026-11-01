@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createPersona } from '../src/persona.js';
+import { assertPosixMode } from './test-mode.mjs';
 
 let failures = 0;
 async function test(name, run) {
@@ -168,10 +169,14 @@ await test('状态目录写失败时，onPoke / onOutgoing / ownLifeLine 不抛�
   });
   try {
     persona.console.confirmFactory(FACTORY);
-    // 模拟「目录被删 + 不可写」：角色目录删掉、根目录只读，之后所有写入都会 EACCES。
+    // 模拟「目录被删 + 不可写」：POSIX 用 0o500；Windows 的 chmod 不阻止写入，
+    // 改用「在角色目录的位置放一个文件」，mkdir 同样会失败。
     fs.rmSync(path.join(dir, '小鲸鱼'), { recursive: true, force: true });
-    fs.chmodSync(dir, 0o500);
-    if (process.getuid?.() === 0) {
+    const blockedRoleDir = path.join(dir, '小鲸鱼2');
+    const windowsBlock = process.platform === 'win32';
+    if (windowsBlock) fs.writeFileSync(blockedRoleDir, 'block');
+    else fs.chmodSync(dir, 0o500);
+    if (!windowsBlock && process.getuid?.() === 0) {
       console.log('SKIP 状态目录 0o500 对 root 不生效，跳过写失败断言');
     } else {
       roleName = '小鲸鱼2'; // 换个角色名，逼 ready() 重新读盘，命中「目录建不出来」
@@ -182,7 +187,8 @@ await test('状态目录写失败时，onPoke / onOutgoing / ownLifeLine 不抛�
       assert.match(logs.join('\n'), /\[persona\] onPoke 失败：/);
     }
   } finally {
-    fs.chmodSync(dir, 0o700);
+    if (process.platform === 'win32') fs.rmSync(path.join(dir, '小鲸鱼2'), { force: true });
+    else fs.chmodSync(dir, 0o700);
     persona.stop();
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -503,7 +509,7 @@ await test('用量落盘（§6-1）：判读两次后 tick 写入 usage.json —
     persona.tick();
     const f = path.join(dir, 'usage.json');
     assert.ok(fs.existsSync(f), 'tick 应把用量写盘');
-    assert.equal(fs.statSync(f).mode & 0o777, 0o600);
+    assertPosixMode(f, 0o600);
     const u = JSON.parse(fs.readFileSync(f, 'utf8'));
     const day = todayOf(clock.t);
     const runs = Object.values(u.days[day] ?? {});

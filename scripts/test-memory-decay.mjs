@@ -19,6 +19,7 @@ import {
   msgUnitMeta,
   diaryUnitMeta,
 } from '../src/memory-decay.js';
+import { assertPosixMode } from './test-mode.mjs';
 
 let failures = 0;
 async function test(name, run) {
@@ -221,7 +222,7 @@ await test('review：冻结后复习解冻，文件 600 且无原文，1 小时�
   assert.equal(after.frozen, false);
   assert.equal(after.reps, 1);
   assert.ok(fs.existsSync(statePath), '第一次复习要落盘');
-  assert.equal(fs.statSync(statePath).mode & 0o777, 0o600, '权限 600');
+  assertPosixMode(statePath, 0o600, '权限 600');
   const raw = fs.readFileSync(statePath, 'utf8');
   assert.doesNotMatch(raw, /螃蟹/);
   assert.match(raw, /"version":1/);

@@ -12,6 +12,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { linkDir } from './test-links.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -52,7 +53,7 @@ for (const file of ['mcp-snowluma-safe.js', 'sensitive.js', 'qq-model-view.js'])
 }
 // 没有 package.json 的话 .js 会被当成 CJS，import 语法直接报错。
 fs.writeFileSync(path.join(tmp, 'package.json'), JSON.stringify({ name: 'mcp-history-probe', private: true, type: 'module' }));
-fs.symlinkSync(path.join(ROOT, 'node_modules'), path.join(tmp, 'node_modules'), 'dir');
+linkDir(path.join(ROOT, 'node_modules'), path.join(tmp, 'node_modules'));
 fs.writeFileSync(path.join(tmp, 'config.json'), JSON.stringify({ consolePort: fakePort }));
 
 const entry = path.join(tmp, 'src', 'mcp-snowluma-safe.js');

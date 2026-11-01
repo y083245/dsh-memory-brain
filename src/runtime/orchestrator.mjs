@@ -298,6 +298,8 @@ async function summarizeRag({ paths, ragEnabled, managed, log, ok }) {
 /** 向量记忆：embedding :8091 → memory-rag :8093，任何一步失败都只 warn。 */
 async function startRagSection({ paths, ragEnabled, log, ok, warn, platform = process.platform }) {
   const managed = isEmbeddingManaged(paths.root);
+  const embedWaitSeconds = Number(paths.env.QQB_RAG_EMBED_WAIT_SECONDS) || 5;
+  const ragWaitSeconds = Number(paths.env.QQB_RAG_WAIT_SECONDS) || 60;
   if (!ragEnabled) {
     const running = [];
     if (managed && await isPortOpen(EMBED_PORT)) running.push('8091');
@@ -329,7 +331,7 @@ async function startRagSection({ paths, ragEnabled, log, ok, warn, platform = pr
         log('启动 embedding 服务（systemd：qq-embedding.service，约占用 9 GB 显存）...');
         const started = await systemdStart('qq-embedding.service', { env });
         if (started.code !== 0) warn('systemctl 启动 qq-embedding 失败，看：systemctl --user status qq-embedding');
-        else if (await waitForPort(EMBED_PORT, 5)) ok(`embedding 已就绪（${EMBED_PORT}）`);
+        else if (await waitForPort(EMBED_PORT, embedWaitSeconds)) ok(`embedding 已就绪（${EMBED_PORT}）`);
         else warn(`embedding 没就绪，检索会自动降级为只走 BM25；看日志：${path.join(paths.runDir, 'embed.log')}`);
       }
     }
@@ -343,7 +345,7 @@ async function startRagSection({ paths, ragEnabled, log, ok, warn, platform = pr
       log('启动 memory-rag 索引服务（systemd：qq-memory-rag.service）...');
       const started = await systemdStart('qq-memory-rag.service', { env });
       if (started.code !== 0) warn('systemctl 启动 qq-memory-rag 失败，看：systemctl --user status qq-memory-rag');
-      else if (await waitForPort(RAG_PORT, 60)) ok(`memory-rag 已就绪（${RAG_PORT}）`);
+      else if (await waitForPort(RAG_PORT, ragWaitSeconds)) ok(`memory-rag 已就绪（${RAG_PORT}）`);
       else warn(`memory-rag 60s 内没就绪，检索会降级为关键词；看日志：${path.join(paths.runDir, 'memory-rag.log')}`);
     }
     return;
@@ -362,7 +364,8 @@ async function startRagSection({ paths, ragEnabled, log, ok, warn, platform = pr
       managed: true,
       log,
       platform,
-      cwd: paths.home
+      cwd: paths.home,
+      waitSeconds: ragWaitSeconds
     });
     if (result.skipped === 'no-gpu-info') warn('查不到显存空闲量（nvidia-smi 不可用），跳过 embedding；检索会自动只走 BM25');
     else if (result.skipped === 'low-vram') warn(`显存空闲 ${result.freeMiB} MiB < 10000 MiB，跳过 embedding；检索会自动只走 BM25`);
@@ -380,7 +383,8 @@ async function startRagSection({ paths, ragEnabled, log, ok, warn, platform = pr
       python: paths.ragPython,
       log,
       platform,
-      cwd: paths.ragDir
+      cwd: paths.ragDir,
+      waitSeconds: ragWaitSeconds
     });
     if (result.skipped === 'missing-python') warn('找不到 Python / memory-rag 虚拟环境，跳过；检索会自动降级');
     else if (result.healthy) ok(`memory-rag 已就绪（${RAG_PORT}）`);
@@ -689,10 +693,6 @@ export async function runStart({
     err(`找不到 node：${paths.nodeBin}`);
     return 1;
   }
-  if (!paths.snowLaunch) {
-    err(`找不到 SnowLuma 目录：${paths.snowDir || '(空)'}。可用 SNOW_DIR 或 config.json 的 orchestrator.snowDir 指定`);
-    return 1;
-  }
   if (!isFile(path.join(root, 'src', 'bridge.js'))) {
     err(`找不到桥接主程序：${path.join(root, 'src', 'bridge.js')}`);
     return 1;
@@ -794,7 +794,7 @@ export async function runStop({
   await stopService({
     pidFile: path.join(paths.runDir, 'snowluma.pid'),
     label: 'SnowLuma',
-    patterns: platform === 'win32' ? ['node.exe', 'cmd.exe'] : ['SnowLuma-[^/]*/index\\.mjs'],
+    patterns: platform === 'win32' ? ['node.exe', 'cmd.exe', 'SnowLuma.exe'] : ['SnowLuma-[^/]*/index\\.mjs'],
     image: paths.snowLaunch?.kind === 'exe' ? 'SnowLuma.exe' : null,
     port: SNOW_PORT,
     platform, log, ok, warn

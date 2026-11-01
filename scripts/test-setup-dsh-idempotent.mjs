@@ -4,8 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { fileURLToPath, pathToFileURL } from 'node:url';
-import { dshModulesDir } from './dsh-modules.mjs';
+import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 // 夹具放系统临时目录，**不要**放仓库的 state/：harden-state-acl.mjs 会把 state/ 的
@@ -88,8 +87,8 @@ console.log(`${hasBareArray ? '❌' : '✅'} 无独立成行的空数组 []`);
 if (hasBareArray) failed += 1;
 
 // 断言 4：YAML 可解析且顶层是数组
-const YAML = await import(pathToFileURL(path.join(dshModulesDir(), 'js-yaml/index.js')).href);
-const yaml = YAML.default ?? YAML;
+// 用本仓库自己的 js-yaml（package.json 依赖），不要求本机装过 DSH。
+const yaml = (await import('js-yaml')).default;
 let doc;
 try { doc = yaml.load(finalPatch); } catch (e) {
   console.log(`❌ YAML 解析失败: ${e.message}`); failed += 1;

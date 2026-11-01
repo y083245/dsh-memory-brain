@@ -24,6 +24,7 @@ import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { bridgeHarness } from './audit-bridge-harness.mjs';
+import { linkDir } from './test-links.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -498,7 +499,7 @@ await test('MCP：replaces / outdated / query 出现在 schema 里并原样透�
       fs.copyFileSync(path.join(ROOT, 'src', file), path.join(tmp, 'src', file));
     }
     fs.writeFileSync(path.join(tmp, 'package.json'), JSON.stringify({ name: 'decay-mcp-probe', private: true, type: 'module' }));
-    fs.symlinkSync(path.join(ROOT, 'node_modules'), path.join(tmp, 'node_modules'), 'dir');
+    linkDir(path.join(ROOT, 'node_modules'), path.join(tmp, 'node_modules'));
     fs.writeFileSync(path.join(tmp, 'config.json'), JSON.stringify({ consolePort: fake.address().port }));
 
     const transport = new StdioClientTransport({ command: process.execPath, args: [path.join(tmp, 'src', 'mcp-snowluma-safe.js')] });

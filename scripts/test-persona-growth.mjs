@@ -10,6 +10,7 @@ import {
   EVIDENCE_TYPES, CHAR_EVENTS, charEventOf, updateBeliefs, driftCore, driftCharacter, driftOffsets, runNightly, rollbackTo,
   isoWeek, parseFactory, confirmFactory, factoryMessages, seedRelations, weeklyReport
 } from '../src/persona-growth.js';
+import { assertPosixMode } from './test-mode.mjs';
 
 let failures = 0;
 async function test(name, run) {
@@ -34,8 +35,8 @@ await test('store：未初始化时 core 为 null；save/load 往返；文件 60
     store.save('小鲸鱼', 'core', newCore({ A: 70 }));
     assert.equal(store.load('小鲸鱼').core.traits.A.value, 70);
     const f = path.join(dir, '小鲸鱼', 'core.json');
-    assert.equal(fs.statSync(f).mode & 0o777, 0o600);
-    assert.equal(fs.statSync(path.join(dir, '小鲸鱼')).mode & 0o777, 0o700);
+    assertPosixMode(f, 0o600);
+    assertPosixMode(path.join(dir, '小鲸鱼'), 0o700);
     assert.throws(() => store.save('小鲸鱼', 'bogus', {}), /未知的状态分片/);
   });
 });
@@ -371,7 +372,7 @@ await test('store 用量（§6-1）：没有文件时返回空表；writeUsage �
     const usage = { version: 1, days: { '2026-11-01': { run1: { calls: 2, rules: 0, failures: 0, cacheHit: 10, cacheMiss: 2, output: 30, cost: 0.0012, updatedAt: 1 } } } };
     store.writeUsage(usage);
     const f = path.join(dir, 'usage.json');
-    assert.equal(fs.statSync(f).mode & 0o777, 0o600);
+    assertPosixMode(f, 0o600);
     assert.deepEqual(store.readUsage(), usage);
     // 坏形状退回空表（不炸控制台）
     fs.writeFileSync(f, JSON.stringify({ version: 1, days: [] }));

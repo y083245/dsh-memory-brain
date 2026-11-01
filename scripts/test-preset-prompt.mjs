@@ -134,11 +134,17 @@ test('删掉安全不变量或正文过短时阻断保存（保护 AI 效果与�
 
 test('写回沿用文件主导行尾，且不吞掉块尾空行', () => {
   const next = renderPresetPromptYaml(source, originalPrefix);
+  const expectedEol = source.includes('\r\n') ? '\r\n' : '\n';
   const crlf = (next.match(/\r\n/g) ?? []).length;
   const lfOnly = (next.match(/\n/g) ?? []).length - crlf;
-  assert.ok(crlf > 0, 'CRLF 文件写回后应仍使用 CRLF');
-  assert.equal(lfOnly, 0, '写回后不应残留/新增 LF-only 行');
-  assert.ok(next.includes('prefix: |-\r\n'), '新增行应使用 CRLF');
+  if (expectedEol === '\r\n') {
+    assert.ok(crlf > 0, 'CRLF 文件写回后应仍使用 CRLF');
+    assert.equal(lfOnly, 0, '写回后不应残留/新增 LF-only 行');
+  } else {
+    assert.equal(crlf, 0, '.gitattributes 统一成 LF 后，写回不应新增 CRLF');
+    assert.ok(lfOnly > 0, 'LF 文件写回后应仍使用 LF');
+  }
+  assert.ok(next.includes(`prefix: |-${expectedEol}`), `新增行应使用文件主导行尾（${JSON.stringify(expectedEol)}）`);
   // 块之后的内容（空行、注释、后续条目）必须逐字保留
   const before = locatePresetPromptBlock(source);
   const after = locatePresetPromptBlock(next);

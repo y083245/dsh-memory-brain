@@ -7,17 +7,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { safeFetchBuffer } from '../src/safe-fetch.js';
+import { readTestConfig } from './test-config.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
 
-function readJson(file) {
-  let text = fs.readFileSync(file, 'utf8');
-  if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
-  return JSON.parse(text);
-}
-
-const config = readJson(path.join(ROOT, 'config.json'));
+const config = readTestConfig(ROOT);
 let passed = 0;
 let failed = 0;
 

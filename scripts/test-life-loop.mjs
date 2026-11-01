@@ -10,6 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createLifeLoop } from '../src/life-loop.js';
 import { createLongMemory } from '../src/long-memory.js';
+import { assertPosixMode } from './test-mode.mjs';
 
 let failures = 0;
 async function test(name, run) {
@@ -494,7 +495,7 @@ await test('状态文件坏了当空状态：不崩，下一次写入恢复成�
     await ll.tick(new Date(2026, 9, 30, 10, 0).getTime());
     const saved = JSON.parse(fs.readFileSync(statePath, 'utf8'));
     assert.equal(saved.version, 1);
-    assert.equal(fs.statSync(statePath).mode & 0o777, 0o600);
+    assertPosixMode(statePath, 0o600);
     const leftovers = fs.readdirSync(path.dirname(statePath)).filter((n) => n.includes('.tmp-'));
     assert.deepEqual(leftovers, [], '不留临时文件');
   }, { state: '{ 这不是 json', logs, ltm: fakeLtm({ people: duePeople() }) });
@@ -1003,7 +1004,7 @@ await test('联想：抽中回忆 + 返回 2 条 → 追加【顺着想到】，
       { kind: 'associate', candId: 'sum:S1', from: 'ltm:a1' }
     );
     assert.ok(!('preview' in last), '联想条目不存预览');
-    assert.equal(fs.statSync(statePath).mode & 0o777, 0o600);
+    assertPosixMode(statePath, 0o600);
     assert.ok(!raw.includes('小螃蟹'), '状态文件里不存摘要原文');
     assert.doesNotMatch(logs.join('\n'), /小螃蟹|小夏|夜班/, '日志不写摘要与 via');
     assert.match(logs.join('\n'), /顺着想到：sum:S1 ← ltm:a1/);

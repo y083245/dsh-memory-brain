@@ -15,6 +15,7 @@ import {
   applyStickerNote,
   markStickerUsed
 } from '../src/sticker-lib.js';
+import { readTestConfig } from './test-config.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -86,7 +87,7 @@ console.log('## sticker-lib 纯函数');
 
 console.log('## 配置文件');
 {
-  const cfg = JSON.parse(fs.readFileSync(path.join(ROOT, 'config.json'), 'utf8'));
+  const cfg = readTestConfig(ROOT);
   const tools = cfg.socialV2?.tools ?? {};
   ok(tools.listStickers === true, 'config listStickers=true');
   ok(tools.getStickerImage === true, 'config getStickerImage=true');
@@ -127,7 +128,7 @@ console.log('## bridge 路由/函数存在性');
 if (process.env.QQ_BRIDGE_TEST_LIVE === '1') {
   console.log('## live：SnowLuma 收藏表情链路');
   try {
-    const cfg = JSON.parse(fs.readFileSync(path.join(ROOT, 'config.json'), 'utf8'));
+    const cfg = readTestConfig(ROOT);
     const base = String(cfg.snowluma?.httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '');
     const headers = { 'content-type': 'application/json', ...(cfg.snowluma?.accessToken ? { authorization: `Bearer ${cfg.snowluma.accessToken}` } : {}) };
     const res = await fetch(`${base}/fetch_custom_face_detail`, {

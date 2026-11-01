@@ -15,6 +15,7 @@ import {
   readDshKeyStatus,
   writeDshKey,
 } from '../src/dsh-credentials.js';
+import { assertPosixMode } from './test-mode.mjs';
 
 let failures = 0;
 async function test(name, run) {
@@ -65,7 +66,7 @@ const ALL_RESULTS = [];
 
 // ── 1. dshCredentialsPath / keyHint ─────────────────────────────────────
 await test('dshCredentialsPath 认 DSH_HOME，缺省 ~/.dsh', () => {
-  assert.equal(dshCredentialsPath({ DSH_HOME: '/tmp/worker-D/x' }), '/tmp/worker-D/x/.credentials.yaml');
+  assert.equal(dshCredentialsPath({ DSH_HOME: '/tmp/worker-D/x' }), path.join('/tmp/worker-D/x', '.credentials.yaml'));
   assert.equal(dshCredentialsPath({ DSH_HOME: '   ' }), path.join(os.homedir(), '.dsh', '.credentials.yaml'));
   assert.equal(dshCredentialsPath({}), path.join(os.homedir(), '.dsh', '.credentials.yaml'));
   assert.equal(dshCredentialsPath(), path.join(os.homedir(), '.dsh', '.credentials.yaml'));
@@ -104,6 +105,10 @@ await test('读状态：没有这个 ref → 可写、无密钥', () => {
 });
 
 await test('读状态：权限 644 → 不可写并说明原因', () => {
+  if (process.platform === 'win32') {
+    console.log('SKIP 权限 644 用例：Windows 的 mode 位不反映 ACL，无法用 chmod 模拟 POSIX 0644');
+    return;
+  }
   const file = writeFixture(tempHome('perm'), FIXTURE, 0o644);
   const status = readDshKeyStatus({ file });
   assert.equal(status.writable, false);
@@ -189,7 +194,7 @@ await test('写：文件不存在 → 新建、权限 600、内容合法', async
   ALL_RESULTS.push(result);
   assert.equal(result.ok, true);
   assert.equal(fs.readFileSync(file, 'utf8'), `version: 1\nrefs:\n  DEEPSEEK_API_KEY: "${NEW_KEY}"\n`);
-  assert.equal(modeOf(file), 0o600);
+  assertPosixMode(file, 0o600);
   assert.equal(fs.existsSync(`${file}.bak-apihub`), false, '原来没有文件就不备份');
   assert.equal(fs.existsSync(`${file}.lock`), false, '写完了锁要删掉');
 });
@@ -200,7 +205,7 @@ await test('写：records 深相等、权限保持 600、备份是原文', async
   const before = fs.readFileSync(file, 'utf8');
   const result = await writeDshKey(NEW_KEY, { file });
   assert.equal(result.ok, true);
-  assert.equal(modeOf(file), 0o600);
+  assertPosixMode(file, 0o600);
 
   const YAML = (await import('js-yaml')).default;
   const beforeDoc = YAML.load(before);
@@ -212,7 +217,7 @@ await test('写：records 深相等、权限保持 600、备份是原文', async
 
   const backup = `${file}.bak-apihub`;
   assert.equal(fs.readFileSync(backup, 'utf8'), before, '备份是写之前的原文');
-  assert.equal(modeOf(backup), 0o600);
+  assertPosixMode(backup, 0o600);
 });
 
 // ── 6. 锁 ──────────────────────────────────────────────────────────────
@@ -289,7 +294,7 @@ await test('rename 之后文件被写坏 → 回读校验失败、还原成备�
   assert.equal(result.code, 'verify');
   assert.match(result.error, /还原/);
   assert.equal(fs.readFileSync(file, 'utf8'), before, '还原成写之前的原文');
-  assert.equal(modeOf(file), 0o600);
+  assertPosixMode(file, 0o600);
 });
 
 // ── 10. 返回值里没有密钥原文 ────────────────────────────────────────────

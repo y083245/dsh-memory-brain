@@ -10,6 +10,7 @@ import net from 'node:net';
 import path from 'node:path';
 import { createApiHub, normalizeLocalBaseUrl, normalizeCloudBaseUrl } from '../src/api-hub.js';
 import { bridgeHarness } from './audit-bridge-harness.mjs';
+import { assertPosixMode } from './test-mode.mjs';
 
 process.env.QQB_NO_SYSTEMCTL = '1';
 
@@ -362,7 +363,7 @@ await test('saveWebSearch：own + 新密钥写入 config.json，其它键原样�
   assert.equal(file.webSearch.maxUses, 3, '其它 webSearch 键原样保留');
   assert.equal(file.ownerQQ, 123);
   assert.deepEqual(file.other, { keep: true });
-  assert.equal(fs.statSync(path.join(root, 'config.json')).mode & 0o777, 0o600);
+  assertPosixMode(path.join(root, 'config.json'), 0o600);
   assert.equal(r.body.hasOwnKey, true);
 });
 
@@ -472,7 +473,7 @@ await test('saveEmbedding：完整提交 → 写设置 600、重启、重建，�
   assert.equal(saved.kind, 'cloud');
   assert.deepEqual(saved.cloud, CLOUD_SEG);
   assert.equal(saved.local.model, 'bge-m3', '切换部署方式不清空另一种的已填值');
-  assert.equal(fs.statSync(settingsFile(stateDir)).mode & 0o777, 0o600);
+  assertPosixMode(settingsFile(stateDir), 0o600);
   assert.equal(ragControl.calls.restarts.length, 1);
   assert.deepEqual(ragControl.calls.restarts[0], { embeddingBefore: 'local', embeddingAfter: 'cloud' });
   assert.equal(ragControl.calls.rebuilds, 1);
@@ -492,7 +493,7 @@ await test('saveEmbedding：只改密钥 → 只写 embedding-api.json、不重�
   const keys = JSON.parse(fs.readFileSync(embeddingApiFile(stateDir), 'utf8'));
   assert.equal(keys.apiKey, 'sk-new-cloud-SECRET-zzzz');
   assert.equal(keys.localApiKey, 'sk-local-keep-yyyy', '另一个键必须保留');
-  assert.equal(fs.statSync(embeddingApiFile(stateDir)).mode & 0o777, 0o600);
+  assertPosixMode(embeddingApiFile(stateDir), 0o600);
   assert.equal(ragControl.calls.restarts.length, 0);
   assert.equal(ragControl.calls.rebuilds, 0);
 });
@@ -512,7 +513,7 @@ await test('saveEmbedding：legacy-local 保存成 bundled 不算口径变化、
   assert.equal(ragControl.calls.rebuilds, 0, '不重建');
   const saved = JSON.parse(fs.readFileSync(settingsFile(stateDir), 'utf8'));
   assert.equal(saved.kind, 'bundled', '设置文件必须写下去，否则下次打开还是「旧行为」');
-  assert.equal(fs.statSync(settingsFile(stateDir)).mode & 0o777, 0o600);
+  assertPosixMode(settingsFile(stateDir), 0o600);
 });
 
 await test('saveEmbedding：忙时回 409 busy', async () => {
@@ -655,7 +656,7 @@ await test('saveDistill：单独配置写文件 600；非 https 回 400；RAG �
   assert.equal(r.status, 200, JSON.stringify(r.body));
   const saved = JSON.parse(fs.readFileSync(distillFile(stateDir), 'utf8'));
   assert.deepEqual(saved, { useShared: false, baseUrl: 'https://api.deepseek.com', model: 'deepseek-flash', apiKey: 'sk-distill-SECRET-mnop' });
-  assert.equal(fs.statSync(distillFile(stateDir)).mode & 0o777, 0o600);
+  assertPosixMode(distillFile(stateDir), 0o600);
 
   const bad = hub.saveDistill({ useShared: false, baseUrl: 'http://api.deepseek.com', model: 'deepseek-flash' });
   assert.equal(bad.status, 400);

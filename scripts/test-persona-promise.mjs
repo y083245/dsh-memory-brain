@@ -197,16 +197,21 @@ await test('salienceByMsg：按 msgId 取最大值、忽略空 msgId、sinceMs �
 
 await test('onPromise 在状态目录写不动时只记日志、不抛（桥接主路径不能被带崩）', async () => {
   await withPersona(async ({ persona, dir, logs }) => {
-    fs.rmSync(path.join(dir, ROLE), { recursive: true, force: true });
-    fs.chmodSync(dir, 0o500);
+    const roleDir = path.join(dir, ROLE);
+    fs.rmSync(roleDir, { recursive: true, force: true });
+    // Windows 的 chmod 不阻止写入：在角色目录的位置放一个文件，让 mkdir 失败。
+    const windowsBlock = process.platform === 'win32';
+    if (windowsBlock) fs.writeFileSync(roleDir, 'block');
+    else fs.chmodSync(dir, 0o500);
     try {
-      if (process.getuid?.() === 0) console.log('SKIP 状态目录 0o500 对 root 不生效');
+      if (!windowsBlock && process.getuid?.() === 0) console.log('SKIP 状态目录 0o500 对 root 不生效');
       else {
         assert.doesNotThrow(() => persona.onPromise({ key: KEY, userId: OWNER, name: '主人', by: 'them', outcome: 'done' }));
         assert.match(logs.join('\n'), /\[persona\] onPromise 失败/);
       }
     } finally {
-      fs.chmodSync(dir, 0o700);
+      if (windowsBlock) fs.rmSync(roleDir, { force: true });
+      else fs.chmodSync(dir, 0o700);
     }
   });
 });

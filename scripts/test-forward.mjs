@@ -14,6 +14,7 @@ import {
   formatForwardResponse,
   nodeText
 } from '../src/forward.js';
+import { readTestConfig } from './test-config.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -87,7 +88,7 @@ check('nodeText 清洗 CQ 字符串', nodeText({ message: '[CQ:image,file=x]' })
 
 // 4. 配置默认开关
 try {
-  const config = JSON.parse(fs.readFileSync(path.join(ROOT, 'config.json'), 'utf8'));
+  const config = readTestConfig(ROOT);
   check('config.socialV2.tools.getForwardMsg 默认开启', config.socialV2?.tools?.getForwardMsg !== false);
   check('config.socialV2.tools.sendPoke 默认开启', config.socialV2?.tools?.sendPoke !== false);
   check('config.socialV2.wake.recommendedPoke 默认开启', config.socialV2?.wake?.recommendedPoke !== false);
@@ -100,7 +101,7 @@ const consoleTokenFile = path.join(ROOT, 'state', 'console-token');
 const socialV2File = path.join(ROOT, 'state', 'social-v2.json');
 if (fs.existsSync(consoleTokenFile) && fs.existsSync(socialV2File)) {
   try {
-    const config = JSON.parse(fs.readFileSync(path.join(ROOT, 'config.json'), 'utf8'));
+    const config = readTestConfig(ROOT);
     const social = JSON.parse(fs.readFileSync(socialV2File, 'utf8'));
     // 只挑**当前白名单内**的会话来探活：以前盲取 conversations[0]，群被移出白名单后
     // 端点会先撞「当前模式不允许读取该会话」(403)，永远到不了「未见过的 forward id」(404) 那条断言，

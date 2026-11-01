@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { bridgeHarness } from './audit-bridge-harness.mjs';
+import { assertPosixMode } from './test-mode.mjs';
 
 let failures = 0;
 async function test(name, run) {
@@ -73,7 +74,7 @@ await test('控制台：密钥只回显提示；锁定、未知特质报错；�
     });
     const raw = JSON.parse(fs.readFileSync(path.join(h.temp, 'state', 'persona', 'config.json'), 'utf8'));
     assert.equal(raw.apiKey, 'sk-abcdefgh1234');
-    assert.equal(fs.statSync(path.join(h.temp, 'state', 'persona', 'config.json')).mode & 0o777, 0o600);
+    assertPosixMode(path.join(h.temp, 'state', 'persona', 'config.json'), 0o600);
   } finally { await h.close(); }
 });
 

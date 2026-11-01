@@ -13,6 +13,7 @@ import path from 'node:path';
 import { bridgeHarness } from './audit-bridge-harness.mjs';
 import { createLongMemory } from '../src/long-memory.js';
 import { createMemoryRagClient } from '../src/memory-rag-client.js';
+import { assertPosixMode } from './test-mode.mjs';
 
 const CONSOLE = { 'x-console-token': 'fixture-console-token' };
 const KEY = 'private:123';
@@ -301,8 +302,8 @@ await test('遗忘请求文件：目录 700、文件 600；dryRun / 0 条删除�
     const r = lm.deleteArchiveRows(KEY, { rows: [{ file: line1.file, line: 1, t: line1.t }] });
     assert.equal(r.deleted, 1);
     assert.equal(fs.existsSync(forgetFile), true);
-    assert.equal(fs.statSync(forgetFile).mode & 0o777, 0o600, '请求文件必须是 600');
-    assert.equal(fs.statSync(forgetDir).mode & 0o777, 0o700, '请求目录必须是 700');
+    assertPosixMode(forgetFile, 0o600, '请求文件必须是 600');
+    assertPosixMode(forgetDir, 0o700, '请求目录必须是 700');
     const content = JSON.parse(fs.readFileSync(forgetFile, 'utf8'));
     assert.equal(content.key, KEY);
     assert.equal(typeof content.at, 'number');
