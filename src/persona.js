@@ -496,7 +496,7 @@ export function createPersona({
       if (!card) throw new Error(`读不到角色卡：${r}`);
       // PERSONA_PATCH（v2 §5 / §7）：v2 一次要拿 11 个数、11 段表现、好恶和信念，输出约为 v1 的 3 倍，
       // 所以 maxTokens 1500 → 3000、超时 30 秒 → 60 秒（原来 1500 是按「只有 5 个数 + 信念」实测定的）。
-      const { json } = await client.chatJson(factoryMessages(card), { maxTokens: 3000, timeoutMs: 60000 });
+      const { json } = await client.chatJson(factoryMessages(card), { maxTokens: 8000, timeoutMs: 120000 });
       return parseFactory(json);
     },
     confirmFactory({ traits, character, manifests, prefs, beliefs }) {

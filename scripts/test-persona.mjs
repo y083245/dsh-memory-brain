@@ -94,7 +94,8 @@ await test('群聊里和她无关的普通消息不逐条调模型，攒够 20 �
     await persona.onIncoming({ key: 'group:9', kind: 'group', userId: '3999', name: '路人', text: '吃了吗', directed: false });
     await new Promise((r) => setImmediate(r));
     assert.equal(calls.length, 1);
-    assert.match(calls[0].messages[1].content, /整体气氛/);
+    // foldSystem 会把 system 并进第一条 user，messages 可能只剩一条：拼起来再断言。
+    assert.match(calls[0].messages.map((m) => String(m.content ?? '')).join('\n'), /整体气氛/);
   }, { fetchQueue: [reply({ ...INSULT, target: 'none', kind: 'normal', evidence: [] })] });
 });
 

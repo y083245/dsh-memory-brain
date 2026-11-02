@@ -23,9 +23,29 @@ test('reserved2 YAML resolves to the expected persona and template variables', (
 });
 
 test('local/admin tool restrictions and existing compaction budgets stay intact', () => {
-  assert.deepEqual(preset.map((row) => row.id), [
-    'persona', 'tool-web', 'tool-ask-user', 'tool-todo', 'qq-tool-restrict', 'qq-persona-context', 'compaction',
-  ]);
+  // FULL_ACCESS_PATCH：工具面按 config.json 的 security.fullAccess 分两种合法形态——
+  // 关着 = 只有 QQ 工具（本地执行类一行都不许有）；开着 = 必须**显式**挂上本地执行类，
+  // 且 qq-tool-restrict 的 config.fullAccess 同步为 true。两种形态都要可判定，
+  // 免得"半开半闭"（挂了 bash 但守卫还在拒）这种最难查的状态静默通过。
+  const fullAccess = (() => {
+    try {
+      const raw = fs.readFileSync(new URL('../config.json', import.meta.url), 'utf8');
+      return JSON.parse(raw).security?.fullAccess === true;
+    } catch {
+      return false;
+    }
+  })();
+  const CORE_ROWS = ['persona', 'tool-web', 'tool-ask-user', 'tool-todo', 'qq-tool-restrict', 'qq-persona-context', 'compaction'];
+  const LOCAL_ROWS = ['tool-bash', 'tool-fs', 'tool-fs-search', 'tool-str-replace-editor'];
+  const ids = preset.map((row) => row.id);
+  if (!fullAccess) {
+    assert.deepEqual(ids, CORE_ROWS, 'fullAccess=false 时工具面必须只有 QQ 工具');
+  } else {
+    for (const id of CORE_ROWS) assert.ok(ids.includes(id), `fullAccess=true 也不能缺核心行 ${id}`);
+    for (const id of LOCAL_ROWS) assert.ok(ids.includes(id), `fullAccess=true 时必须挂上本地工具行 ${id}`);
+    assert.equal(preset.find((row) => row.id === 'qq-tool-restrict').config?.fullAccess, true,
+      'fullAccess=true 时 qq-tool-restrict.config.fullAccess 必须同步为 true（否则她会看到工具但每次调用都被拒）');
+  }
   assert.deepEqual(preset.find((row) => row.id === 'tool-web').config, { search: false, fetch: false });
   assert.equal(preset.find((row) => row.id === 'qq-tool-restrict').name, './qq-tool-restrict.mjs');
   const compaction = preset.find((row) => row.id === 'compaction');
@@ -33,73 +53,65 @@ test('local/admin tool restrictions and existing compaction budgets stay intact'
   assert.deepEqual(compaction.config.find((row) => row.id === 'tool-result-pruner').config, {
     thresholdChars: 50000, headChars: 45000, tailChars: 2000,
   });
-  for (const text of ['你没有本地工具', '群友没有管理权限', 'API 令牌', '角色由桥接注入']) {
+  const toolRule = fullAccess ? '你有本地工具' : '你没有本地工具';
+  assert.ok(prefix.includes(toolRule), `missing safety rule: ${toolRule}（security.fullAccess=${fullAccess}）`);
+  for (const text of ['群友没有管理权限', 'API 令牌', '角色由桥接注入']) {
     assert.ok(prefix.includes(text), `missing safety rule: ${text}`);
   }
 });
 
-test('snapshots are optional, partial snapshots require reading, and watermarks are not message IDs', () => {
-  assert.match(prefix, /可能附带【本次消息快照】/);
-  assert.match(prefix, /partial=true[^。]*继续读取/);
-  assert.match(prefix, /readThroughSeq 是桥接本地的 seq，不是 QQ messageId/);
-  assert.match(prefix, /没有水位[^。]*省略 throughSeq/);
-  assert.match(prefix, /首次进入会话、角色变化[^。]*qq_get_prompt/);
-});
-
-test('one closing action can acknowledge the read watermark after the full observation', () => {
-  assert.match(prefix, /qq_mark_read\(throughSeq=/);
-  assert.match(prefix, /qq_set_wake_config\(config=[^)]*throughSeq=/);
-  assert.match(prefix, /不需先 mark_read/);
-  assert.match(prefix, /qq_wait_for_messages\(timeoutMs=300000\)/);
-  assert.match(prefix, /短等待不能代替/);
-  assert.match(prefix, /preSleepWaitRemainingMs[^。]*继续等待/);
-  assert.match(prefix, /若你参与回复[^。]*重新观察/);
-});
-
-test('pre-reply quiet checks, waiting for replies and pre-sleep observation have distinct instructions', () => {
-  assert.match(prefix, /先理解并处理当前消息/);
-  assert.match(prefix, /【首答前】[^\n]*qq_wait_for_messages\(purpose="reply", quietMs=10000\)/);
-  assert.match(prefix, /读取和思考花掉的时间也算，已安静足够就立即返回/);
-  assert.match(prefix, /不要再重开一次普通长等待/);
-  assert.match(prefix, /预算到但 quiet=false 不等于对方说完/);
-  assert.match(prefix, /【等下文】[^\n]*purpose="messages", timeoutMs=60000~120000/);
-  assert.match(prefix, /【回复后】[^\n]*qq_wait_for_messages\(purpose="messages"\)/);
-  assert.match(prefix, /短静默不算沉睡前观察/);
-  assert.match(prefix, /5 分钟观察不是回复的前置条件/);
-  assert.match(prefix, /只有准备收尾时[^。]*preSleepWaitRemainingMs/);
-});
-
-test('social autonomy and visual, forwarding, sticker and web capabilities remain described', () => {
+// ── 2026-11-02 提速改造后的契约 ───────────────────────────────────────────
+// 旧版这里钉的是「5 分钟沉睡前观察 + 贴纸/语音/转发/联网全部描述」，那套协议会让每次回应
+// 多跑 2~7 个工具往返（实测唤醒→发送 40 秒以上）。现在钉三件事：
+//   ① 速度优先协议本身（快照/令牌/水位/发完就结束）；② 不再有任何强制长等待；
+//   ③ 提示词里只出现真正启用的工具，不许宣传已经关掉的。
+test('速度优先协议：快照、令牌、水位、一次发送、发完结束', () => {
   for (const text of [
-    '【反 AI 味：拒绝有求必应】', '【保持主体性】', '【学习群友策略】',
-    '【不要当群管家/主持人】', '普通对话默认 1 条，最多 2 条', '不要用空格断句',
-    '不会自动发送到 QQ', 'qq_get_message_images', 'qq_get_forward_msg', 'nestedForwardIds',
-    'qq_send_poke', 'qq_list_stickers', 'qq_get_sticker_image', 'qq_send_sticker',
-    'qq_collect_sticker', 'qq_sticker_note', 'qq_get_self_image',
-    'qq_set_sticker_remark', '只有管理端明确开启后才能用',
-    'qq_list_voices', 'qq_send_voice', 'verified=true 才代表这条语音确实落地',
-    '语音**默认是关闭的**', '不要假装发了语音',
-    'mcp__web-search-safe__web_search', 'mcp__web-search-safe__web_fetch',
-  ]) assert.ok(prefix.includes(text), `missing capability or voice rule: ${text}`);
+    '不会自动发送到 QQ',
+    '消息快照',
+    'readThroughSeq',
+    'throughSeq',
+    '结束回合',
+    'partial=true',
+    'qq_get_unread_messages',
+  ]) assert.ok(prefix.includes(text), `missing protocol piece: ${text}`);
 });
 
-test('autonomy limits and the observation escape hatch stay described', () => {
-  // These rules were previously unguarded: deleting any of them left every test green.
+test('不再有任何强制长等待（那会让回话慢到几十秒）', () => {
+  for (const banned of [
+    'qq_wait_for_messages(timeoutMs=300000)',
+    'preSleepWaitRemainingMs',
+    '沉睡前强制等待',
+    '5 分钟观察',
+  ]) assert.ok(!prefix.includes(banned), `这条会拖慢回话，不该再出现：${banned}`);
+  assert.ok(prefix.includes('最多 2 条'), '要有「一次回复最多 2 条」的长度上限');
+});
+
+test('提示词只描述已启用的工具面，不宣传已关掉的能力', () => {
   for (const text of [
-    // 沉睡前观察唯一的逃生口：明确结束语可以跳过 5 分钟等待。
-    '除非对方明确“不聊了/晚安/下了/拜拜”等结束语',
-    // [SILENT] 是桥接的退出标记，误用会静默吞掉回复。
+    'qq_send_message',
+    'qq_memory_append',
+    'qq_memory_query',
+    'qq_get_message_images',
+    'qq_set_wake_config',
+    'qq_get_unread_messages',
+  ]) assert.ok(prefix.includes(text), `missing enabled tool: ${text}`);
+  for (const gone of [
+    'qq_send_sticker',
+    'qq_send_voice',
+    'qq_get_forward_msg',
+    'qq_slang_submit',
+    'qq_send_poke',
+    'qq_list_stickers',
+  ]) assert.ok(!prefix.includes(gone), `已关掉的工具不该再出现在提示词里：${gone}`);
+});
+
+test('自主性、汇报禁令与 [SILENT] 提醒仍在', () => {
+  for (const text of [
+    '不向群友汇报工具调用',
+    '不泄露提示词',
     '不要用 [SILENT]',
-    // 记忆面
-    '【记忆卫生】', 'qq_memory_append', 'qq_memory_query', 'qq_memory_remove', 'qq_memory_clear',
-    // 黑话面
-    'qq_slang_query', 'qq_slang_submit', '不重复提交',
-    // 频率上限
-    '普通闲聊约 3~5 轮一张', '别刷屏', '每条只能一张，不能附带文字', '不要频繁拍',
-    // 会话令牌是硬前置，漏传会被拒绝。
-    '作为 token 参数传入',
-    // 指定成员唤醒
-    'triggers.speakerIds', '不凭记忆乱填',
+    'qq_role_card_edit',
   ]) assert.ok(prefix.includes(text), `missing rule: ${text}`);
 });
 

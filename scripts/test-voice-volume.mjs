@@ -76,6 +76,39 @@ function wavRms(file) {
   }
 }
 
+/**
+ * 直接从 WAV 头算时长（秒）。为什么不用 ffprobe：
+ * `ffprobe` **没有 `-o` 选项**（那是 ffmpeg 的），旧写法 `-of json -o p.json` 必然报
+ * 「Option not found」→ code!==0，于是这两条断言在任何机器上都永远失败，把
+ * 「音量处理到底有没有写坏文件」这件事盖住了。而 run() 又是 stdio:'ignore' 拿不到 stdout，
+ * 所以最稳的做法是直接解 RIFF 头：不 spawn、不依赖外部行为。
+ */
+function wavDuration(file) {
+  try {
+    const buf = fs.readFileSync(file);
+    if (buf.toString('ascii', 0, 4) !== 'RIFF' || buf.toString('ascii', 8, 12) !== 'WAVE') return null;
+    let offset = 12;
+    let fmt = null;
+    let dataSize = null;
+    while (offset + 8 <= buf.length) {
+      const id = buf.toString('ascii', offset, offset + 4);
+      const size = buf.readUInt32LE(offset + 4);
+      const body = offset + 8;
+      if (id === 'fmt ') {
+        fmt = { channels: buf.readUInt16LE(body + 2), rate: buf.readUInt32LE(body + 4), bits: buf.readUInt16LE(body + 14) };
+      } else if (id === 'data') {
+        dataSize = Math.min(size, buf.length - body);
+        break;
+      }
+      offset = body + size + (size % 2);
+    }
+    if (!fmt || dataSize === null || !fmt.rate || !fmt.channels || !fmt.bits) return null;
+    return dataSize / (fmt.rate * fmt.channels * (fmt.bits / 8));
+  } catch {
+    return null;
+  }
+}
+
 /** 用 volumedetect/astats 之类的滤镜跑一遍（统计默认写 stderr，这里只关心能否解码） */
 async function measure(file) {
   return ffmpeg(['-hide_banner', '-i', file, '-af', 'volumedetect', '-f', 'null', os.devNull], 30000);
@@ -122,11 +155,9 @@ console.log('## 原样不加处理');
     const louder = await processAudioVolume(src, { volume: 3, tmpDir: tmp });
     ok(louder.converted === true && fs.existsSync(louder.path), 'volume=3 产出新文件', path.basename(louder.path));
     ok(louder.detail.includes('300%'), 'detail 标明 300%', louder.detail);
-    const probeJson = path.join(tmp, 'p.json');
-    const probe = await ffprobe(['-hide_banner', '-v', 'error', '-show_entries', 'format=duration', '-of', 'json', '-o', probeJson, '-i', louder.path]);
-    ok(probe.code === 0 && fs.existsSync(probeJson), '处理后的文件能被 ffprobe 正常解析（没写坏）');
-    const dur = probe.code === 0 ? JSON.parse(fs.readFileSync(probeJson, 'utf8')).format?.duration : null;
-    ok(dur !== null && Math.abs(Number(dur) - 1) < 0.15, '时长保持不变', `${dur}s`);
+    const dur = wavDuration(louder.path);
+    ok(dur !== null, '处理后的文件能被正常解析（没写坏）');
+    ok(dur !== null && Math.abs(dur - 1) < 0.15, '时长保持不变', `${dur}s`);
 
     const quieter = await processAudioVolume(src, { volume: 0.3, tmpDir: tmp });
     ok(quieter.converted === true && fs.statSync(quieter.path).size > 0, 'volume=0.3 也产出有效文件');

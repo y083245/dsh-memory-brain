@@ -36,7 +36,8 @@ function check(name, cond, extra = '') {
 // deepseek-flash（DeepSeek-V41-Flash）是当前默认；deepseek-v4-flash-vision-exp 为历史默认。
 const MULTIMODAL_MODELS = ['deepseek-flash', 'deepseek-v4-flash-vision-exp'];
 check('config.dsh.model 为多模态模型', MULTIMODAL_MODELS.includes(config.dsh?.model), `当前 ${config.dsh?.model}`);
-check('config.dsh.reasoningEffort 为 max', config.dsh?.reasoningEffort === 'max', `当前 ${config.dsh?.reasoningEffort}`);
+// 2026-11-02 提速：reasoningEffort 从 max 改 off（实测每步省 5~20 秒）。只要取值合法即可。
+check('config.dsh.reasoningEffort 取值合法', ['off', 'low', 'medium', 'high', 'max'].includes(config.dsh?.reasoningEffort), `当前 ${config.dsh?.reasoningEffort}`);
 check('config.socialV2.tools.getImages 默认开启', config.socialV2?.tools?.getImages !== false);
 
 // 2. safe-fetch SSRF

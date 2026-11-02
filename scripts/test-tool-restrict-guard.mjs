@@ -61,16 +61,26 @@ await test('restrict 全失败时不静默：写诊断文件 + 3 秒后重试', 
   const diag = path.join(tmpDir, 'diag-always-fail.log');
   const mod = await loadPlugin(diag);
   // 前 N 次（第一次 apply 的所有名字）都报「unknown global tool」，重试阶段也失败
-  const { ctx, calls } = makeCtx({ restrictImpl: () => new Error('tools.restrict() names unknown global tool "x"') });
+  // 注意：'names unknown global tool' 现在被 RESTRICT_NOISE_PATCH 归类为「本机没有这个工具」
+  // （正常情况，不该写诊断文件）。这条用例要测的是**真失败**，所以换一个真正的报错。
+  const { ctx, calls } = makeCtx({ restrictImpl: () => new Error('restrict: internal failure') });
   mod.apply(ctx);
   assert.ok(calls.restrict.length > 0, '必须真的调用 restrict');
   const first = fs.readFileSync(diag, 'utf8');
   assert.match(first, /restrict ok=0 failed=\d+/, `诊断文件应记录失败计数：${first}`);
-  assert.match(first, /unknown global tool/, '诊断文件必须带 DSH 的原始报错');
+  assert.match(first, /internal failure/, '诊断文件必须带 DSH 的原始报错');
   // 等延迟重试落地
   await new Promise((resolve) => setTimeout(resolve, 3400));
   const after = fs.readFileSync(diag, 'utf8');
   assert.match(after, /延迟重试 ok=0/, `重试结果也要落盘：${after}`);
+});
+
+await test('「names unknown global tool」不算失败：不写诊断文件（防日志噪音回归）', async () => {
+  const diag = path.join(tmpDir, 'diag-absent.log');
+  const mod = await loadPlugin(diag);
+  const { ctx } = makeCtx({ restrictImpl: () => new Error('tools.restrict() names unknown global tool "x"') });
+  mod.apply(ctx);
+  assert.equal(fs.existsSync(diag), false, '本机没有这些工具属于正常，不该写诊断文件');
 });
 
 await test('时序问题能被 3 秒后的重试补藏（工具晚注册）', async () => {

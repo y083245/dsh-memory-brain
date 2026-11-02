@@ -9,8 +9,20 @@
     "authPrefix": "Bearer",
     "allowRemote": false
   },
+  "security": {
+    "interceptNotify": true
+  },
   "role": {
-    "maxInjectChars": 6000
+    "maxInjectChars": 8000,
+    "selfEdit": {
+      "enabled": true,
+      "perDay": 3,
+      "maxNetGrowth": 300,
+      "maxNetShrink": 1500,
+      "minTotalChars": 1200,
+      "reserveChars": 100,
+      "backupKeep": 20
+    }
   },
   "snowluma": {
     "wsUrl": "ws://127.0.0.1:3001",
@@ -50,9 +62,6 @@
         }
       }
     }
-  },
-  "security": {
-    "interceptNotify": true
   },
   "memoryRag": {
     "_comment": "向量记忆 sidecar（sidecars/memory-rag，缺省 :8093）。enabled 是 RAG 总开关（缺省 false = 关，桥接不会去连）；一般在控制台「API 管理」页打开，也可以 ./start-all.sh --rag。关着或连不上时自动退回关键词检索；只允许回环地址。",
@@ -308,6 +317,16 @@
       "gifFrames": 6,
       "gifTile": 240,
       "normalizeTimeoutMs": 25000
+    },
+    "interest": {
+      "enabled": false,
+      "minMessages": 6,
+      "minChars": 24,
+      "windowMs": 90000,
+      "cooldownMs": 240000,
+      "maxScansPerHour": 6,
+      "maxBatchMessages": 12,
+      "maxBatchChars": 1200
     }
   },
   "webSearch": {

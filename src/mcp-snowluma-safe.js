@@ -194,7 +194,7 @@ function agentHeaders(extra = {}) {
  * 长轮询专用 POST（`node:http`，不经过 undici）。
  *
  * 为什么必须单独一条：Node 的全局 `fetch` 是 undici，自带 300 秒 `headersTimeout`。
- * 而 `qq_wait_for_messages` 的常规用法就是 `timeoutMs=300000` 的沉睡前观察 ——
+ * 而 `qq_wait_for_messages` 的常规用法就是 `timeoutMs=45000` 的沉睡前观察 ——
  * 客户端会在第 301 秒以 `fetch failed / Headers Timeout Error` 断掉，桥接侧的
  * 长轮询却还在跑满自己的预算：AI 拿不到结果只能重试，而 `activeWaits` 仍占着会话
  * （重新等待被 429），于是空转烧 token（见 issue #24）。`node:http` 没有默认响应超时，
@@ -349,8 +349,10 @@ const TOOL_CONFIG_FLAGS = {
   qq_send_sticker: 'sendSticker',
   qq_collect_sticker: 'collectSticker',
   qq_get_self_image: 'getSelfImage',
-  qq_sticker_note: 'stickerNote',
   qq_set_sticker_remark: 'setStickerRemark',
+  // PERSONA_SELF_EDIT：AI 自己改角色卡。控制台关掉后工具不注册（与上面的口径一致：
+  // 只在校验期 403 的话，schema 仍会随每次请求重发，等于白烧 token 又诱导误调）。
+  qq_role_card_edit: 'roleSelfEdit',
 };
 const disabledTools = [];
 {
@@ -587,6 +589,38 @@ server.tool(
 );
 
 server.tool(
+  'qq_role_card_edit',
+  '读或改你自己的角色卡（人设）。先 action=read 看全文再动：append 加一节、set_section 整节替换、patch 局部替换一句、delete_section 删一节、replace 整卡重写。可增可删，但每天次数有限、单次体量有限，改完下一条消息生效。不要跟群友汇报你改了人设。',
+  {
+    key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
+    token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
+    action: z.enum(['read', 'append', 'set_section', 'patch', 'delete_section', 'replace']).describe('read=查看现有角色卡与剩余额度；其余为改动动作'),
+    reason: z.string().optional().describe('为什么改，一句话（改动必填，会写进审计日志，管理员可回滚）'),
+    heading: z.string().optional().describe('set_section / delete_section 用：要改的小节标题，例如「五、DeepSeek 梗与群文化」'),
+    title: z.string().optional().describe('append 用：新小节的标题（不含 #）'),
+    text: z.string().optional().describe('append / set_section / replace 用：新的小节正文或整卡正文'),
+    find: z.string().optional().describe('patch 用：要替换的原文片段，必须在卡里唯一出现'),
+    replace: z.string().optional().describe('patch 用：替换后的文字；留空表示删掉这段')
+  },
+  async ({ key, token, action, reason, heading, title, text, find, replace }) => {
+    try {
+      if (action === 'read') {
+        const data = await agentApi(`/api/socialV2/role-card?key=${encodeURIComponent(key)}`, { headers: { 'x-agent-token': token } });
+        return { content: [{ type: 'text', text: serializeModelData(data) }] };
+      }
+      const data = await agentApi('/api/socialV2/role-card', {
+        method: 'POST',
+        ...(token ? { headers: { 'x-agent-token': token } } : {}),
+        body: JSON.stringify({ key, token, action, reason, heading, title, text, find, replace })
+      });
+      return { content: [{ type: 'text', text: serializeModelData(data) }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `角色卡改动失败：${error?.message ?? error}` }], isError: true };
+    }
+  }
+);
+
+server.tool(
   'qq_get_unread_messages',
   '查看未读消息，不自动标记已读。大量积压或快照 partial=true 时，用 afterSeq=readThroughSeq 从水位后按时间顺序补读；从最早未读开始传 0。',
   {
@@ -640,7 +674,7 @@ server.tool(
 
 server.tool(
   'qq_mark_read',
-  '将指定会话已查看的未读消息标记为已读。throughSeq 使用最近读取结果的 readThroughSeq，避免清除读取后才到达的新消息；省略 throughSeq 会按旧行为清空当前全部未读，因此推荐始终带上水位。注意：每次设置潜水/下一次唤醒前，桥接要求先用 qq_wait_for_messages(timeoutMs=300000) 完成一次沉睡前观察：5 分钟内没人说话可 mark_read 收尾沉睡；期间有人发新消息则先查看 newMessages，判断不需要你参与也可直接 mark_read 收尾；若你参与了回复，则下次想睡需重新等待观察窗口。',
+  '将指定会话已查看的未读消息标记为已读。throughSeq 使用最近读取结果的 readThroughSeq，避免清除读取后才到达的新消息；省略 throughSeq 会按旧行为清空当前全部未读，因此推荐始终带上水位。沉睡前观察已由后台自动处理，不需要你先调用等待工具：想收尾就直接 mark_read。发送消息时带上 throughSeq 也算标了已读，不必额外调用本工具。',
   {
     key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
     token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
@@ -658,7 +692,7 @@ server.tool(
 
 server.tool(
   'qq_set_wake_config',
-  '设置指定会话的二代唤醒配置：mode/无限期或有限时间/提前唤醒条件（@、名字、关键词、提问、拍一拍、概率、anyMessage、指定成员）。triggers.speakerIds 是可选的“指定群友发言唤醒”：填一个或多个群友 QQ 号后，只要其中任意一位在群里发言就会唤醒你；不设置则不启用。适合在等某个人回复、或某人反应慢怕错过时使用。triggers.poke 开启后，群里有人拍一拍（包括拍你或拍别人）会唤醒你。注意：每次设置潜水/下一次唤醒前需先用 qq_wait_for_messages(timeoutMs=300000) 完成一次沉睡前观察：5 分钟内没人说话可设置并沉睡；期间有人发新消息则先查看 newMessages，判断不需要你参与可直接设置并沉睡；若你参与了回复，则下次想睡需重新等待观察窗口。',
+  '设置指定会话的二代唤醒配置：mode/无限期或有限时间/提前唤醒条件（@、名字、关键词、提问、拍一拍、概率、anyMessage、指定成员）。triggers.speakerIds 是可选的“指定群友发言唤醒”：填一个或多个群友 QQ 号后，只要其中任意一位在群里发言就会唤醒你；不设置则不启用。适合在等某个人回复、或某人反应慢怕错过时使用。triggers.poke 开启后，群里有人拍一拍（包括拍你或拍别人）会唤醒你。唤醒配置会一直保留，只有想改的时候才需要调用；沉睡前观察已由后台自动处理，不需要先调用等待工具。',
   {
     key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
     token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
@@ -806,7 +840,7 @@ if (cfg.socialV2?.tools?.sendPoke !== false) {
 
 server.tool(
   'qq_wait_for_messages',
-  '等待分两种用途。首答前已读消息、只想确认有没有补充：用 purpose="reply"，按最后来信时间补足 quietMs 静默，已安静足够就立即返回；读取/思考时新到的消息也会返回，新消息重算静默。timeoutMs 是最长预算，不要求等满；预算到但 quiet=false 不代表对方已说完。此用途绝不代替沉睡前观察。等对方继续说、等回复或睡前观察：用默认 purpose="messages"；先等新消息，收到后才按 quietMs 等静默，没有新消息会等到 timeoutMs，单传 quietMs 不会缩短总等待。静默下限由后台配置，默认 10000ms。**返回里的 canSleepNow / countsAsObservation / hint 直接告诉你现在能不能收尾、该用多大的 timeoutMs——照它做，不要反复试**：canSleepNow=true 就可以直接 mark_read / set_wake_config；false 时按 hint 给的 timeoutMs 一次等满（更短的等待不算沉睡前观察，满足不了闸门）。直接看 newMessages、unreadCount 和 readThroughSeq，返回消息无需重复查询；仍有未展示未读才补读。决定潜水/收尾时才用默认用途加 timeoutMs=300000 完成沉睡前观察，不能把 5 分钟观察放在首答之前；短等待不能代替。全程无人说话返回 preSleepWaitSatisfied=true；观察期间来了新消息返回 preSleepWaitObserved=true，读后不需参与可收尾，参与回复则下次收尾重新观察。',
+  '等待分两种用途。首答前已读消息、只想确认有没有补充：用 purpose="reply"，按最后来信时间补足 quietMs 静默，已安静足够就立即返回；读取/思考时新到的消息也会返回，新消息重算静默。timeoutMs 是最长预算，不要求等满；预算到但 quiet=false 不代表对方已说完。此用途绝不代替沉睡前观察。等对方继续说、等回复或睡前观察：用默认 purpose="messages"；先等新消息，收到后才按 quietMs 等静默，没有新消息会等到 timeoutMs，单传 quietMs 不会缩短总等待。静默下限由后台配置，默认 10000ms。**返回里的 canSleepNow / countsAsObservation / hint 直接告诉你现在能不能收尾、该用多大的 timeoutMs——照它做，不要反复试**：canSleepNow=true 就可以直接 mark_read / set_wake_config；false 时按 hint 给的 timeoutMs 一次等满（更短的等待不算沉睡前观察，满足不了闸门）。直接看 newMessages、unreadCount 和 readThroughSeq，返回消息无需重复查询；仍有未展示未读才补读。决定潜水/收尾时才用默认用途加 timeoutMs=45000 完成沉睡前观察，不能把沉睡前观察放在首答之前；短等待不能代替。全程无人说话返回 preSleepWaitSatisfied=true；观察期间来了新消息返回 preSleepWaitObserved=true，读后不需参与可收尾，参与回复则下次收尾重新观察。',
   {
     key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
     token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
@@ -827,6 +861,25 @@ server.tool(
       });
       return { content: [{ type: 'text', text: serializeModelData(data) }] };
     } catch (error) {
+      // WAIT_TIMEOUT_PATCH：等待超时**不是**她的错，也不该烧掉一整轮。
+      // 日志里 7/128 次 qq_wait_for_messages 都是「等待超时（360~380s）」——
+      // 桥接重启、上一个等待没释放、或服务端预算比客户端稍长，都会走到这里。
+      // 以前直接 isError 丢一段文本回去，她往往原地重试，白费一个回合。
+      // 现在回一份结构化结果：告诉她别再等、去看未读，并明确「不算沉睡前观察」。
+      if (/等待超时|Headers Timeout|socket hang up|ECONNRESET/i.test(String(error?.message ?? error))) {
+        const soft = {
+          ok: false,
+          timedOut: true,
+          arrived: false,
+          newMessages: [],
+          unreadCount: null,
+          readThroughSeq: null,
+          canSleepNow: false,
+          countsAsObservation: false,
+          hint: '这次等待超时了（可能桥接刚重启，或上一个等待还没释放）。不要重复等：用 qq_get_unread_messages 看一眼有没有新消息，再决定参与还是收尾；要收尾就重新做一次完整的沉睡前观察。'
+        };
+        return { content: [{ type: 'text', text: serializeModelData(soft) }] };
+      }
       return { content: [{ type: 'text', text: `等待失败：${error?.message ?? error}` }], isError: true };
     }
   }

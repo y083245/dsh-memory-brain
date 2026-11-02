@@ -179,7 +179,18 @@ await test('malformed HTTP request targets return 400 without hanging', async (h
     assert.equal(call.body.group_id, 456, '语音发给正确群');
     assert.equal(call.body.message.length, 1, '语音只发一个段');
     assert.equal(call.body.message[0].type, 'record', '段类型是 record');
-    assert.equal(call.body.message[0].data.file, path.join(audioDir, 'hello.mp3'), 'record 段指向库内绝对路径');
+    {
+      const sentFile = String(call.body.message[0].data.file ?? '');
+      const wantPath = path.join(audioDir, 'hello.mp3');
+      if (sentFile.startsWith('base64://')) {
+        // 网关（NapCat/astrbot）对本地路径会回 ENOENT，实测只有 base64:// 能发；
+        // 所以这里校验「内联的字节 == 语音库里那个文件的字节」，安全意图保持不变。
+        const inline = Buffer.from(sentFile.slice('base64://'.length), 'base64');
+        assert.deepEqual(inline, fs.readFileSync(wantPath), 'record 段内联的必须是语音库文件的字节');
+      } else {
+        assert.equal(sentFile, wantPath, 'record 段指向库内绝对路径');
+      }
+    }
     assert.equal(sent.messageId, 9001, '返回网关 message_id');
     assert.equal(sent.readback, null, '显式关掉回读时不调 fetch_ptt_text');
 
