@@ -5722,25 +5722,21 @@ async function main() {
           return;
         }
         if (req.method === 'GET' && url.pathname === '/api/socialV2/activity') {
-          sendJson({ ok: true, paused: socialV2.paused });
+          sendJson({
+            ok: true,
+            paused: socialV2.paused,
+            stoppedAt: socialV2.stoppedAt || 0,
+            conversations: socialV2.conversations.size,
+            watchdogs: mustReplyWatchdog.size + sendBlockedTimers.size,
+          });
           return;
         }
         if (req.method === 'POST' && url.pathname === '/api/socialV2/activity') {
           const body = await readBody();
           const paused = body.paused === true;
-          socialV2.paused = paused;
-          if (paused) {
-            clearAllSocialV2Timers();
-            log('控制台：二代 AI 已暂停（唤醒/等待任务已停止）');
-          } else {
-            log('控制台：二代 AI 已恢复');
-            for (const key of socialV2.conversations.keys()) {
-            setupSleepTimerV2(key);
-            scheduleProactiveCheckV2(key);
-          }
-          }
-          saveSocialV2State();
-          sendJson({ ok: true, paused: socialV2.paused });
+          if (paused) stopAllSocialV2('控制台：全部停止');
+          else resumeAllSocialV2('控制台：恢复运行');
+          sendJson({ ok: true, paused: socialV2.paused, stoppedAt: socialV2.stoppedAt || 0 });
           return;
         }
         if (req.method === 'POST' && url.pathname === '/api/socialV2/reset') {
@@ -6481,6 +6477,11 @@ async function main() {
           return;
         }
         if (req.method === 'POST' && url.pathname === '/api/socialV2/send-message') {
+          // ALL_STOP_PATCH：全部停止期间她就算跑完回合也发不出去（避免"停了还在说话"）。
+          if (socialV2.paused) {
+            sendJson({ ok: false, error: '机器人已全部停止，当前不接受发送（控制台右上角可恢复）', hint: 'stopped' }, 403);
+            return;
+          }
           const body = await readBody();
           const key = String(body.key ?? '').trim();
           let rawMessages = body.messages;
@@ -10017,6 +10018,7 @@ async function main() {
       })();
       const raw = readJsonSafe(SOCIAL_V2_FILE, null);
       socialV2.paused = raw?.paused === true;
+      socialV2.stoppedAt = Number(raw?.stoppedAt) || 0;
       if (raw && typeof raw.conversations === 'object') {
         const seenTokens = new Set();
         for (const [key, val] of Object.entries(raw.conversations)) {
@@ -10124,7 +10126,7 @@ async function main() {
 
   function saveSocialV2State() {
     try {
-      const obj = { paused: socialV2.paused, conversations: Object.create(null) };
+      const obj = { paused: socialV2.paused, stoppedAt: socialV2.stoppedAt || 0, conversations: Object.create(null) };
       for (const [key, st] of socialV2.conversations) {
         obj.conversations[key] = {
           wakeConfig: st.wakeConfig,
@@ -12864,6 +12866,8 @@ async function main() {
 
   function setupSleepTimerV2(key) {
     if (cfg.socialV2?.enabled === false) return;
+    // ALL_STOP_PATCH：硬停期间（含重启后读到 paused=true）不再排任何定时器。
+    if (socialV2.paused) return;
     if (!isSessionAllowedInCurrentMode(key)) return;
     const st = getSocialV2State(key);
     cancelReplyCheckV2(key); // 有限睡眠配置已接管，取消回复检查
@@ -12977,6 +12981,59 @@ async function main() {
     markReadCalledKeys.clear();
     wakeConfigMissCount.clear();
     messageMediaStore.clear();
+  }
+
+  // ALL_STOP_PATCH：控制台右上角「全部停止」。
+  // 之前只有 paused=true + clearAllSocialV2Timers()，问题是：熔断补唤醒、必回看门狗这两个
+  // 模块级定时器不在会话状态里，停不掉；在途回合也不会停（继续烧 token 并尝试发送）。
+  // 这个函数把它们一次全清，并且以后 stopAll/setupSleepTimer 里有 paused 闸门兜底。
+  function stopAllSocialV2(reason = '控制台全部停止') {
+    socialV2.paused = true;
+    socialV2.stoppedAt = Date.now();
+    clearAllSocialV2Timers();
+    for (const timer of sendBlockedTimers.values()) { try { clearTimeout(timer); } catch {} }
+    sendBlockedTimers.clear();
+    for (const timer of mustReplyWatchdog.values()) { try { clearTimeout(timer); } catch {} }
+    mustReplyWatchdog.clear();
+    turnSendGuard.clear();
+    drainAllPromptQueues('二代 AI 已全部停止');
+    let cancelled = 0;
+    for (const [key, sid] of Object.entries(state.sessions || {})) {
+      if (!sid) continue;
+      try {
+        void withTimeout(api.stopSessionWork(sid), DSH_CONTROL_TIMEOUT_MS, 'stopSessionWork')
+          .catch((error) => log(`全部停止：取消回合失败 ${key}：${error?.message ?? error}`));
+        cancelled += 1;
+      } catch (error) {
+        log(`全部停止：取消回合异常 ${key}：${error?.message ?? error}`);
+      }
+      // 被掐掉的回合不会再有 turn/end，busy 记账就地清掉。
+      collectors.delete(sid);
+      v2TurnStartAt.delete(sid);
+      turnLeaseNoted.delete(sid);
+      pendingSendToolCalls.delete(sid);
+    }
+    saveSocialV2State();
+    log(`[reserved2] ${reason}：全部停止（定时器/看门狗/熔断重试已清，在途回合撤销 ${cancelled} 个）`);
+  }
+
+  function resumeAllSocialV2(reason = '控制台恢复运行') {
+    socialV2.paused = false;
+    socialV2.stoppedAt = 0;
+    for (const sid of Object.values(state.sessions || {})) {
+      if (!sid) continue;
+      collectors.delete(sid);
+      v2TurnStartAt.delete(sid);
+      turnLeaseNoted.delete(sid);
+    }
+    pendingWakeKeys.clear();
+    try { clearAllPendingWakeLeases(); } catch {}
+    for (const key of socialV2.conversations.keys()) {
+      setupSleepTimerV2(key);
+      try { scheduleProactiveCheckV2(key); } catch (error) { log(`恢复：排主动检查失败 ${key}：${error?.message ?? error}`); }
+    }
+    saveSocialV2State();
+    log(`[reserved2] ${reason}：已恢复（定时器重新排上，busy 记账已清）`);
   }
 
   function drainPromptQueue(key, errorMsg) {
