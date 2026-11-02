@@ -12996,6 +12996,13 @@ async function main() {
     for (const timer of mustReplyWatchdog.values()) { try { clearTimeout(timer); } catch {} }
     mustReplyWatchdog.clear();
     turnSendGuard.clear();
+    // 自主定时器也要停：这些都绕开会话轮次自己产生内容，只靠 paused 闸门等于让它们空转。
+    let stoppedExtras = [];
+    try { if (ownLife) { ownLife.stop(); stoppedExtras.push('own-life'); } } catch (error) { log(`全部停止：停 own-life 失败：${error?.message ?? error}`); }
+    try { if (lifeLoop) { lifeLoop.stop(); stoppedExtras.push('life-loop'); } } catch (error) { log(`全部停止：停 life-loop 失败：${error?.message ?? error}`); }
+    try {
+      if (social.loopTimer) { clearInterval(social.loopTimer); social.loopTimer = null; stoppedExtras.push('social-loop'); }
+    } catch (error) { log(`全部停止：停社交主循环失败：${error?.message ?? error}`); }
     drainAllPromptQueues('二代 AI 已全部停止');
     let cancelled = 0;
     for (const [key, sid] of Object.entries(state.sessions || {})) {
@@ -13014,7 +13021,7 @@ async function main() {
       pendingSendToolCalls.delete(sid);
     }
     saveSocialV2State();
-    log(`[reserved2] ${reason}：全部停止（定时器/看门狗/熔断重试已清，在途回合撤销 ${cancelled} 个）`);
+    log(`[reserved2] ${reason}：全部停止（定时器/看门狗/熔断重试已清，自主定时器 ${stoppedExtras.join('/') || '无'} 已停，在途回合撤销 ${cancelled} 个）`);
   }
 
   function resumeAllSocialV2(reason = '控制台恢复运行') {
@@ -13031,6 +13038,12 @@ async function main() {
     for (const key of socialV2.conversations.keys()) {
       setupSleepTimerV2(key);
       try { scheduleProactiveCheckV2(key); } catch (error) { log(`恢复：排主动检查失败 ${key}：${error?.message ?? error}`); }
+    }
+    // 恢复时把硬停期间停掉的自主定时器重新武装（配置里显式关掉的保持关闭）。
+    if (cfg.social?.enabled !== false) {
+      try { startSocialLoop(); } catch (error) { log(`恢复：重启社交主循环失败：${error?.message ?? error}`); }
+      try { startOwnLife(); } catch (error) { log(`恢复：重启 own-life 失败：${error?.message ?? error}`); }
+      try { startLifeLoop(); } catch (error) { log(`恢复：重启 life-loop 失败：${error?.message ?? error}`); }
     }
     saveSocialV2State();
     log(`[reserved2] ${reason}：已恢复（定时器重新排上，busy 记账已清）`);
