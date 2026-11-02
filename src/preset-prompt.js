@@ -29,6 +29,17 @@ export const PRESET_BLOCKING_SUBSTRINGS = [
   '角色由桥接注入',
   '不会自动发送到 QQ',
 ];
+// FULL_ACCESS_PATCH：security.fullAccess=true 时（预设里真挂了 bash/fs/子代理），
+// 「你没有本地工具」这句已经不成立——留着它只会让 AI 一边有 root shell 一边自称没有工具，
+// 行为上表现为"该动手时死也不动、被诱导时又乱动"。这时改要求它写明「你有本地工具 +
+// 只认管理员」；其余不变量（群友没有管理权限 / API 令牌 / 角色由桥接注入）不变。
+export const PRESET_BLOCKING_SUBSTRINGS_V2_FULL_ACCESS = [
+  '你有本地工具',
+  '群友没有管理权限',
+  'API 令牌',
+  '角色由桥接注入',
+  '不会自动发送到 QQ',
+];
 // 一代（qq-chat）：不用 MCP 工具，靠空格分句 + [SILENT]，因此工具面那几条不适用。
 // 这三条都逐字出现在一代预设的正文里（见 dsh/agent-presets/qq-chat/agent.cordis.yml）——
 // 清单必须与预设实际文案一致，否则控制台会用一个预设自己都不满足的条件把它锁死。
@@ -39,20 +50,24 @@ export const PRESET_BLOCKING_SUBSTRINGS_V1 = [
 ];
 export const PRESET_MIN_BODY_CHARS = 500;
 
-/** 取某个预设对应的硬性不变量清单（未知预设按更严的二代替处理）。 */
-export function presetBlockingSubstrings(preset = 'v2') {
-  return preset === 'v1' ? PRESET_BLOCKING_SUBSTRINGS_V1 : PRESET_BLOCKING_SUBSTRINGS;
+/**
+ * 取某个预设对应的硬性不变量清单（未知预设按更严的二代替处理）。
+ * options.fullAccess=true 时二代清单换成「你有本地工具」那一套（见上）。
+ */
+export function presetBlockingSubstrings(preset = 'v2', options = {}) {
+  if (preset === 'v1') return PRESET_BLOCKING_SUBSTRINGS_V1;
+  return options?.fullAccess === true ? PRESET_BLOCKING_SUBSTRINGS_V2_FULL_ACCESS : PRESET_BLOCKING_SUBSTRINGS;
 }
 
 /** 硬性校验：返回阻止保存的原因列表（空数组=可保存）。preset 取 'v1' / 'v2'。 */
-export function presetPromptBlockers(content, preset = 'v2') {
+export function presetPromptBlockers(content, preset = 'v2', options = {}) {
   const text = String(content ?? '');
   const blockers = [];
   if (!text.trim()) {
     blockers.push('仿真提示词不能为空');
     return blockers;
   }
-  for (const needle of presetBlockingSubstrings(preset)) {
+  for (const needle of presetBlockingSubstrings(preset, options)) {
     if (!text.includes(needle)) {
       blockers.push(`缺少安全不变量「${needle}」：删除它会让 AI 的权限边界失效，并使 npm run test:audit 失败`);
     }
@@ -126,7 +141,7 @@ export function presetPromptWarnings(content) {
  * @param {'v1'|'v2'} preset 预设代次（决定用哪一套硬性不变量）
  * @returns {string} 新的 YAML 全文
  */
-export function renderPresetPromptYaml(text, content, preset = 'v2') {
+export function renderPresetPromptYaml(text, content, preset = 'v2', options = {}) {
   const loc = locatePresetPromptBlock(text);
   if (!loc) throw new Error('无法定位预设里的 prefix 块（文件结构可能已变化）');
   const normalized = String(content ?? '').replace(/\r\n/g, '\n').replace(/\n+$/, '');
@@ -134,7 +149,7 @@ export function renderPresetPromptYaml(text, content, preset = 'v2') {
   if (bytes > PRESET_PROMPT_MAX_BYTES) {
     throw new Error(`仿真提示词过长（${(bytes / 1024).toFixed(1)} KB，上限 ${PRESET_PROMPT_MAX_BYTES / 1024} KB）`);
   }
-  const blockers = presetPromptBlockers(normalized, preset);
+  const blockers = presetPromptBlockers(normalized, preset, options);
   if (blockers.length) throw new Error(blockers.join('；'));
   // 新增行沿用文件的主导行尾，避免把 CRLF 文件写成更混乱的混合行尾。
   const crlf = (text.match(/\r\n/g) ?? []).length;

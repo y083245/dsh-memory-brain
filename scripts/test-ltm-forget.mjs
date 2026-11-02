@@ -13,6 +13,7 @@ import path from 'node:path';
 import { bridgeHarness } from './audit-bridge-harness.mjs';
 import { createLongMemory } from '../src/long-memory.js';
 import { createMemoryRagClient } from '../src/memory-rag-client.js';
+import { execFileSync } from 'node:child_process';
 
 const CONSOLE = { 'x-console-token': 'fixture-console-token' };
 const KEY = 'private:123';
@@ -339,11 +340,20 @@ await test('写入失败：只读文件时 deleted=0、skipped 记满、日志�
     ]);
     const file = path.join(dir, 'archive', 'private_123', '2026-10.jsonl');
     const row = lm.listArchiveRows(KEY).rows.find((r) => r.line === 2);
-    fs.chmodSync(file, 0o400); // 只读：openSync(file, 'r+') 会 EACCES
+    // 注意：chmod 0o400 对 root 无效（root 会无视权限位），必须用不可变位才能真正造出写失败。
+    let immutable = false;
+    try {
+      execFileSync('chattr', ['+i', file], { stdio: 'ignore' });
+      immutable = true;
+    } catch {
+      console.log('  （chattr 不可用，跳过「写失败」用例）');
+    }
+    if (!immutable) return;
     try {
       const r = lm.deleteArchiveRows(KEY, { rows: [{ file: row.file, line: 2, t: row.t }] });
       assert.deepEqual(r, { matched: 1, deleted: 0, skipped: 1 }, '写失败要按 skipped 上报，不能算删掉');
     } finally {
+      try { execFileSync('chattr', ['-i', file], { stdio: 'ignore' }); } catch {}
       fs.chmodSync(file, 0o600);
     }
     const forgetFile = path.join(dir, 'forget-requests', 'private_123.json');

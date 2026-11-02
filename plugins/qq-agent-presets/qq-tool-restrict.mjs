@@ -266,7 +266,21 @@ function writeDiagnostics(lines) {
   } catch {}
 }
 
-export function apply(ctx) {
+export function apply(ctx, config = {}) {
+  // FULL_ACCESS_PATCH：config.fullAccess=true ⇒ 本守卫整体让位。
+  //
+  // 这是操作者显式选择的「全权限」模式：restrict 不再隐藏本地工具，guard 也不再拒
+  // 非白名单工具（本地执行 / 文件读写 / 子代理 / 宿主工具全部可用）。默认 false，
+  // 与 preset 行里 `config: { fullAccess: true }` 绑定，一个键就能收回。
+  //
+  // 为什么保留这个文件而不是删掉它：删掉代码就没有默认防线了——新装的 preset、
+  // 复制的配置、别人 fork 之后都会继承"无守卫"状态；而开关默认关，基线仍然安全。
+  if (config?.fullAccess === true) {
+    const stamp = new Date().toISOString()
+    console.error('[qq-tool-restrict] fullAccess=true：本守卫已放行全部工具（restrict/guard 均停用）')
+    writeDiagnostics([`${stamp} fullAccess=true：restrict 与 guard 均停用（操作者显式开启全权限）`])
+    return
+  }
   // 1) 把已知危险全局工具从 schema 隐藏（restrict 只影响继承的全局层，
   //    不会误删 preset 自己注册的 scoped 工具）。
   // 逐个 restrict：当前 DSH 版本不存在的工具名会单独抛错并跳过，
@@ -279,6 +293,10 @@ export function apply(ctx) {
   // 以及 MCP 之外的宿主工具（plugin-guard / cordis 检查工具等）。
   const stamp = new Date().toISOString()
   const failed = []
+  // RESTRICT_NOISE_PATCH：「names unknown global tool」= 这个会话里根本没有这个工具，
+  // 无工具可藏，属于**正常**（受限会话往往只挂着 MCP 资源类工具）。以前把它当失败，
+  // 一次启动往 journal 里灌一行 20KB 的 console.error，还让人误以为守卫没生效。
+  const absent = []
   const attempt = (names) => {
     let ok = 0
     for (const name of names) {
@@ -286,7 +304,9 @@ export function apply(ctx) {
         ctx.tools.restrict({ deny: [name] })
         ok += 1
       } catch (error) {
-        failed.push({ name, message: String(error?.message ?? error) })
+        const message = String(error?.message ?? error)
+        if (/names unknown global tool/i.test(message)) absent.push(name)
+        else failed.push({ name, message })
       }
     }
     return ok
@@ -294,13 +314,23 @@ export function apply(ctx) {
 
   const firstOk = attempt(KNOWN_DANGEROUS_GLOBAL_TOOLS)
   const firstFailed = failed.slice()
+  const firstAbsent = absent.slice()
   failed.length = 0
+  absent.length = 0
+
+  if (firstAbsent.length > 0) {
+    // 只是本机没有这些工具（Linux 上没有 pwsh、没装 dev_* 注入器等），一行说清即可
+    console.log(
+      `[qq-tool-restrict] 本机不存在 ${firstAbsent.length}/${KNOWN_DANGEROUS_GLOBAL_TOOLS.length} 个受管工具（无需藏，已藏 ${firstOk} 个）`
+    )
+  }
 
   if (firstFailed.length > 0) {
-    // 逐个名字的报错收成一类，避免 18 行重复
-    const reasons = [...new Set(firstFailed.map((f) => f.message))]
+    // 逐个名字的报错收成一类，且**截断**，避免超大单行把 journal 刷爆
+    const reasons = [...new Set(firstFailed.map((f) => f.message.slice(0, 160)))]
+    const shown = reasons.slice(0, 3).join(' | ') + (reasons.length > 3 ? ` | …(+${reasons.length - 3})` : '')
     console.error(
-      `[qq-tool-restrict] restrict 失败 ${firstFailed.length}/${KNOWN_DANGEROUS_GLOBAL_TOOLS.length}：${reasons.join(' | ')}`
+      `[qq-tool-restrict] restrict 真失败 ${firstFailed.length}/${KNOWN_DANGEROUS_GLOBAL_TOOLS.length}：${shown}`
     )
     writeDiagnostics([
       `${stamp} restrict ok=${firstOk} failed=${firstFailed.length} 原因: ${reasons.join(' | ')}`,

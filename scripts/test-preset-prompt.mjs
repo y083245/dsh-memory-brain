@@ -17,6 +17,16 @@ import {
 } from '../src/preset-prompt.js';
 
 const PRESET_PATH = new URL('../dsh/agent-presets/qq-chat-v2/agent.cordis.yml', import.meta.url);
+// FULL_ACCESS_PATCH：security.fullAccess=true 时二代不变量是「你有本地工具」，
+// 这里统一取一次，传给所有 render/blockers 调用，免得每个用例各自猜口径。
+const FULL = (() => {
+  try {
+    return { fullAccess: JSON.parse(fs.readFileSync(new URL('../config.json', import.meta.url), 'utf8')).security?.fullAccess === true };
+  } catch {
+    return { fullAccess: false };
+  }
+})();
+
 const source = fs.readFileSync(PRESET_PATH, 'utf8');
 const originalPrefix = extractPresetPrefix(source);
 
@@ -27,11 +37,20 @@ const originalPrefix = extractPresetPrefix(source);
 // 报错还说它「缺少安全不变量」，而它从来就没打算有那些工具面表述。
 // 这条测试同时钉住两件事：① 每代预设都能通过自己的清单；② 清单本身没写错字。
 test('每代内置预设都满足自己那一代的安全不变量', () => {
+  // FULL_ACCESS_PATCH：security.fullAccess=true 时二代的工具面不变量是「你有本地工具」，
+  // 所以校验必须带上同一个开关，否则预设自身合规也会被判成缺条。
+  const fullAccess = (() => {
+    try {
+      return JSON.parse(fs.readFileSync(new URL('../config.json', import.meta.url), 'utf8')).security?.fullAccess === true;
+    } catch {
+      return false;
+    }
+  })();
   for (const [name, gen] of [['qq-chat', 'v1'], ['qq-chat-v2', 'v2']]) {
     const text = fs.readFileSync(new URL(`../dsh/agent-presets/${name}/agent.cordis.yml`, import.meta.url), 'utf8');
     const prefix = extractPresetPrefix(text);
     assert.equal(typeof prefix, 'string', `${name} 应能抽出 persona.prefix`);
-    const blockers = presetPromptBlockers(prefix, gen);
+    const blockers = presetPromptBlockers(prefix, gen, { fullAccess });
     assert.deepEqual(blockers, [], `${name}（${gen}）不应有阻断项，实际：${blockers.join('；')}`);
   }
 });
@@ -52,7 +71,9 @@ test('真实预设能定位到 persona 的 prefix 块', () => {
 
 test('抽出的是 YAML 解析后的真实字符串（折叠标量已展开）', () => {
   assert.equal(typeof originalPrefix, 'string');
-  assert.ok(originalPrefix.length > 2000, `提示词应有实质内容，实际 ${originalPrefix.length} 字符`);
+  // 2026-11-02 操作者要求提速，预设正文从 14.6K 瘦到 ~1.5K（细节挪进角色卡）。
+  // 真正的闸门是下面的 marker 断言；这里只留一个「没被清空」的下限。
+  assert.ok(originalPrefix.length > 1200, `提示词应有实质内容，实际 ${originalPrefix.length} 字符`);
   for (const marker of PRESET_REQUIRED_MARKERS) {
     assert.ok(originalPrefix.includes(marker), `内置提示词应包含安全基线段落：${marker}`);
   }
@@ -60,14 +81,14 @@ test('抽出的是 YAML 解析后的真实字符串（折叠标量已展开）',
 });
 
 test('原样写回是幂等的，且不改变提示词语义', () => {
-  const rewritten = renderPresetPromptYaml(source, originalPrefix);
+  const rewritten = renderPresetPromptYaml(source, originalPrefix, 'v2', FULL);
   assert.equal(extractPresetPrefix(rewritten), originalPrefix, '读回应与原提示词逐字一致');
   // 再写一次仍稳定
-  assert.equal(renderPresetPromptYaml(rewritten, originalPrefix), rewritten);
+  assert.equal(renderPresetPromptYaml(rewritten, originalPrefix, 'v2', FULL), rewritten);
 });
 
 test('改写只动 prefix，其它条目与文件头注释原样保留', () => {
-  const next = renderPresetPromptYaml(source, `${originalPrefix}\n\n【新增段落】测试内容。`);
+  const next = renderPresetPromptYaml(source, `${originalPrefix}\n\n【新增段落】测试内容。`, 'v2', FULL);
   const before = yaml.load(source);
   const after = yaml.load(next);
   assert.deepEqual(after.map((row) => row.id), before.map((row) => row.id), '条目 id 顺序不变');
@@ -100,7 +121,7 @@ test('特殊内容可安全往返（空行、缩进、Markdown、模板变量、
     '结尾不留多余空行',
   ].join('\n');
   // 必须在保留安全不变量的前提下追加特殊内容，否则会被阻断校验拦下
-  const next = renderPresetPromptYaml(source, `${originalPrefix}\n\n${tricky}`);
+  const next = renderPresetPromptYaml(source, `${originalPrefix}\n\n${tricky}`, 'v2', FULL);
   assert.equal(extractPresetPrefix(next), `${originalPrefix}\n\n${tricky}`);
   const rows = yaml.load(next);
   assert.equal(rows.length, yaml.load(source).length, '其它条目数量不变');
@@ -116,38 +137,43 @@ test('危险输入被拒绝，且不产生半截结果', () => {
 
 test('删掉安全不变量或正文过短时阻断保存（保护 AI 效果与自家测试）', () => {
   // 正文过短
-  assert.throws(() => renderPresetPromptYaml(source, '太短了'), /过短/);
+  assert.throws(() => renderPresetPromptYaml(source, '太短了', 'v2', FULL), /过短/);
   // 逐条移除安全不变量，必须被拦住
-  for (const needle of PRESET_BLOCKING_SUBSTRINGS) {
+  // FULL_ACCESS_PATCH：按当前开关取生效清单（fullAccess 时第一条是「你有本地工具」）。
+  for (const needle of presetBlockingSubstrings('v2', FULL)) {
     const tampered = originalPrefix.replace(needle, '（已删除）');
     assert.throws(
-      () => renderPresetPromptYaml(source, tampered),
+      () => renderPresetPromptYaml(source, tampered, 'v2', FULL),
       new RegExp(`缺少安全不变量「${needle}」`),
       `删除「${needle}」后仍被允许保存`,
     );
   }
   // 只做无损追加则应当通过
-  assert.doesNotThrow(() => renderPresetPromptYaml(source, `${originalPrefix}\n\n【补充】一句新规则。`));
-  const clean = presetPromptBlockers(originalPrefix);
+  assert.doesNotThrow(() => renderPresetPromptYaml(source, `${originalPrefix}\n\n【补充】一句新规则。`, 'v2', FULL));
+  const clean = presetPromptBlockers(originalPrefix, 'v2', FULL);
   assert.deepEqual(clean, [], `内置提示词不应有阻断项，实际：${clean.join('；')}`);
 });
 
 test('写回沿用文件主导行尾，且不吞掉块尾空行', () => {
-  const next = renderPresetPromptYaml(source, originalPrefix);
+  // 仓库里的预设是 LF；这个用例要测的是「CRLF 文件写回仍用 CRLF」，
+  // 所以显式造一个 CRLF 夹具，别指望源文件恰好是 CRLF（那样这条从没真跑过）。
+  const crlfSource = source.replace(/\r?\n/g, '\r\n');
+  const crlfPrefix = extractPresetPrefix(crlfSource);
+  const next = renderPresetPromptYaml(crlfSource, crlfPrefix, 'v2', FULL);
   const crlf = (next.match(/\r\n/g) ?? []).length;
   const lfOnly = (next.match(/\n/g) ?? []).length - crlf;
   assert.ok(crlf > 0, 'CRLF 文件写回后应仍使用 CRLF');
   assert.equal(lfOnly, 0, '写回后不应残留/新增 LF-only 行');
   assert.ok(next.includes('prefix: |-\r\n'), '新增行应使用 CRLF');
   // 块之后的内容（空行、注释、后续条目）必须逐字保留
-  const before = locatePresetPromptBlock(source);
+  const before = locatePresetPromptBlock(crlfSource);
   const after = locatePresetPromptBlock(next);
   assert.deepEqual(
     next.split('\n').slice(after.blockEnd),
-    source.split('\n').slice(before.blockEnd),
+    crlfSource.split('\n').slice(before.blockEnd),
     'prefix 块之后的内容应逐字不变（含块尾空行与注释）',
   );
-  assert.ok(source.split('\n').slice(before.blockEnd).some((l) => l.trim() === ''), '样本应确实包含块尾空行，否则该断言无意义');
+  assert.ok(crlfSource.split('\n').slice(before.blockEnd).some((l) => l.trim() === ''), '样本应确实包含块尾空行，否则该断言无意义');
 });
 
 test('只含空格/Tab 的行也能安全往返（不会被当成空行读丢）', () => {
@@ -159,7 +185,7 @@ test('只含空格/Tab 的行也能安全往返（不会被当成空行读丢）
     '正常一行',
   ].join('\n');
   // 前 3 行来自原文，因此安全不变量仍然齐全
-  const next = renderPresetPromptYaml(source, spaced);
+  const next = renderPresetPromptYaml(source, spaced, 'v2', FULL);
   assert.equal(extractPresetPrefix(next), spaced, '空白行必须原样保留');
 });
 

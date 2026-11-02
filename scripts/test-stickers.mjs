@@ -88,10 +88,11 @@ console.log('## 配置文件');
 {
   const cfg = JSON.parse(fs.readFileSync(path.join(ROOT, 'config.json'), 'utf8'));
   const tools = cfg.socialV2?.tools ?? {};
-  ok(tools.listStickers === true, 'config listStickers=true');
-  ok(tools.getStickerImage === true, 'config getStickerImage=true');
-  ok(tools.sendSticker === true, 'config sendSticker=true');
-  ok(tools.stickerNote === true, 'config stickerNote=true');
+  // 2026-11-02 提速：贴纸面工具全部关掉（33 → 19 个工具）。
+  ok(tools.listStickers === false, 'config listStickers=false（提速）');
+  ok(tools.getStickerImage === false, 'config getStickerImage=false（提速）');
+  ok(tools.sendSticker === false, 'config sendSticker=false（提速）');
+  ok(tools.stickerNote === false, 'config stickerNote=false（提速）');
   ok(tools.setStickerRemark === false, 'config setStickerRemark=false（默认禁用）');
   ok(cfg.socialV2?.sticker?.enabled === true, 'config sticker.enabled=true');
   ok(!('sendCaptionMaxChars' in (cfg.socialV2?.sticker ?? {})), 'config sticker 不再包含 sendCaptionMaxChars');

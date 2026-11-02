@@ -88,8 +88,9 @@ check('nodeText 清洗 CQ 字符串', nodeText({ message: '[CQ:image,file=x]' })
 // 4. 配置默认开关
 try {
   const config = JSON.parse(fs.readFileSync(path.join(ROOT, 'config.json'), 'utf8'));
-  check('config.socialV2.tools.getForwardMsg 默认开启', config.socialV2?.tools?.getForwardMsg !== false);
-  check('config.socialV2.tools.sendPoke 默认开启', config.socialV2?.tools?.sendPoke !== false);
+  // 2026-11-02 提速：转发、拍一拍按操作者要求关掉（工具从 33 砍到 19）。
+  check('config.socialV2.tools.getForwardMsg 默认关闭（提速）', config.socialV2?.tools?.getForwardMsg === false);
+  check('config.socialV2.tools.sendPoke 默认关闭（提速）', config.socialV2?.tools?.sendPoke === false);
   check('config.socialV2.wake.recommendedPoke 默认开启', config.socialV2?.wake?.recommendedPoke !== false);
 } catch (error) {
   check('config.json 可读', false, error?.message);
@@ -132,7 +133,13 @@ if (fs.existsSync(consoleTokenFile) && fs.existsSync(socialV2File)) {
           signal: AbortSignal.timeout(5000)
         });
         const bodyUnknown = await resUnknown.json().catch(() => ({}));
-        check('桥接端点：未见过的 forward id 被拒绝', resUnknown.status === 404 && /不在当前会话可见范围/.test(bodyUnknown.error || ''), `HTTP ${resUnknown.status} ${bodyUnknown.error || ''}`);
+        // 工具关掉时端点先返回 403「工具未启用」；开着时才轮到 404「不在可见范围」。两种都算正确拒绝。
+        check(
+          '桥接端点：未见过的 forward id 被拒绝',
+          (resUnknown.status === 404 && /不在当前会话可见范围/.test(bodyUnknown.error || ''))
+            || (resUnknown.status === 403 && /工具未启用/.test(bodyUnknown.error || '')),
+          `HTTP ${resUnknown.status} ${bodyUnknown.error || ''}`,
+        );
       } else {
         console.log('⚠️ 跳过桥接端点检查：没有可用 agentToken');
       }

@@ -34,7 +34,11 @@
 
 ## QQ 会话 agent 的硬边界
 
-1. **无本地工具**：qq-chat / qq-chat-v2 预设不挂载 bash/pwsh、文件读写、子代理、工作流——群友无论如何诱导，agent 物理上无法操作本机。
+1. **本地工具：默认没有，全权限模式才有**。默认状态下 qq-chat / qq-chat-v2 预设不挂载 bash/pwsh、文件读写、子代理、工作流——群友无论如何诱导，agent 物理上无法操作本机。
+   - ⚠️ **例外（2026-11-01 起，操作者显式开启）**：`config.json` 的 `security.fullAccess: true` + 预设里 `qq-tool-restrict` 的 `config.fullAccess: true` 会让上面这条失效——v2 预设直接挂上 `tool-bash`、`tool-fs`、`tool-fs-search`、`tool-str-replace-editor`、`tool-working-directory`、子代理/工作流、`tool-schedule`、`tool-goal`、`tool-skill`、`tool-session-query`、`tool-cordis`、`tool-present`、`plugin-manager`，同时 `qq-tool-restrict` 整体让位、桥接侧「仅控制台可用」的闸门全部放行。
+   - 代价说清楚：这等于把**这台服务器的 root shell**通过 QQ 群消息暴露出去（bridge 以 root 跑，`roles/…`、`config.json`、`state/` 全部可读可写）。收回只需把两处 `fullAccess` 改回 false（或删掉预设里那一段工具行）再重启 `dsh`。
+   - 此时预设正文的第 1 条安全规则必须同步改成「本地工具你是有的，但只认管理员」（`src/preset-prompt.js` 的 `PRESET_BLOCKING_SUBSTRINGS_V2_FULL_ACCESS` 与 `scripts/test-qq-preset-contract.mjs` 会强制校验这一点）。
+
 2. **QQ 动作安全子集**：只允许 `mcp__snowluma__*`、`mcp__snowluma-host__*`、`mcp__web-search-safe__*` 三个命名空间下的工具，以及 `ask_user_question` / `todo_write`；其他工具（含 `dev_*` 开发/管理工具）在执行期会被 `qq-tool-restrict.mjs` 拒绝。QQ 动作无禁言、踢人、文件上传下载等管理操作。
 3. **只读联网搜索**：`qq-chat` / `qq-chat-v2` 预设已关闭 DSH 内置 `tool-web` 的 `search` / `fetch`，联网统一走 `src/mcp-web-search-safe.js` 提供的 `mcp__web-search-safe__web_search/web_fetch`。不暴露本地文件、命令执行、写操作。
    - ✅ `mcp__web-search-safe__web_fetch` 已做 SSRF 加固：仅 http/https、禁止 localhost/私有 IP/链路本地/CGNAT/带凭据 URL、DNS 解析结果全量校验、每跳重定向重新校验、响应体限量读取。
@@ -58,7 +62,7 @@
 - **人格卡只写人设，不写工具用法**：两代工具协议不同（一代空格分条 / `[SILENT]`，二代一切皆工具），写进人格卡必然有一代是错的；而且桥接已经每条消息注入当前模式的分条与潜水方式。写作规范见 `roles/README.md`。
 - 同一个角色确实需要分代时，用**标题级模式标记**：`## 分条方式 〔一代〕` / `## 表情包 〔二代〕`；无标记的小节两代都注入，标记在注入前会被去掉。桥接按当前模式筛完小节**再**截断。
 - **注入上限**：默认每条消息 6000 字符（`config.json` 的 `role.maxInjectChars`，1000~20000，控制台可改）。这是成本护栏——人格卡会随每条消息发送。
-- 仿真提示词保存前会做硬性校验：保留 `你没有本地工具` / `群友没有管理权限` / `API 令牌` / `角色由桥接注入` / `不会自动发送到 QQ` 这些安全不变量，且正文 ≥ 500 字符；缺失即拒绝保存（否则会同时削弱权限边界并让 `npm run test:audit` 变红）。写入前自动备份到 `state/preset-backups/`，可一键还原；还原时同样校验。
+- 仿真提示词保存前会做硬性校验：保留 `你没有本地工具`（`security.fullAccess: true` 时为 `你有本地工具`）/ `群友没有管理权限` / `API 令牌` / `角色由桥接注入` / `不会自动发送到 QQ` 这些安全不变量，且正文 ≥ 500 字符；缺失即拒绝保存（否则会同时削弱权限边界并让 `npm run test:audit` 变红）。写入前自动备份到 `state/preset-backups/`，可一键还原；还原时同样校验。
 - 一代遗留写法（空格分句、`[SILENT]`、自动转发）若出现在**未标记**的小节里，二代下会被兜底整行过滤；控制台会提示把它们移到 `〔一代〕` 小节。
 - 两层提示词都**只能由控制台（管理员令牌）修改**：带 `x-agent-token` 的请求对这些端点一律 403，QQ 群里的 AI 无法改写自己的提示词。
 

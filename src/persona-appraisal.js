@@ -124,16 +124,28 @@ export function parseJsonLoose(text) {
 
 /** DeepSeek 兼容 OpenAI 的 /chat/completions，强制 JSON 输出。失败一律抛错，由调用方兜底。 */
 export function createDeepSeekClient({ getSettings, getApiKey, fetchImpl = fetch }) {
-  // maxTokens 默认 1500：思考型模型的思考内容也算进上限，给少了正文会被截空。
+  // maxTokens 默认 12000：思考型模型的思考内容也算进上限，给少了正文会被截空
+  // （2026-11-01 实测 1500 会截断，默认值已上调；persona.js 里另传 8000）。
   // PERSONA_PATCH：2026-10-29 任务 0 实测输出 201～703 token（思考 136～606），800 时最长一次只差 12%，思考稍长就会 finish_reason=length。
-  async function chatJson(messages, { maxTokens = 1500, timeoutMs } = {}) {
+  // 本地补丁（2026-11-01）：老王网关会丢掉 system 消息，模型看不到指令、只会照着角色卡扮演
+  // （实测：人格评估员指令被吞，模型回了"粽子""卡我看完了"）。这里把 system 并进第一条 user 消息。
+  function foldSystem(messages) {
+    const sys = messages.filter((m) => m.role === 'system').map((m) => String(m.content ?? '')).join('\n\n').trim();
+    const rest = messages.filter((m) => m.role !== 'system');
+    if (!sys) return messages;
+    if (!rest.length) return [{ role: 'user', content: sys }];
+    const first = rest[0];
+    return [{ ...first, role: 'user', content: sys + '\n\n' + String(first.content ?? '') }, ...rest.slice(1)];
+  }
+
+  async function chatJson(messages, { maxTokens = 12000, timeoutMs } = {}) {
     const s = getSettings().appraisal;
     const key = getApiKey();
     if (!key) throw new Error('未配置判读密钥');
     const res = await fetchImpl(`${String(s.baseUrl).replace(/\/+$/, '')}/chat/completions`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${key}` },
-      body: JSON.stringify({ model: s.model, messages, response_format: { type: 'json_object' }, temperature: 0.3, max_tokens: maxTokens, stream: false }),
+      body: JSON.stringify({ model: s.model, messages: foldSystem(messages), response_format: { type: 'json_object' }, temperature: 0.3, max_tokens: maxTokens, stream: false }),
       signal: AbortSignal.timeout(timeoutMs ?? s.timeoutMs)
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);

@@ -30,6 +30,10 @@ import { createTtsApi, readJsonBody as readLargeJsonBody } from '../src/tts-api.
 import { createLongMemory } from '../src/long-memory.js';
 // RAG_PATCH：memory-rag 客户端 / 日期与关键词归一（bridge.js 顶层 import，同样要注入）。
 import { createMemoryRagClient, normalizeDateRange, normalizeKeywords } from '../src/memory-rag-client.js';
+// ROLE_SELF_EDIT_PATCH：角色卡自改的护栏（bridge.js 顶层 import 会被剥掉，同样要注入）。
+import * as roleSelfEdit from '../src/role-self-edit.js';
+// TOPIC_SCAN_PATCH：桥接顶层 import 在 vm 里会被剥掉，模块要显式注入（同 role-self-edit）
+import * as topicScan from '../src/topic-scan.js';
 // SUGGEST_PATCH：账本建议（bridge.js 顶层 import，同样要注入；坑 12）。
 import { createLedgerSuggest } from '../src/ledger-suggest.js';
 // PERSONA_PATCH：人格与情绪（bridge.js 顶层 import，同样要注入）。
@@ -202,7 +206,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     initialPrompts, initialPromptMaxChars,
     extractMediaFromSegments, segmentsToText, fetchOneBotImage, fetchMediaData, resolveMediaList,
     emojiCdnCandidates, getImageDimensions, acceptImageBuffer, MAX_MEDIA_BYTES, bot,
-    isConversationBusyV2, v2TurnStartAt, turnLeaseNoted, TURN_BUSY_LEASE_MS,
+    isConversationBusyV2, v2TurnStartAt, turnLeaseNoted, turnBusyLeaseMs,
     settingFromDshNamespace, selfIdentityTextV2, buildWakeReminderPromptV2,
     getMode() { return currentMode; },
     // LIFE_LOOP_PATCH：测试要直接拿到实例，调 snapshot() / tick()（harness 的 setInterval 是桩，定时器不会跑）。
@@ -259,6 +263,8 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     createRagControl, defaultRagExec: fakeRagExec, createApiHub, readEmbeddingKind, dshCredentials,
     ...markdown, ...sensitive, ...wait, ...safeFetch, ...forward, ...slang, ...sticker,
     ...modelPrices, ...tokenLedger, ...voiceLib, ...stateAcl, ...presetPrompt,
+    ...roleSelfEdit,
+    ...topicScan,
     // 桥接的出图出口会调归一化（体积/动图抽帧）：VM 里必须能拿到这几个函数。
     normalizeImageForModel: mediaNormalize.normalizeImageForModel,
     sniffImage: mediaNormalize.sniffImage,

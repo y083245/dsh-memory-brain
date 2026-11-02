@@ -88,8 +88,20 @@ const LOCAL_EXECUTION_TOOLS = [
   'subagent_codex', 'subagent_claude_code',
 ];
 
-/** 0.2.1 起 Codex / Claude Code 改为按需安装：这组名字默认扫不到，不算拼错假名。 */
-const OPTIONAL_BUNDLE_TOOLS = new Set(['subagent_codex', 'subagent_claude_code']);
+/**
+ * 可选/按需安装的工具名，扫不到不算拼错假名：
+ * - 0.2.1 起 Codex / Claude Code 改为按需安装。
+ * - dsh_snapshot / dsh_rollback / incident_resolved 属于宿主插件（快照/事故插件）提供的工具，
+ *   本机装的是 dsh-base + dsh-web-app 的 headless 组合，没挂这两个插件，故扫不到。
+ *   名单里保留它们是为了"别的 composition 挂上时仍然拦住"，不是笔误。
+ */
+const OPTIONAL_BUNDLE_TOOLS = new Set([
+  'subagent_codex',
+  'subagent_claude_code',
+  'dsh_snapshot',
+  'dsh_rollback',
+  'incident_resolved',
+]);
 
 /**
  * 工具名 → 真实存在与否。抽取实现在 `scripts/dsh-tool-names.mjs`（唯一实现，

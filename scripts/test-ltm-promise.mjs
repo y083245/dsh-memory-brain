@@ -329,7 +329,14 @@ await test('update：状态 / due / by 的校验与清除', async () => {
     assert.equal(cleared.due, undefined);
     assert.equal(cleared.by, undefined);
     const set = lm.update({ userId: OWNER, itemId: made.id, due: '下周三', by: 'them', viewerKey: KEY });
-    assert.equal(set.due, '2026-11-04');
+    // 这条走的是真实 now（update 内部用 new Date()），不能钉死某天，否则跨天就假红。
+    // 语义断言：必须是「下周三」——星期三、且在 8 天以内（本周之外）。
+    {
+      const dueDate = new Date(set.due + 'T12:00:00');
+      assert.equal(dueDate.getDay(), 3, `下周三应是星期三，实际 ${set.due}`);
+      const days = Math.round((dueDate - new Date()) / 86400000);
+      assert.ok(days > 0 && days <= 14, `下周三应在未来两周内，实际 ${days} 天`);
+    }
     assert.equal(set.by, 'them');
 
     // 非约定不能有状态 / 到期日

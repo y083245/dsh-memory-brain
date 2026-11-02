@@ -145,7 +145,9 @@ await test('createAppraiser：把 prefs 传下去（system 里带好恶；模型
   assert.equal(a.source, 'model');
   assert.equal(a.trigger, 'p2');
   assert.match(f.calls[0].body.messages[0].content, /【她的好恶】\np1：喜欢「被认真夸」\np2：讨厌「被叫大肥鱼」/);
-  assert.doesNotMatch(f.calls[0].body.messages[1].content, /被叫大肥鱼/, '好恶不进 user');
+  // foldSystem 把 system 并进第一条 user，messages[1] 不一定存在；改成「好恶只出现一次」。
+  const merged = f.calls[0].body.messages.map((m) => String(m.content ?? '')).join('\n');
+  assert.equal(merged.split('被叫大肥鱼').length - 1, 1, '好恶只出现一次（不再单发 system）');
   assert.equal((await ap.appraise({ speaker: '阿青', text: 'x', directed: true, prefs })).trigger, '', '不在列表里的 trigger 置空');
   const b = await ap.appraise({ speaker: '阿青', text: '大肥鱼', directed: true, prefs });
   assert.equal(b.source, 'rules');
@@ -173,7 +175,7 @@ await test('parseJsonLoose：代码块、前后夹字都能取出对象；取不
   const client = createDeepSeekClient({ getSettings: settings, getApiKey: () => 'k', fetchImpl: f });
   assert.equal((await client.chatJson([])).json.kind, 'insult');
   await assert.rejects(client.chatJson([]), /finish_reason=length，正文 0 字，带思考内容/);
-  assert.equal(f.calls[0].body.max_tokens, 1500);
+  assert.equal(f.calls[0].body.max_tokens, 12000);
 });
 
 await test('createAppraiser：mode=rules 不调模型；mode=off 返回 null；超每日上限退回规则', async () => {

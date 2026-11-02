@@ -82,7 +82,7 @@ await test('#11/#19 回合判忙：无起始时间的残留 collector 不再永�
     h.v2TurnStartAt.set(SID, Date.now());
     assert.equal(h.isConversationBusyV2(KEY, st), true, '回合刚开始必须判忙');
 
-    h.v2TurnStartAt.set(SID, Date.now() - (h.TURN_BUSY_LEASE_MS + 60_000));
+    h.v2TurnStartAt.set(SID, Date.now() - (h.turnBusyLeaseMs() + 60_000));
     assert.equal(h.isConversationBusyV2(KEY, st), false, '超过租约必须解除忙碌');
     assert.equal(h.collectors.has(SID), true, '租约过期不能丢掉 collector（迟到回复仍要 flush）');
 
