@@ -247,6 +247,9 @@ export function createMemoryRagClient({ url = DEFAULT_URL, timeoutMs = DEFAULT_T
     if (params.expand !== undefined && params.expand !== null && params.expand !== '') {
       payload.expand = clampInt(params.expand, 0, 5, 0);
     }
+    // BRAIN_PATCH：只有调用方明确要（debug: true）才在请求体里带 debug —— 不传时请求体与改动前逐字节相同。
+    const wantDebug = params.debug === true;
+    if (wantDebug) payload.debug = true;
 
     const response = await request('/search', {
       method: 'POST',
@@ -300,6 +303,28 @@ export function createMemoryRagClient({ url = DEFAULT_URL, timeoutMs = DEFAULT_T
     const result = { semantic, ...(hint ? { hint } : {}), items };
     // 不可枚举：序列化时（日志 / 误发 / JSON.stringify）不会把存档文件名带出去。
     Object.defineProperty(result, 'refs', { value: refs, enumerable: false, writable: false, configurable: false });
+    // BRAIN_PATCH：debug 时把五路名次挂成不可枚举的 trace（同 refs）：给 AI 的响应逐字不变，
+    // 序列化也带不出去。ranked 只留编号 / 分数 / 来源（服务端的 core 里有存档文件名，丢掉）；
+    // itemIds 与 items 平行，是每段命中的话题块编号（脑图点亮光点用）。
+    if (wantDebug) {
+      const ranked = Array.isArray(data.ranked)
+        ? data.ranked
+          .filter((r) => r && typeof r === 'object' && typeof r.id === 'string' && r.id)
+          .map((r) => ({
+            id: r.id,
+            score: typeof r.score === 'number' && Number.isFinite(r.score) ? r.score : null,
+            sources: Array.isArray(r.sources) ? r.sources.filter((x) => typeof x === 'string') : []
+          }))
+        : [];
+      const routes = {};
+      if (data.routes && typeof data.routes === 'object' && !Array.isArray(data.routes)) {
+        for (const [name, n] of Object.entries(data.routes)) {
+          if (typeof n === 'number' && Number.isFinite(n)) routes[name] = n;
+        }
+      }
+      const itemIds = picked.map((it) => (Array.isArray(it.ids) ? it.ids.filter((x) => typeof x === 'string' && x) : []));
+      Object.defineProperty(result, 'trace', { value: { ranked, routes, itemIds }, enumerable: false, writable: false, configurable: false });
+    }
     return result;
   }
 
@@ -588,8 +613,89 @@ export function createMemoryRagClient({ url = DEFAULT_URL, timeoutMs = DEFAULT_T
     }, DISTILL_RETRY_TIMEOUT_MS);
   }
 
+  // ── BRAIN_PATCH：实时脑图（docs/design/worker-kit/brain/contract.md §5.1 / §5.2）──
+  // 都只读、只回环、受总开关拦截（关着零请求）；失败一律 null（chunk 的 404 单独给出）。
+  const GRAPH_TIMEOUT_MS = 5000;
+  const KEY_LIST_MAX = 200;
+
+  /** POST /graph：快照用的块 / 摘要 / 实体 / 关系 / 候选（不含块原文）。keys 为空 = 全部会话。 */
+  async function graph({ keys = null, limit = 2000 } = {}) {
+    if (!enabled()) return null;
+    let list = null;
+    if (Array.isArray(keys) && keys.length) {
+      list = [];
+      for (const raw of keys.slice(0, KEY_LIST_MAX)) {
+        const k = String(raw ?? '').trim();
+        if (!KEY_RE.test(k)) { log('[rag] 拒绝脑图查询：会话 key 不合法'); return null; }
+        if (!list.includes(k)) list.push(k);
+      }
+    }
+    const response = await request('/graph', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ keys: list, limit: clampInt(limit, 1, 2000, 2000) })
+    }, GRAPH_TIMEOUT_MS);
+    if (!response || !response.ok) return null;
+    let data;
+    try { data = await response.json(); } catch { return null; }
+    if (!data || typeof data !== 'object' || Array.isArray(data) || data.ok === false) return null;
+    const arr = (v) => (Array.isArray(v) ? v.filter((x) => x && typeof x === 'object' && !Array.isArray(x)) : []);
+    const inScope = (row) => !list || list.includes(String(row.key ?? ''));
+    // 纵深防御：指定了会话时，带 key 的行必须落在请求的会话里（实体没有 key）。
+    const chunks = arr(data.chunks).filter(inScope).map((c) => {
+      const { text, ...rest } = c; // 约定里本来就不含原文；万一带了也不往外带
+      return rest;
+    });
+    return {
+      ok: true,
+      chunks,
+      summaries: arr(data.summaries).filter(inScope),
+      entities: arr(data.entities),
+      summary_entities: arr(data.summary_entities).filter(inScope),
+      relations: arr(data.relations).filter(inScope),
+      notes: arr(data.notes).filter(inScope),
+      truncated: data.truncated && typeof data.truncated === 'object' && !Array.isArray(data.truncated) ? data.truncated : {}
+    };
+  }
+
+  /** POST /chunk：话题块原文（点开才取）。404 → { ok:false, status:404 }；其它失败 null。 */
+  async function chunk({ key, chunkId } = {}) {
+    if (!enabled()) return null;
+    const k = String(key ?? '').trim();
+    const id = String(chunkId ?? '').trim();
+    if (!KEY_RE.test(k) || !id || id.length > 200) return null;
+    const response = await request('/chunk', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ key: k, chunk_id: id })
+    });
+    if (!response) return null;
+    if (response.status === 404) return { ok: false, status: 404 };
+    if (!response.ok) return null;
+    let data;
+    try { data = await response.json(); } catch { return null; }
+    if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+    if (String(data.key ?? '') !== k || String(data.chunk_id ?? '') !== id) {
+      log('[rag] 拒绝返回：/chunk 响应 key 与请求不一致');
+      return null;
+    }
+    return {
+      ok: true,
+      chunk_id: id,
+      key: k,
+      day: typeof data.day === 'string' ? data.day : '',
+      title: typeof data.title === 'string' ? data.title : '',
+      t_start: Number.isFinite(data.t_start) ? data.t_start : null,
+      t_end: Number.isFinite(data.t_end) ? data.t_end : null,
+      n_msgs: Number.isFinite(data.n_msgs) ? data.n_msgs : null,
+      text: typeof data.text === 'string' ? data.text : ''
+    };
+  }
+
   return {
     search, health, indexRun, rebuild, forget, recall, associate, summaries, notes, distillRetry,
+    // BRAIN_PATCH：实时脑图的只读接口
+    graph, chunk,
     // APIHUB_PATCH：给桥接算 history-search 的 semantic / 判断总开关用。
     enabled
   };

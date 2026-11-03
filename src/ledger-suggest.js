@@ -134,8 +134,13 @@ function withTimeout(promise, ms) {
   });
 }
 
-export function createLedgerSuggest({ rag = null, ltm = null, statePath = null, config = {}, log = () => {}, now = () => Date.now() } = {}) {
+export function createLedgerSuggest({ rag = null, ltm = null, statePath = null, config = {}, log = () => {}, now = () => Date.now(), onEvent = null } = {}) {
   const cfg = normalizeConfig(config);
+  // BRAIN_PATCH：实时脑图的可选回调（缺省不调）；回调出错一律吞掉，不影响计次 / 采用判定。
+  const fire = (type, payload) => {
+    if (typeof onEvent !== 'function') return;
+    try { onEvent(type, payload); } catch { /* 脑图的问题不影响账本建议 */ }
+  };
   const at = () => {
     const t = Number(typeof now === 'function' ? now() : now);
     return Number.isFinite(t) ? t : Date.now();
@@ -362,6 +367,16 @@ export function createLedgerSuggest({ rag = null, ltm = null, statePath = null, 
         touched += 1;
       }
       if (touched) save();
+      if (touched) {
+        const shownIds = list.map((raw) => String(raw ?? '')).filter((id) => state.items[id]?.key === k);
+        const cached = cache.get(k);
+        fire('suggest.shown', {
+          key: k, nodes: shownIds.map((id) => `note:${id}`), n: { items: shownIds.length },
+          data: () => ({
+            items: shownIds.map((id) => ({ node: `note:${id}`, text: cached?.items?.find((c) => c.id === id)?.text ?? null }))
+          })
+        });
+      }
     } catch (error) {
       log(`[suggest] 计次失败（${error?.code ?? 'error'}）`);
     }
@@ -393,6 +408,7 @@ export function createLedgerSuggest({ rag = null, ltm = null, statePath = null, 
         entry.status = 'adopted';
         entry.statusAt = t;
         changed += 1;
+        fire('suggest.adopted', { key: k, nodes: [`note:${cand.id}`, `ltm:${id}`], data: { node: `note:${cand.id}`, ltm: `ltm:${id}` } });
       }
       if (changed) {
         save();

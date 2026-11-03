@@ -656,9 +656,12 @@ export function createLongMemory({ stateDir, redact = (s) => s, log = () => {}, 
   }
 
   /** 给唤醒提示用的一段「你记得的事」。 */
-  function renderFor(userIds, viewerKey, { maxChars = 1800, today } = {}) {
+  function renderFor(userIds, viewerKey, { maxChars = 1800, today, trace } = {}) {
     // LIFE_LOOP_PATCH：今天的日期可注入（测试用假时钟）；缺省是本地今天。
     const day = today ? String(today) : ymd();
+    // BRAIN_PATCH：trace 是数组时把这次注入的条目编号（ltm:<id>）推进去，给实时脑图点亮用；
+    // 不传时一行都不走，输出逐字不变。
+    const traceIds = Array.isArray(trace) ? trace : null;
     const blocks = [];
     for (const uid of userIds) {
       const v = personView(uid, viewerKey);
@@ -677,6 +680,7 @@ export function createLongMemory({ stateDir, redact = (s) => s, log = () => {}, 
       // 参数：标签、要显示的条目、该类的未归档总数（「另有 N 条」只数未归档）
       const push = (label, shown, total) => {
         if (!shown.length) return;
+        if (traceIds) for (const x of shown) traceIds.push(`ltm:${x.id}`);
         lines.push(`  ${label}：${shown.map(fmt).join('；')}${total > shown.length ? `（另有 ${total - shown.length} 条，用 qq_ltm_recall 查看）` : ''}`);
       };
       const openItems = items.filter(renderable);

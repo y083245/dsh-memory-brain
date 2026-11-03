@@ -50,6 +50,9 @@ import { createRoleStore } from '../src/role-store.js';
 import { effectivePresetYaml, readOverride, writeOverride, removeOverride } from '../src/preset-overlay.js';
 import { buildPatches } from './build-agent-preset-patches.mjs';
 import { createUpdateCheck } from '../src/update-check.js';
+// BRAIN_PATCH：实时脑图的事件总线与回放（bridge.js 顶层 import，同样要注入，坑 12）。
+import { createBrainFeed } from '../src/brain-feed.js';
+import { createBrainReplay } from '../src/brain-replay.js';
 // UPGRADE_PATCH：角色卡统计 / 分节（bridge.js 顶层 import）。以前没注入，/api/roles 系列在 harness 里一调就报
 // 「roleCharStats is not defined」；覆盖层的接口测试要真跑这些路由，所以补上。
 import * as roleCard from '../src/role-card.js';
@@ -230,6 +233,8 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     getLedgerSuggest() { return ledgerSuggest; },
     // UPGRADE_PATCH：版本检查实例（验证在 harness 里恒为 off、零请求）。
     getUpdateCheck() { return updateCheck; },
+    // BRAIN_PATCH：实时脑图实例（看缓冲 / 连接数；创建失败时是 null）。
+    getBrainFeed() { return feed; },
     setSelfIdentity(display, id) {
       selfDisplayName = String(display ?? '');
       selfUserId = String(id ?? '');
@@ -274,6 +279,8 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     createRagControl, defaultRagExec: fakeRagExec, createApiHub, readEmbeddingKind, dshCredentials,
     // UPGRADE_PATCH：覆盖层与版本检查（版本检查被 QQB_NO_UPDATE_CHECK=1 关着，fetch 也是上面的记录型替身）。
     createRoleStore, effectivePresetYaml, readOverride, writeOverride, removeOverride, buildPatches, createUpdateCheck,
+    // BRAIN_PATCH：globals 里可以覆盖（例如换成回放桩）。
+    createBrainFeed, createBrainReplay,
     ...roleCard,
     ...markdown, ...sensitive, ...wait, ...safeFetch, ...forward, ...slang, ...sticker,
     ...modelPrices, ...tokenLedger, ...voiceLib, ...stateAcl, ...presetPrompt,

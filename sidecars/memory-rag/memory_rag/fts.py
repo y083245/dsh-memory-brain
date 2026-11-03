@@ -280,6 +280,50 @@ class ChunkDB:
             reasons = {r["cut_reason"]: int(r["n"]) for r in self.conn.execute("SELECT cut_reason, COUNT(*) AS n FROM chunks GROUP BY cut_reason")}
         return {"chunks": total, "per_key": per_key, "cut_reason": reasons}
 
+    # ---------------------------------------------------------------- 实时脑图（BRAIN_PATCH）
+
+    def graph_chunks(self, keys: Sequence[str] | None, limit: int) -> tuple[list[dict], int]:
+        """BRAIN_PATCH：脑图用的块元数据，按 t_end 取最新 limit 条，返回 (块, 没返回的条数)。
+
+        **故意不 SELECT text**：脑图快照里不能有原文（规格 §12 Q1），在 SQL 层就不取，
+        免得以后有人顺手把整行 dict 吐出去。keys 为 None = 全部会话；空列表 = 什么都不给。
+        speakers / speaker_names 在库里是逗号拼接（segmenter.Chunk.meta），照 distill.py 的读法拆。
+        """
+        where, args = "", []
+        if keys is not None:
+            keys = [str(k) for k in keys]
+            if not keys:
+                return [], 0
+            where = f" WHERE key IN ({','.join('?' for _ in keys)})"
+            args = list(keys)
+        with self.lock:  # FIX1031_PATCH：理由见 get_meta；计数与取行在同一把锁里，两者一致
+            total = int(self.conn.execute(f"SELECT COUNT(*) AS n FROM chunks{where}", args).fetchone()["n"])
+            rows = self.conn.execute(
+                "SELECT chunk_id, key, day, t_start, t_end, title, n_msgs, speakers, speaker_names "
+                f"FROM chunks{where} ORDER BY t_end DESC, chunk_id ASC LIMIT ?", [*args, int(limit)],
+            ).fetchall()
+        out = [{"chunk_id": r["chunk_id"], "key": r["key"], "day": r["day"],
+                "t_start": int(r["t_start"]), "t_end": int(r["t_end"]), "title": r["title"],
+                "n_msgs": int(r["n_msgs"]),
+                "speakers": [s for s in str(r["speakers"] or "").split(",") if s],
+                "speaker_names": [s for s in str(r["speaker_names"] or "").split(",") if s]}
+               for r in rows]
+        return out, max(0, total - len(out))
+
+    def chunk_text(self, key: str, chunk_id: str) -> dict | None:
+        """BRAIN_PATCH：单块含原文（控制台点开某个话题块时才取）。key 不匹配与不存在一样返回 None。"""
+        if not key or not chunk_id:
+            return None
+        with self.lock:  # FIX1031_PATCH：理由见 get_meta
+            r = self.conn.execute(
+                "SELECT chunk_id, key, day, title, t_start, t_end, n_msgs, text FROM chunks "
+                "WHERE chunk_id=? AND key=?", (str(chunk_id), str(key))).fetchone()
+        if r is None:
+            return None
+        return {"chunk_id": r["chunk_id"], "key": r["key"], "day": r["day"], "title": r["title"],
+                "t_start": int(r["t_start"]), "t_end": int(r["t_end"]), "n_msgs": int(r["n_msgs"]),
+                "text": r["text"]}
+
     def total_chars(self) -> int:
         """APIHUB_PATCH：全部块正文的字数之和（给桥接估算重建量）。读也要持锁，理由同 stats。"""
         with self.lock:

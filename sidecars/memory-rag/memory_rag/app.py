@@ -8,6 +8,8 @@ RAG_PATCH（P3）：另有 /recall（唤醒时自动想起）、/associate（联
 /distill/retry（手动重试提炼失败的块）；前三个与 /search 一样按 key 隔离、先处理遗忘请求。
 SUGGEST_PATCH：/notes（本会话的账本建议候选，同样按 key 隔离、先处理遗忘请求）与
 /notes/backfill（把老摘要排进回补队列，真正回补在提炼循环里跑）。
+BRAIN_PATCH：/graph（实时脑图：块元数据、摘要、实体、关系、候选，不含块原文）与 /chunk（单块原文），
+都只读、先处理遗忘请求；/search 加 debug。
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ from pydantic import BaseModel, Field
 
 from .archive import valid_key
 from .indexer import IndexBusy
+from .l2 import L2
 from .migrations import SchemaTooNew
 from .recall import associate as run_associate, recall as run_recall, summaries as run_summaries
 from .service import RebuildRunning, Service, request_at
@@ -38,6 +41,8 @@ class SearchReq(BaseModel):
     speaker: str = ""
     k: int | None = None
     expand: int | None = None
+    # BRAIN_PATCH：为真时响应多带 ranked / routes（search.py 本来就有）；缺省 False，响应逐字节不变
+    debug: bool = False
 
 
 class ForgetReq(BaseModel):
@@ -81,6 +86,17 @@ class NotesBackfillReq(BaseModel):
     dry_run: bool = False
 
 
+# BRAIN_PATCH：实时脑图两接口（接口约定 §5.1）
+class GraphReq(BaseModel):
+    keys: list[str] | None = None
+    limit: int | None = 2000
+
+
+class ChunkReq(BaseModel):
+    key: str = ""
+    chunk_id: str = ""
+
+
 def _ready():
     if svc.mismatch:
         raise HTTPException(503, f"{svc.mismatch}（运行 python -m memory_rag.cli rebuild）")
@@ -109,6 +125,30 @@ def _recall_ready(key: str) -> None:
         svc.process_forget_requests(only_key=key, blocking=False)
     except IndexBusy:
         raise HTTPException(503, "该会话有待处理的遗忘请求，稍后再试") from None
+
+
+def _brain_ready(keys: list[str] | None) -> L2:
+    """BRAIN_PATCH：/graph、/chunk 的前置检查，返回读 L2 用的对象。keys 为 None = 全部会话。
+
+    不调 _ready()：脑图只读 SQLite，不需要 embedding，口径不一致时也要能画出来（约定 §5.1、任务书第 8 条）。
+    但遗忘请求必须先消费掉，否则会把已删的东西画出来：
+    - 正常时照 /search 的做法非阻塞地处理，拿不到索引锁 → 503（只读模式在 process_forget_requests 里同样抛 IndexBusy）；
+    - 口径不一致时 indexer 不在、消费不了 → 只要涉及的会话有待处理请求就 503，宁可画不出也不返回已删内容。
+    """
+    if svc.indexer is None:
+        if any(keys is None or k in keys for _, k, _ in svc.forget_requests()):
+            raise HTTPException(503, "有待处理的遗忘请求，稍后再试")
+        # 口径不一致时 svc.l2 是 None；L2 只是包一层同库同锁的连接，现造一个就能读
+        return svc.l2 or L2(svc.db)
+    try:
+        if keys is None:
+            svc.process_forget_requests(blocking=False)
+        else:
+            for k in keys:
+                svc.process_forget_requests(only_key=k, blocking=False)
+    except IndexBusy:
+        raise HTTPException(503, "有待处理的遗忘请求，稍后再试") from None
+    return svc.l2 or L2(svc.db)
 
 
 def _clamp(value, lo: int, hi: int, default: int) -> int:
@@ -188,7 +228,7 @@ def search(req: SearchReq):
         raise HTTPException(503, "该会话有待处理的遗忘请求，稍后再试") from None
     try:
         return svc.searcher.search(req.key, req.query, req.keywords[:12], req.date_from, req.date_to,
-                                   req.speaker, req.k, req.expand)
+                                   req.speaker, req.k, req.expand, debug=bool(req.debug))  # BRAIN_PATCH
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
 
@@ -246,6 +286,41 @@ def notes_backfill(req: NotesBackfillReq):
     now = int(time.time() * 1000)
     queued = svc.l2.queue_notes_backfill(hours, now, dry_run=bool(req.dry_run))
     return {"queued": queued, "dry_run": bool(req.dry_run)}
+
+
+# ---------------------------------------------------------------- 实时脑图（BRAIN_PATCH）
+
+
+@app.post("/graph")
+def graph(req: GraphReq):
+    """脑图的全部记忆光点（接口约定 §5.1）。**绝不含块原文**：块原文点开时走 /chunk 单独取。"""
+    keys: list[str] | None = None
+    if req.keys:
+        keys = []
+        for k in req.keys:
+            if not valid_key(k):
+                raise HTTPException(400, "keys 里每一项都必须是 group:<群号> 或 private:<QQ号>")
+            if k not in keys:
+                keys.append(k)
+    limit = _clamp(req.limit, 1, 2000, 2000)
+    l2 = _brain_ready(keys)
+    chunks, chunks_cut = svc.db.graph_chunks(keys, limit)
+    g = l2.graph(keys, limit)
+    return {"ok": True, "chunks": chunks, "summaries": g["summaries"], "entities": g["entities"],
+            "summary_entities": g["summary_entities"], "relations": g["relations"], "notes": g["notes"],
+            "truncated": {"chunks": chunks_cut, **g["truncated"]}}
+
+
+@app.post("/chunk")
+def chunk(req: ChunkReq):
+    """单个话题块的原文。不存在与 key 不匹配回同一个 404，不让人试出「块在，但属于别的会话」。"""
+    if not valid_key(req.key):
+        raise HTTPException(400, "key 必填，格式 group:<群号> 或 private:<QQ号>")
+    _brain_ready([req.key])
+    row = svc.db.chunk_text(req.key, str(req.chunk_id or ""))
+    if row is None:
+        raise HTTPException(404, "话题块不存在")
+    return {"ok": True, **row}
 
 
 @app.post("/distill/retry")

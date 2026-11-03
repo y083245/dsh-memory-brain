@@ -86,6 +86,10 @@ import { createRoleStore } from './role-store.js';
 import { effectivePresetYaml, readOverride, writeOverride, removeOverride } from './preset-overlay.js';
 import { buildPatches } from '../scripts/build-agent-preset-patches.mjs';
 import { createUpdateCheck } from './update-check.js';
+// BRAIN_PATCH：实时脑图（docs/design/BRAIN_LIVE_SPEC.md；接口约定 docs/design/worker-kit/brain/contract.md）。
+// 两个都是顶层 import，测试 harness 要同样注入（坑 12）。
+import { createBrainFeed } from './brain-feed.js';
+import { createBrainReplay } from './brain-replay.js';
 
 // LIFE_LOOP_PATCH（规格 §8.1）：这三种唤醒本来就是桥接自己产出的「本地文案」——own-life 的
 // 自己的时间、到期的约定、每周周报。以前它们会被通用唤醒分支整段替换掉（F1），现在有文案时
@@ -1698,6 +1702,37 @@ async function main() {
       }
       : null,
   });
+  // ── BRAIN_PATCH：实时脑图的事件总线（只读旁路；规格 §2、约定 §0） ──
+  // 开关 brain.enabled **直接读 config.json**（loadConfig 只保留认识的字段，update.check 就是这样被丢掉的），
+  // 缓存 2 秒；字段不存在 = 开。关着时所有挂点什么都不做。创建失败只告警：桥接照常，脑图接口回 503。
+  const BRAIN_CONFIG_FILE = path.join(ROOT, 'config.json');
+  let brainEnabledCache = { at: 0, value: true };
+  function brainEnabled() {
+    const t = Date.now();
+    if (t - brainEnabledCache.at < 2000 && brainEnabledCache.at > 0) return brainEnabledCache.value;
+    let value = true;
+    try { value = readJsonSafe(BRAIN_CONFIG_FILE, null)?.brain?.enabled !== false; } catch { value = true; }
+    brainEnabledCache = { at: t, value };
+    return value;
+  }
+  let feed = null;
+  try {
+    feed = createBrainFeed({ log, stateDir: STATE_DIR, isEnabled: brainEnabled, redact: (t) => redactKnownTokensOnly(t) });
+    // 包装器原地改写方法、返回同一个对象：ltm / decay 的所有调用方（含生活回路）都经过它，行为不变。
+    feed.tapLtm(ltm);
+    if (decay) feed.tapDecay(decay);
+  } catch (error) {
+    log(`⚠️ 实时脑图未启用：${error?.message ?? error}`);
+    feed = null;
+  }
+  // buildWakePromptV2 记下的「这次注入了哪些账本条目」，由 deliverPromptNow 同步取走。
+  // 放在这里（main 的前段）声明：唤醒提示在任何时刻被拼都不会碰到未初始化的变量。
+  let brainLastInject = null;
+  /** 挂点统一入口：同步、不抛、不 await。 */
+  function brainEmit(type, payload) {
+    try { feed?.emit(type, payload); } catch { /* 脑图的问题绝不影响主路径 */ }
+  }
+
   // RAG_PATCH：memory-rag 客户端。loadConfig 只保留已知顶层键，memoryRag 不在其中，
   // 这里从同一份 config.json 补读（用户不配就用客户端默认的 127.0.0.1:8093）。
   // 配成非回环地址时客户端会拒绝创建：只告警、不把整个桥接带崩，检索退回关键词。
@@ -1765,7 +1800,9 @@ async function main() {
       ltm,
       statePath: path.join(STATE_DIR, 'long-memory', 'suggest-state.json'),
       config: suggestFileCfg,
-      log
+      log,
+      // BRAIN_PATCH：候选给她看了 / 被她采用了 → 实时脑图
+      onEvent: (type, payload) => brainEmit(type, { origin: 'bridge', ...payload })
     });
   } catch (error) {
     log(`⚠️ 账本建议模块未启用：${error?.message ?? error}`);
@@ -1942,6 +1979,28 @@ async function main() {
       peopleStats: () => ltm.listPeople(),
       redact: (t) => redactKnownTokensOnly(t),
       log,
+      // BRAIN_PATCH：判读写完 / 夜间结算完 → 实时脑图（只有编号和数字进轨迹）
+      onAppraised: (a) => {
+        const uid = /^\d{1,15}$/.test(String(a?.userId ?? '')) ? String(a.userId) : '';
+        const msgId = a?.msgId == null || a.msgId === '' ? null : String(a.msgId);
+        const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+        brainEmit('persona.appraisal', {
+          key: a?.key, origin: 'bridge',
+          nodes: [msgId ? `msg:${msgId}` : '', uid ? `persona:rel:${uid}` : ''].filter(Boolean),
+          n: { intensity: num(a?.intensity), salience: num(a?.salience) },
+          e: { kind: a?.kind, source: a?.source, inject: a?.inject === true },
+          shadow: a?.inject !== true,
+          data: { kind: a?.kind ?? null, label: a?.label ?? null, intensity: num(a?.intensity), salience: num(a?.salience), source: a?.source ?? null, inject: a?.inject === true, msgId }
+        });
+      },
+      onNightly: (r) => {
+        const changes = {};
+        for (const part of [r?.changes?.core, r?.changes?.character]) {
+          if (!part || typeof part !== 'object') continue;
+          for (const [k, v] of Object.entries(part)) if (typeof v === 'number' && Number.isFinite(v)) changes[k] = v;
+        }
+        brainEmit('persona.nightly', { key: null, origin: 'bridge', nodes: ['persona:core'], n: { items: Object.keys(changes).length }, data: { changes } });
+      },
       onWeeklyReport: (report) => {
         if (!cfg.ownerQQ || currentMode !== 'reserved2' || socialV2.paused) return;
         const text = `【这周的你】下面是你这一周性格和关系的变化（桥接根据聊天自动统计）。想的话，用 diary_write 以自己的口吻写一段「这周的我」；不想写就算了，不用回复，也别发到 QQ。\n\n${report.markdown}`;
@@ -1951,6 +2010,205 @@ async function main() {
     persona.start();
   } catch (error) {
     log(`⚠️ 人格与情绪模块未启用：${error?.message ?? error}`);
+  }
+
+  // ── BRAIN_PATCH：回放（worker R 的模块；A 只接线）、memory-rag 计数轮询、轨迹每日清理 ──
+  let brainReplay = null;
+  try {
+    brainReplay = createBrainReplay({ stateDir: STATE_DIR, ltm, rag, persona, roleName: () => readRoleState().role || 'default', now: Date.now, log });
+  } catch (error) {
+    log(`⚠️ 脑图回放未启用：${error?.message ?? error}`);
+    brainReplay = null;
+  }
+  // memory-rag 没有推送：页面连着、RAG 开着时每 60 秒问一次 /health，块数 / 摘要数变了就发事件。
+  // 第一次只记下基数（不发），免得每次打开页面都冒出一条「新增 156 块」。
+  const brainRagCounts = { chunks: null, summaries: null };
+  async function brainPollRag() {
+    try {
+      if (!feed || !feed.active() || !rag || !rag.enabled?.()) return;
+      const h = await rag.health();
+      const chunks = Number(h?.store?.chunks);
+      const summaries = Number(h?.distill?.summaries);
+      if (Number.isFinite(chunks)) {
+        if (brainRagCounts.chunks !== null && chunks !== brainRagCounts.chunks) {
+          const added = chunks - brainRagCounts.chunks;
+          brainEmit('rag.index', { key: null, origin: 'bridge', n: { added, total: chunks }, data: { added, total: chunks } });
+        }
+        brainRagCounts.chunks = chunks;
+      }
+      if (Number.isFinite(summaries)) {
+        if (brainRagCounts.summaries !== null && summaries !== brainRagCounts.summaries) {
+          const added = summaries - brainRagCounts.summaries;
+          brainEmit('rag.distill', { key: null, origin: 'bridge', n: { added, total: summaries }, data: { added, total: summaries } });
+        }
+        brainRagCounts.summaries = summaries;
+      }
+    } catch { /* 轮询失败就等下一轮 */ }
+  }
+  setInterval(() => { brainPollRag(); }, 60 * 1000).unref?.();
+  // 轨迹保留 7 天：启动时 createBrainFeed 已清过一次，之后每天 00:05 再清。
+  function scheduleBrainTraceCleanup() {
+    const n = new Date();
+    const next = new Date(n.getFullYear(), n.getMonth(), n.getDate() + 1, 0, 5, 0, 0);
+    const timer = setTimeout(() => {
+      try {
+        const removed = feed?.cleanupTrace?.() ?? 0;
+        if (removed) log(`[brain] 已清理 ${removed} 个过期轨迹文件`);
+      } catch { /* 清理失败等明天 */ }
+      scheduleBrainTraceCleanup();
+    }, Math.max(1000, next.getTime() - n.getTime()));
+    timer?.unref?.();
+  }
+  scheduleBrainTraceCleanup();
+
+  /**
+   * /brain 与 /api/brain/*（约定 §5.3）。调用方已经做完 Host / 控制台令牌校验、拒绝了 agent 调用。
+   * 开关关着时除 /api/brain/control 外一律 404。日志只写类型和数量，不写原文 / query。
+   */
+  const BRAIN_KEY_RE = /^(private|group):\d{1,15}$/;
+  let brainProbeAt = 0;
+  async function handleBrainRoute(req, res, url, { sendJson, readBody, SECURITY_HEADERS }) {
+    const p = url.pathname;
+    try {
+      if (p === '/api/brain/control') {
+        if (req.method === 'GET') { sendJson({ ok: true, enabled: brainEnabled() }); return; }
+        if (req.method !== 'POST') { sendJson({ ok: false, error: '不支持的方法' }, 405); return; }
+        const body = await readBody();
+        if (typeof body.enabled !== 'boolean') { sendJson({ ok: false, error: 'enabled 必须是布尔值' }, 400); return; }
+        try {
+          // 读整份 → 只改 brain.enabled → 原子写（600），照 memoryRag.enabled 的写法。
+          const file = readConfigObject(BRAIN_CONFIG_FILE);
+          file.brain = { ...(file.brain && typeof file.brain === 'object' && !Array.isArray(file.brain) ? file.brain : {}), enabled: body.enabled };
+          atomicWriteJson(BRAIN_CONFIG_FILE, file);
+        } catch (error) {
+          log(`[brain] 开关保存失败（${error?.code ?? 'error'}）`);
+          sendJson({ ok: false, error: '写 config.json 失败，开关没有改变' }, 500);
+          return;
+        }
+        brainEnabledCache = { at: Date.now(), value: body.enabled };
+        if (!body.enabled) feed?.closeAll();
+        log(`[brain] 实时脑图已${body.enabled ? '打开' : '关闭'}`);
+        sendJson({ ok: true, enabled: body.enabled });
+        return;
+      }
+      if (!brainEnabled()) { sendJson({ ok: false, error: '实时脑图已关闭' }, 404); return; }
+      if (p === '/brain') {
+        if (req.method !== 'GET') { sendJson({ ok: false, error: '不支持的方法' }, 405); return; }
+        let html;
+        try { html = fs.readFileSync(path.join(ROOT, 'public', 'brain.html'), 'utf8'); } catch { html = null; }
+        res.writeHead(html === null ? 404 : 200, { 'content-type': 'text/html; charset=utf-8', ...SECURITY_HEADERS });
+        res.end(html ?? '脑图页面缺失：qq-bridge/public/brain.html');
+        return;
+      }
+      if (!feed) { sendJson({ ok: false, error: '实时脑图模块未启用（看 bridge.log）' }, 503); return; }
+      const qKey = url.searchParams.get('key');
+      if (req.method === 'GET' && p === '/api/brain/events') {
+        if (qKey && !BRAIN_KEY_RE.test(qKey)) { sendJson({ ok: false, error: 'key 不合法' }, 400); return; }
+        const lastEventId = req.headers['last-event-id'] ?? url.searchParams.get('lastEventId');
+        feed.handleEvents(req, res, { key: qKey || null, lastEventId: lastEventId ?? null, headers: SECURITY_HEADERS });
+        return;
+      }
+      if (req.method === 'GET' && p === '/api/brain/snapshot') {
+        if (qKey && !BRAIN_KEY_RE.test(qKey)) { sendJson({ ok: false, error: 'key 不合法' }, 400); return; }
+        const snap = await feed.snapshot({
+          ltm,
+          ltmDecay: (it, uid) => {
+            const st = ltmDecayState(it, uid);
+            return st ? { R: Math.round(st.R * 1000) / 1000, S: Math.round(st.S * 10) / 10, frozen: !!st.frozen, exempt: !!st.exempt } : null;
+          },
+          rag,
+          persona,
+          diaryDir: path.join(STATE_DIR, 'diary'),
+          suggestStatePath: path.join(STATE_DIR, 'long-memory', 'suggest-state.json'),
+          labelFor: (k) => reportLabels([k])[k] ?? null,
+          freezeBelow: Number.isFinite(decay?.freezeBelow) ? decay.freezeBelow : 0.5,
+          key: qKey || null
+        });
+        sendJson(snap);
+        return;
+      }
+      if (req.method === 'GET' && p === '/api/brain/replay') {
+        const day = String(url.searchParams.get('day') ?? '');
+        const d0 = new Date();
+        const today = `${d0.getFullYear()}-${String(d0.getMonth() + 1).padStart(2, '0')}-${String(d0.getDate()).padStart(2, '0')}`;
+        if (!reportIsValidDay(day) || day > today || day < reportShiftDay(today, -6)) {
+          sendJson({ ok: false, error: '只能回放最近 7 天（含今天），日期写 YYYY-MM-DD' }, 400);
+          return;
+        }
+        if (qKey && !BRAIN_KEY_RE.test(qKey)) { sendJson({ ok: false, error: 'key 不合法' }, 400); return; }
+        if (!brainReplay) { sendJson({ ok: false, error: '回放模块未启用（看 bridge.log）' }, 503); return; }
+        const r = await brainReplay.replay({ day, key: qKey || undefined });
+        if (!r || r.ok === false) { sendJson({ ok: false, error: String(r?.error ?? '回放失败') }, 400); return; }
+        log(`[brain] 回放 ${day}：${Array.isArray(r.events) ? r.events.length : 0} 条`);
+        sendJson(r);
+        return;
+      }
+      if (req.method === 'GET' && p === '/api/brain/decay-curve') {
+        const unit = String(url.searchParams.get('unit') ?? '');
+        const findLtm = (id) => {
+          for (const person of ltm.listPeople()) {
+            const it = (ltm.personView(person.userId)?.items ?? []).find((x) => x.id === id);
+            if (it) return { item: it, userId: String(person.userId) };
+          }
+          return null;
+        };
+        const r = feed.decayCurve({ unit, decay, findLtm, ownerQQ: ownerId(), intimacyOf });
+        if (!r) { sendJson({ ok: false, error: '找不到这个记忆单元' }, 404); return; }
+        sendJson(r);
+        return;
+      }
+      if (req.method !== 'POST') { sendJson({ ok: false, error: '未知接口' }, 404); return; }
+      if (p === '/api/brain/chunk') {
+        const body = await readBody();
+        const m = /^chunk:(.{1,200})$/.exec(String(body.node ?? ''));
+        const key = String(body.key ?? '');
+        if (!m || !BRAIN_KEY_RE.test(key)) { sendJson({ ok: false, error: 'node 应为 chunk:<编号>，key 应为会话 key' }, 400); return; }
+        if (!rag || !rag.enabled?.()) { sendJson({ ok: false, error: '向量记忆没有开，取不到话题块原文' }, 404); return; }
+        const c = await rag.chunk({ key, chunkId: m[1] });
+        if (!c) { sendJson({ ok: false, error: '向量索引服务不可达' }, 503); return; }
+        if (c.ok === false) { sendJson({ ok: false, error: '找不到这个话题块（可能已删除）' }, 404); return; }
+        sendJson({ ok: true, node: `chunk:${c.chunk_id}`, day: c.day, title: c.title, t_start: c.t_start, t_end: c.t_end, text: c.text });
+        return;
+      }
+      if (p === '/api/brain/probe') {
+        // 每 2 秒最多 1 次（会调真实检索，有 embedding 开销；不调 DeepSeek）。
+        const t = Date.now();
+        if (t - brainProbeAt < 2000) { sendJson({ ok: false, error: '太快了：检索演示每 2 秒最多 1 次' }, 429); return; }
+        brainProbeAt = t;
+        const body = await readBody();
+        const key = String(body.key ?? '');
+        if (!BRAIN_KEY_RE.test(key)) { sendJson({ ok: false, error: 'key 应为 private:QQ号 或 group:群号' }, 400); return; }
+        const query = [...String(body.query ?? '').trim()].slice(0, 500).join('');
+        const keywords = normalizeKeywords(body.keywords);
+        if (!query && !keywords.length) { sendJson({ ok: false, error: 'query 和 keywords 至少给一个' }, 400); return; }
+        const startedAt = Date.now();
+        const ragOn = !!(rag && rag.enabled?.());
+        // 控制台查 ≠ 她想起：这里绝不调 decay.review / reviewHistoryHits。
+        let ragResult = null;
+        if (ragOn) {
+          try { ragResult = await rag.search({ key, query, keywords, k: 5, debug: true }); } catch { ragResult = null; }
+        }
+        let keywordResult = null;
+        if (!ragResult) keywordResult = ltm.search(key, { query, keywords, limit: 5 });
+        const source = ragResult ? 'rag' : 'keyword';
+        const semantic = ragResult ? ragResult.semantic : (ragOn ? 'unavailable' : 'off');
+        const ms = Date.now() - startedAt;
+        const view = brainSearchView({ ragResult, keywordResult, query, keywords });
+        brainSearchEmit({ key, origin: 'console', query, keywords, source, semantic, ms, ragResult, keywordResult });
+        log(`[brain] 检索演示 source=${source} items=${view.items.length} ${ms}ms`);
+        sendJson({ ok: true, source, semantic, ms, items: view.items, ranked: view.ranked, routes: view.routes });
+        return;
+      }
+      sendJson({ ok: false, error: '未知接口' }, 404);
+    } catch (error) {
+      // 请求体读取失败（413 / 400）照原样回；其它错误不回显细节（可能带本机路径）。
+      if (Number.isInteger(error?.statusCode)) {
+        if (!res.headersSent) sendJson({ ok: false, error: String(error.message) }, error.statusCode);
+        return;
+      }
+      log(`[brain] 接口出错（${error?.code ?? error?.name ?? 'error'}）`);
+      if (!res.headersSent) sendJson({ ok: false, error: '实时脑图接口失败' }, 500);
+    }
   }
 
   // ── APIHUB_PATCH：「API 管理」页的设置读写、校验与向量模型测试（规格 §4～§7） ──
@@ -2096,6 +2354,81 @@ async function main() {
     }
   }
 
+  // ── BRAIN_PATCH：检索事件 / 检索演示的载荷（约定 §4.2 search）。只在页面连着时才被调用（data 函数）。
+  /** 一段命中里「命中的那一行」：先找含检索词的行，找不到取第一行；截 300 字。 */
+  function brainPickLine(text, terms) {
+    const lines = String(text ?? '').split('\n').map((l) => l.trim()).filter(Boolean);
+    const words = terms.map((w) => String(w ?? '').trim().toLowerCase()).filter((w) => w.length > 0);
+    const hit = lines.find((l) => words.some((w) => l.toLowerCase().includes(w))) ?? lines[0] ?? '';
+    return [...hit].slice(0, 300).join('');
+  }
+  /**
+   * 把一次检索结果整理成 { items, ranked, routes, nodes, rank }。
+   * ragResult 是 rag.search 的返回（trace 不可枚举，只有 debug 时才有）；keywordResult 是 ltm.search 的返回。
+   */
+  /** 只算编号与名次（不碰原文）：没页面时轨迹也要这些。 */
+  function brainSearchIds(ragResult) {
+    const trace = ragResult?.trace ?? null;
+    const isChunk = (id) => typeof id === 'string' && id && !id.startsWith('pending:');
+    const itemNodes = (ragResult?.items ?? []).map((_, i) => {
+      const ids = (trace?.itemIds?.[i] ?? []).filter(isChunk);
+      return ids.length ? `chunk:${ids[0]}` : null;
+    });
+    const ranked = (trace?.ranked ?? []).filter((r) => isChunk(r.id)).slice(0, 50)
+      .map((r) => ({ node: `chunk:${r.id}`, score: r.score, sources: r.sources }));
+    const nodes = [...new Set([...itemNodes.filter(Boolean), ...ranked.map((r) => r.node)])].slice(0, 50);
+    const rank = itemNodes.map((n) => {
+      const i = ranked.findIndex((r) => r.node === n);
+      return i >= 0 ? i + 1 : 0;
+    });
+    return { itemNodes, ranked, routes: trace?.routes ?? {}, nodes, rank };
+  }
+  function brainSearchView({ ragResult = null, keywordResult = null, query = '', keywords = [] }) {
+    const terms = [query, ...keywords];
+    if (ragResult) {
+      const ids = brainSearchIds(ragResult);
+      const items = (ragResult.items ?? []).map((it, i) => (
+        { node: ids.itemNodes[i] ?? null, day: it.day ?? '', title: it.title ?? '', summary: null, line: brainPickLine(it.text, terms) }
+      ));
+      return { items, ranked: ids.ranked, routes: ids.routes, nodes: ids.nodes, rank: ids.rank };
+    }
+    const lines = Array.isArray(keywordResult?.lines) ? keywordResult.lines.filter((l) => l && l !== '……') : [];
+    const items = lines.slice(0, 20).map((l) => {
+      const text = String(l);
+      return { node: null, day: /^\d{4}-\d{2}-\d{2}/.test(text) ? text.slice(0, 10) : '', title: '', summary: null, line: [...text].slice(0, 300).join('') };
+    });
+    return { items, ranked: [], routes: {}, nodes: [], rank: [] };
+  }
+  /** recall 事件（ltm-recall 之后）：编号进轨迹，原文与 memory 标签只给页面。 */
+  function brainRecallEmit(key, query, items) {
+    try {
+      const list = Array.isArray(items) ? items : [];
+      brainEmit('recall', {
+        key, origin: 'ai', nodes: list.map((it) => `ltm:${it.id}`), n: { items: list.length },
+        data: () => ({ query, items: list.slice(0, 50).map((it) => ({ node: `ltm:${it.id}`, text: it.text, memory: it.memory ?? null })) })
+      });
+    } catch { /* 脑图的问题不影响想起 */ }
+  }
+  /** 发一条 search 事件；view 在页面连着时才算（ragResult / keywordResult 只在内存里）。 */
+  function brainSearchEmit({ key, origin, query, keywords, from = '', to = '', source, semantic, ms, ragResult = null, keywordResult = null }) {
+    try {
+      if (!feed) return;
+      const count = ragResult ? (ragResult.items?.length ?? 0) : (Number(keywordResult?.matched) || 0);
+      // 编号与名次进轨迹，没页面时也要算（只有编号，不碰原文）；命中行原文只在 data 函数里（页面连着才调）。
+      const v = ragResult ? brainSearchIds(ragResult) : null;
+      brainEmit('search', {
+        key, origin,
+        nodes: v ? v.nodes : [],
+        n: { ms, items: count, ...(v && v.rank.length ? { rank: v.rank } : {}) },
+        e: { src: source, semantic },
+        data: () => {
+          const vv = brainSearchView({ ragResult, keywordResult, query, keywords });
+          return { query, keywords, from, to, source, semantic, ms, items: vv.items, ranked: vv.ranked, routes: vv.routes };
+        }
+      });
+    } catch { /* 脑图的问题不影响检索 */ }
+  }
+
   /** 这个会话此刻相关的人：私聊就是对方；群聊取最近说过话的人（最多 6 个）。 */
   function ltmPeopleFor(key, st) {
     const m = /^(group|private):(\d+)$/.exec(String(key));
@@ -2131,9 +2464,10 @@ async function main() {
     } catch (e) { log(`[ltm] 回填失败：${e?.message ?? e}`); }
   }, 8000).unref?.();
 
-  function ltmBlockFor(key, st) {
+  function ltmBlockFor(key, st, trace) {
     if (cfg.socialV2?.tools?.longMemory === false) return '';
-    try { return ltm.renderFor(ltmPeopleFor(key, st), key); } catch { return ''; }
+    // BRAIN_PATCH：trace（数组）收集这次注入的条目编号；不传时与改动前完全相同的调用。
+    try { return Array.isArray(trace) ? ltm.renderFor(ltmPeopleFor(key, st), key, { trace }) : ltm.renderFor(ltmPeopleFor(key, st), key); } catch { return ''; }
   }
 
   function voiceCfg() {
@@ -3999,6 +4333,15 @@ async function main() {
           } catch {
             res.end('控制台页面缺失：qq-bridge/public/console.html');
           }
+          return;
+        }
+        // ── BRAIN_PATCH：实时脑图（约定 §5.3；仅控制台，agent 调用一律 403） ──
+        if (url.pathname === '/brain' || url.pathname.startsWith('/api/brain/')) {
+          if (req.headers['x-agent-call'] !== undefined || req.headers['x-agent-token'] !== undefined) {
+            sendJson({ ok: false, error: '该接口只对控制台开放' }, 403);
+            return;
+          }
+          await handleBrainRoute(req, res, url, { sendJson, readBody, SECURITY_HEADERS });
           return;
         }
         // ── PERSONA_PATCH：人格与情绪管理接口（仅控制台；AI 的工具调用一律拒绝，她改不了自己的数值） ──
@@ -6860,7 +7203,9 @@ async function main() {
               const q = String(body.query ?? '').trim();
               const tag = (items) => (decay ? items.map((it) => ({ ...it, memory: ltmMemoryLabel(it, userId) })) : items);
               if (!q) {
-                sendJson({ ok: true, person: { ...v, items: tag(v.items) }, categories: ltm.CATEGORIES });
+                const tagged = tag(v.items);
+                sendJson({ ok: true, person: { ...v, items: tagged }, categories: ltm.CATEGORIES });
+                brainRecallEmit(key, '', tagged);
                 return;
               }
               const matched = ltm.matchItems(userId, key, q);
@@ -6878,6 +7223,7 @@ async function main() {
                 ltmReview(it, userId, 'hard');
               }
               sendJson({ ok: true, person: { ...v, items }, categories: ltm.CATEGORIES, query: q, matched: matched.length, ...(hint ? { hint } : {}) });
+              brainRecallEmit(key, q, items);
               return;
             }
             if (url.pathname === '/api/socialV2/ltm-update') {
@@ -6927,11 +7273,14 @@ async function main() {
               const ragOff = !rag?.enabled?.();
 
               if (mode !== 'keyword' && hasSearchText && rag && !ragOff) {
-                const r = await rag.search({ key, query, keywords, from, to, speaker, k, expand });
+                // BRAIN_PATCH：脑图开着时带 debug 拿五路名次（挂在不可枚举的 trace 上，给 AI 的字段不变）。
+                const r = await rag.search({ key, query, keywords, from, to, speaker, k, expand, ...(feed && brainEnabled() ? { debug: true } : {}) });
                 if (r) {
                   const hint = [r.items.length < 2 ? retryHint : '', r.hint ?? ''].filter(Boolean).join(' ');
                   log(`[rag] ${key} source=rag semantic=${r.semantic} items=${r.items.length} ${Date.now() - startedAt}ms`);
                   sendJson({ ok: true, key, source: 'rag', semantic: r.semantic, items: r.items, ...(hint ? { hint } : {}) });
+                  // BRAIN_PATCH：响应发出去之后才发事件（不改响应、不 await）。
+                  brainSearchEmit({ key, origin: 'ai', query, keywords, from, to, source: 'rag', semantic: r.semantic, ms: Date.now() - startedAt, ragResult: r });
                   // DECAY_PATCH：响应发出去之后才记「费劲想起」（refs 只在这里用，不外发）。
                   reviewHistoryHits(key, r.refs);
                   return;
@@ -6944,6 +7293,7 @@ async function main() {
               const hint = r.matched < 2 ? retryHint : '';
               log(`[rag] ${key} source=keyword semantic=${semantic} lines=${r.matched} ${Date.now() - startedAt}ms`);
               sendJson({ ok: true, key, source: 'keyword', semantic, total: r.total, matched: r.matched, lines: r.lines, ...(hint ? { hint } : {}) });
+              brainSearchEmit({ key, origin: 'ai', query, keywords, from, to, source: 'keyword', semantic, ms: Date.now() - startedAt, keywordResult: r });
               reviewHistoryHits(key, (r.hits ?? []).map((h) => ({ file: h.file, line: h.line })));
               return;
             }
@@ -10611,6 +10961,16 @@ async function main() {
         inject: Array.isArray(recalled?.inject) ? recalled.inject : []
       };
       appendRecallShadow(entry);
+      // BRAIN_PATCH：自动想起（影子 / 开）→ 实时脑图。只有摘要编号、分数与过没过 τ。
+      try {
+        const cands = entry.candidates.filter((c) => typeof c.summary_id === 'string' && c.summary_id);
+        brainEmit('recall.auto', {
+          key: safeKey, origin: 'bridge', shadow: entry.mode !== 'on',
+          nodes: cands.map((c) => `sum:${c.summary_id}`),
+          n: { items: cands.length, ...(Number.isFinite(entry.tau) ? { tau: entry.tau } : {}), ms: entry.ms },
+          data: { candidates: cands.map((c) => ({ node: `sum:${c.summary_id}`, score: Number.isFinite(c.cosine) ? c.cosine : null, pass: c.pass === true })), tau: entry.tau }
+        });
+      } catch { /* 脑图的问题不影响影子日志 */ }
       const passCount = entry.candidates.filter((c) => c.pass).length;
       log(`[recall] ${safeKey} mode=${entry.mode} skipped=${entry.skipped ?? 'none'} cands=${entry.candidates.length} pass=${passCount} ${entry.ms}ms`);
       return entry;
@@ -10781,6 +11141,14 @@ async function main() {
     };
   }
 
+  /** 唤醒原因 → 约定 §4.2 的枚举。本地文案三种原样；定时 / 检查 / 开机这类不是「有人来信」。 */
+  function brainWakeReason(reason) {
+    const r = String(reason ?? '');
+    if (LOCAL_TEXT_WAKES.has(r)) return r;
+    if (['bootstrap', 'timeout', 'replyCheck', 'proactiveCheck', 'manual', 'schedule', 'scheduled'].includes(r)) return 'other';
+    return r ? 'message' : 'other';
+  }
+
   // 实际的 DSH prompt 投递（不再直接对外暴露，统一走 promptQueues 串行队列）。
   async function deliverPromptNow(key, promptText, opts = {}) {
     if (!isSessionAllowedInCurrentMode(key)) throw new Error(`当前模式不允许会话 ${key}`);
@@ -10822,6 +11190,8 @@ async function main() {
     let recallBlock = '';
     // SUGGEST_PATCH：账本建议块（空 = 这次不带）；只有投递成功后才计出现次数。
     let suggestPlan = null;
+    // BRAIN_PATCH：这次唤醒注入的账本编号（buildWakePromptV2 里记下的）
+    let brainInject = null;
     if (opts.wakeReason) {
       if (wakeBlocked()) return skipWake();
       // Build only after session creation: retries may rotate the token, and an
@@ -10848,6 +11218,9 @@ async function main() {
       // RAG_PATCH（P3）：第 4 个参数是自动想起块，空串时输出与改动前逐字相同。
       // SUGGEST_PATCH：第 5 个参数是账本建议块，同样空串时逐字不变。
       promptText = buildWakePromptV2(key, opts.wakeReason, promptText, recallBlock, suggestPlan?.block ?? '');
+      // BRAIN_PATCH：同步紧跟着取走，中间没有 await，不会被别的会话的唤醒覆盖。
+      brainInject = brainLastInject && brainLastInject.key === key ? brainLastInject : null;
+      brainLastInject = null;
       wakeSnapshot = buildWakeSnapshotV2(key);
       if (wakeSnapshot) {
         promptText += `\n\n【本次消息快照】\n${JSON.stringify(wakeSnapshot)}\n以上消息已提供，无需重复查询；partial=true 时用 qq_get_unread_messages(afterSeq=readThroughSeq) 继续读取。先处理当前消息；回复前如需确认后续补充，用 qq_wait_for_messages(purpose="reply") 补足短静默，已安静够久会立即返回，不要先长等。收尾只确认你已处理的 readThroughSeq（本地 seq，非 QQ messageId），传给 qq_mark_read 或 qq_set_wake_config 的 throughSeq；新到消息留待处理。`;
@@ -10887,6 +11260,16 @@ async function main() {
       await auditAndSend(key, mdToPlain(accepted.result.value.command.text));
     } else if (accepted.result.value.command?.text && opts.silent && opts.farewell) {
       social.exitingSessions.delete(sessionId);
+    }
+    // BRAIN_PATCH：投递被 DSH 接受之后才算「唤醒了」「注入了」（不带提示词原文）。
+    if (opts.wakeReason) {
+      const reason = brainWakeReason(opts.wakeReason);
+      brainEmit('wake', { key, origin: 'bridge', e: { reason }, data: { reason } });
+      if (brainInject) {
+        const inj = brainInject;
+        // BRAIN_PATCH（返工 A2）：recall / suggest 也进轨迹的 e，否则回放里这两项永远是 false。
+        brainEmit('inject', { key, origin: 'bridge', nodes: inj.ltm, n: { chars: inj.chars, items: inj.ltm.length }, e: { recall: !!inj.recall, suggest: !!inj.suggest }, data: { ltm: inj.ltm.slice(0, 50), recall: inj.recall, suggest: inj.suggest, chars: inj.chars } });
+      }
     }
     // RAG_PATCH（P3）：影子模式在**投递完成之后**才去问 memory-rag ——
     // 不 await、不拖慢回复；提示词在这之前已经原样交给 DSH 了。
@@ -11162,6 +11545,8 @@ async function main() {
           // 联想链自己的开关与门槛（cfg.lifeLoop.associate = { enabled, cooldownDays, minAgeDays }）。
           associate: conf.associate,
         },
+        // BRAIN_PATCH：own-life / 忽然想起 / 联想 / 到期约定 → 实时脑图
+        onEvent: (type, payload) => brainEmit(type, { origin: 'bridge', ...payload }),
         log: (m, ...rest) => log(`[life-loop] ${m}${rest.length ? ' ' + rest.join(' ') : ''}`),
       });
       lifeLoop.start();
@@ -11805,6 +12190,14 @@ async function main() {
       // 用内存计数上限的追加器：不再「append 完再读回整个文件数行数」——
       // 那个写法在 2000 行（约 650KB）时单次要 15ms，而每次工具调用要写两条。
       appendToolLogFile(`${JSON.stringify(safeEntry)}\n`);
+      // BRAIN_PATCH：工具调用结果 → 实时脑图（只有工具名和成败，不带参数）。
+      if (entry?.type === 'result') {
+        try {
+          const full = String(entry.tool ?? '');
+          const name = full.includes('__') ? full.slice(full.lastIndexOf('__') + 2) : full;
+          brainEmit('tool', { key: entry.key, origin: 'ai', tool: name, e: { tool: name, status: entry.ok === false ? 'fail' : 'ok' }, data: { name, ok: entry.ok !== false } });
+        } catch { /* 脑图的问题不影响工具日志 */ }
+      }
     } catch (error) {
       log('写入工具调用日志失败:', error?.message ?? error);
     }
@@ -12114,7 +12507,10 @@ async function main() {
     const memoryText = formatMemoryV2(st);
     const memoryLine = memoryText ? `${memoryText}\n\n` : '';
     // LTM_PATCH：长期记忆（会话重建/上下文压缩后仍在）
-    const ltmText = ltmBlockFor(key, st);
+    // BRAIN_PATCH：顺手记下注入了哪些条目；deliverPromptNow 在投递被接受后才发 inject 事件。
+    const brainInjectTrace = [];
+    const ltmText = ltmBlockFor(key, st, brainInjectTrace);
+    brainLastInject = { key, ltm: brainInjectTrace, recall: !!recallBlock, suggest: !!suggestBlock, chars: String(ltmText ?? '').length };
     // LIFE_LOOP_PATCH（规格 §8.3）：用法说明补上约定的 due / by / status 与核心条目。
     const ltmLine = cfg.socialV2?.tools?.longMemory === false ? '' : `【长期记忆 —— 你一直记得的事】\n${ltmText || '（还没有记下什么）'}\n用法：聊到值得长期记住的事（喜好习惯、他的经历、重要日子、约定、没聊完的事）用 qq_ltm_remember 记下，一件事一条、写具体；记错/过时用 qq_ltm_update / qq_ltm_forget（〔〕里是条目编号）。情况变了（搬家、换工作、改主意）用 qq_ltm_remember 记新的并填 replaces=旧编号，旧的会标成过时。想不起以前聊过什么，用 qq_history_search 翻这个会话的聊天记录：query 写一句完整的话，keywords 给几个原话里可能出现的说法/近义词/人名；对方的话里提到时间就必须填 from（需要时也填 to）：具体日期写 YYYY-MM-DD，「今天/昨天/前天/上周/上个月」可原样填，桥接会自动换算；查不到就说不记得，别编。约定（pending）记的时候填 due（到期日）和 by（me=你答应的 / them=他答应的）；到期后确认结果再用 qq_ltm_update 标 status（done / missed / cancelled）。这个人最重要的几件事可以 core=true（每人最多 8 条）。不要逐句记，也不要把这些记忆当清单念出来。\n\n`;
     // 注意：黑话表不在这里注入，deliverPromptNow 的 withSlangContext 会统一注入，

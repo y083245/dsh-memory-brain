@@ -1877,6 +1877,8 @@ section.card fieldset { min-width:0 }
       <button data-view="mind" class="nav-item"><span class="nav-icon" aria-hidden="true">♡</span>人格与情绪</button>
       <!-- REPORT_PATCH：每日报表（子项目 4 v1，规格 DAILY_REPORT_SPEC.md §2） -->
       <button data-view="report" class="nav-item"><span class="nav-icon" aria-hidden="true">▦</span>每日报表</button>
+      <!-- BRAIN_PATCH：实时脑图（独立页面 /brain，新标签页打开；不是本页的视图，所以不带 data-view） -->
+      <button type="button" id="navBrainBtn" class="nav-item"><span class="nav-icon" aria-hidden="true">✺</span>实时脑图<span class="nav-note">新窗口</span></button>
       <div class="nav-label">管理</div>
       <!-- APIHUB_PATCH：API 管理页（规格 API_CONSOLE_SPEC.md §4） -->
       <button data-view="api" class="nav-item"><span class="nav-icon" aria-hidden="true">⚙</span>API 管理</button>
@@ -2836,6 +2838,21 @@ section.card fieldset { min-width:0 }
       <div class="meta" id="apiRagStatus">加载中…</div>
       <div class="row" id="apiRagActions"></div>
       <div class="meta" id="apiRagMsg"></div>
+    </section>
+
+<!-- BRAIN_PATCH：实时脑图总开关（config.json 的 brain.enabled，缺省开；切换不用重启桥接） -->
+<section id="section-api-brain" data-page="api" class="card span-all">
+      <h2>实时脑图</h2>
+      <div class="row" style="margin-top:8px">
+        <label class="api-switch">
+          <input type="checkbox" id="apiBrainSwitch" role="switch" aria-label="实时脑图开关" aria-describedby="apiBrainSwitchText">
+          <span class="api-switch-track" aria-hidden="true"></span>
+          <span class="api-switch-text" id="apiBrainSwitchText">—</span>
+        </label>
+        <span class="meta" style="margin:0">页面会显示真实聊天原文，只在本机访问。关掉后 /brain 打不开、已打开的页面立刻断开，记忆本身不受影响。</span>
+      </div>
+      <div class="row"><button type="button" class="small" id="apiBrainOpen">打开实时脑图</button></div>
+      <div class="meta" id="apiBrainMsg"></div>
     </section>
 
 <section id="section-api-embedding" data-page="api" class="card span-all">
@@ -9049,6 +9066,54 @@ apiEl('apiRagSwitch').addEventListener('change', () => {
 });
 if (location.hash === '#api') loadApiPanel();
 // ── /APIHUB_PATCH ───────────────────────────────────────────────────────────
+
+// ── BRAIN_PATCH：实时脑图入口与开关 ──────────────────────────────────────────
+// 入口：新标签页打开 /brain，带上当前控制台令牌（脑图页会立刻把它从地址栏去掉）。
+function openBrainPage() {
+  const token = localStorage.getItem('consoleToken') || '';
+  const w = window.open('/brain' + (token ? '?token=' + encodeURIComponent(token) : ''), '_blank', 'noopener');
+  if (w) w.opener = null;
+}
+document.getElementById('navBrainBtn').addEventListener('click', openBrainPage);
+document.getElementById('apiBrainOpen').addEventListener('click', openBrainPage);
+function brainApplyControl(s) {
+  const sw = document.getElementById('apiBrainSwitch');
+  if (!s || s.ok === false || typeof s.enabled !== 'boolean') return false;
+  sw.checked = s.enabled;
+  document.getElementById('apiBrainSwitchText').textContent = s.enabled ? '开' : '关';
+  document.getElementById('apiBrainOpen').disabled = !s.enabled;
+  return true;
+}
+async function loadBrainControl() {
+  let s = null;
+  try { s = await api('/api/brain/control'); } catch { s = null; }
+  if (!brainApplyControl(s)) apiHubSetMsg('apiBrainMsg', '读取开关失败' + (s && s.error ? '：' + s.error : ''), false);
+  else apiHubSetMsg('apiBrainMsg', '');
+}
+document.getElementById('apiBrainSwitch').addEventListener('change', async () => {
+  const sw = document.getElementById('apiBrainSwitch');
+  const enabled = sw.checked;
+  if (!enabled && !confirm('关闭实时脑图：/brain 页面打不开，已经打开的会立刻断开。记忆、检索都不受影响。确定关闭？')) {
+    sw.checked = true;
+    return;
+  }
+  sw.disabled = true;
+  apiHubSetMsg('apiBrainMsg', enabled ? '正在打开…' : '正在关闭…');
+  const r = await apiHubPost('/api/brain/control', { enabled });
+  sw.disabled = false;
+  if (!r || r.ok === false || !brainApplyControl(r)) {
+    sw.checked = !enabled;
+    document.getElementById('apiBrainSwitchText').textContent = enabled ? '关' : '开';
+    apiHubSetMsg('apiBrainMsg', (enabled ? '打开失败：' : '关闭失败：') + ((r && r.error) || '未知错误'), false);
+    return;
+  }
+  apiHubSetMsg('apiBrainMsg', enabled ? '已打开' : '已关闭', true);
+});
+// 进入「API 管理」页时读一次（不改原有的页面切换代码，只多挂一个监听）
+document.querySelectorAll('[data-view="api"]').forEach(b => b.addEventListener('click', loadBrainControl));
+window.addEventListener('hashchange', () => { if (location.hash === '#api') loadBrainControl(); });
+if (location.hash === '#api') loadBrainControl();
+// ── /BRAIN_PATCH ────────────────────────────────────────────────────────────
 </script>
 </body>
 </html>

@@ -429,6 +429,92 @@ class L2:
                  "importance": float(r["importance"]), "created_at": int(r["created_at"]),
                  "source": r["source"]} for r in rows]
 
+    # ---------------------------------------------------------------- 实时脑图（BRAIN_PATCH）
+
+    def graph(self, keys: Sequence[str] | None, limit: int) -> dict:
+        """BRAIN_PATCH：脑图快照的 L2 部分（接口约定 §5.1 `/graph`）。只读。
+
+        - keys 为 None = 全部会话；每类（摘要 / 实体 / 候选）各自按时间取最新 limit 条。
+        - 「范围内的摘要」= 这次实际返回的摘要：实体只给和它们有关联的，`n` 也只数它们——
+          跨会话共用的实体（比如 `self`）在单会话请求里不会把别的会话的摘要数进来；
+          `summary_entities` / `relations` 只给返回的摘要、且两端实体都在返回集合里的，页面不会连到不存在的点。
+        - 候选与 `notes()` 一样 join `summaries`，key 在两张表上都过滤。
+        - 所有读在同一把锁里，各类之间是同一时刻的一致快照。
+        """
+        lim = int(limit)
+        empty = {"summaries": [], "entities": [], "summary_entities": [], "relations": [], "notes": [],
+                 "truncated": {"summaries": 0, "entities": 0, "notes": 0}}
+        if keys is not None:
+            keys = [str(k) for k in keys]
+            if not keys:
+                return empty
+        kw = "" if keys is None else f"key IN ({_marks(len(keys))})"
+        kargs = [] if keys is None else list(keys)
+        with self.lock:
+            s_where = f" WHERE {kw}" if kw else ""
+            s_total = int(self.conn.execute(f"SELECT COUNT(*) AS n FROM summaries{s_where}", kargs).fetchone()["n"])
+            s_rows = self.conn.execute(
+                f"SELECT {', '.join(_SUMMARY_COLS)} FROM summaries{s_where} "
+                "ORDER BY t_end DESC, summary_id ASC LIMIT ?", [*kargs, lim]).fetchall()
+            sids = [r["summary_id"] for r in s_rows]
+            se_rows, rel_rows = [], []
+            # 编号可能上千：分批查，避免撞 SQLite 的变量个数上限
+            for i in range(0, len(sids), 500):
+                part = sids[i:i + 500]
+                se_rows += self.conn.execute(
+                    f"SELECT summary_id, entity_id, key FROM summary_entities WHERE summary_id IN ({_marks(len(part))}) "
+                    "ORDER BY summary_id, entity_id", part).fetchall()
+                rel_rows += self.conn.execute(
+                    f"SELECT summary_id, key, src_id, dst_id, relation FROM relations WHERE summary_id IN ({_marks(len(part))}) "
+                    "ORDER BY summary_id, rowid", part).fetchall()
+            eids = sorted({r["entity_id"] for r in se_rows})
+            ent_rows = []
+            for i in range(0, len(eids), 500):
+                part = eids[i:i + 500]
+                ent_rows += self.conn.execute(
+                    f"SELECT entity_id, type, name, qq FROM entities WHERE entity_id IN ({_marks(len(part))})",
+                    part).fetchall()
+            n_where = "" if keys is None else f" WHERE n.key IN ({_marks(len(keys))}) AND s.key IN ({_marks(len(keys))})"
+            n_args = [] if keys is None else [*keys, *keys]
+            n_total = int(self.conn.execute(
+                "SELECT COUNT(*) AS n FROM ledger_notes n JOIN summaries s ON s.summary_id = n.summary_id"
+                f"{n_where}", n_args).fetchone()["n"])
+            n_rows = self.conn.execute(
+                "SELECT n.note_id, n.summary_id, n.key, n.who, n.who_name, n.cat, n.text, n.due, n.created_at "
+                f"FROM ledger_notes n JOIN summaries s ON s.summary_id = n.summary_id{n_where} "
+                "ORDER BY n.created_at DESC, n.note_id ASC LIMIT ?", [*n_args, lim]).fetchall()
+
+        # 实体：按「最近一次出现的摘要」的时间取最新的 lim 个（实体本身的 created_at 是首次出现，不代表活跃）
+        s_time = {r["summary_id"]: int(r["t_end"]) for r in s_rows}
+        count: dict[str, int] = {}
+        last: dict[str, int] = {}
+        for r in se_rows:
+            eid = r["entity_id"]
+            count[eid] = count.get(eid, 0) + 1
+            last[eid] = max(last.get(eid, 0), s_time.get(r["summary_id"], 0))
+        ents = sorted((r for r in ent_rows if r["entity_id"] in count),
+                      key=lambda r: (-last[r["entity_id"]], r["entity_id"]))
+        kept = ents[:lim]
+        kept_ids = {r["entity_id"] for r in kept}
+        return {
+            "summaries": [{**_summary(r), "t_start": int(r["t_start"]), "t_end": int(r["t_end"]),
+                           "importance": float(r["importance"]), "valence": float(r["valence"])}
+                          for r in s_rows],
+            "entities": [{"entity_id": r["entity_id"], "type": r["type"], "name": r["name"], "qq": r["qq"],
+                          "n": count[r["entity_id"]]} for r in kept],
+            "summary_entities": [{"summary_id": r["summary_id"], "entity_id": r["entity_id"], "key": r["key"]}
+                                 for r in se_rows if r["entity_id"] in kept_ids],
+            "relations": [{"summary_id": r["summary_id"], "key": r["key"], "src_id": r["src_id"],
+                           "dst_id": r["dst_id"], "relation": r["relation"]}
+                          for r in rel_rows if r["src_id"] in kept_ids and r["dst_id"] in kept_ids],
+            "notes": [{"note_id": r["note_id"], "summary_id": r["summary_id"], "key": r["key"],
+                       "who": r["who"], "who_name": r["who_name"], "cat": r["cat"], "text": r["text"],
+                       "due": r["due"], "created_at": int(r["created_at"])} for r in n_rows],
+            "truncated": {"summaries": max(0, s_total - len(s_rows)),
+                          "entities": max(0, len(ents) - len(kept)),
+                          "notes": max(0, n_total - len(n_rows))},
+        }
+
     def queue_notes_backfill(self, hours: int, now_ms: int, dry_run: bool = False) -> int:
         """SUGGEST_PATCH：把「有摘要、t_end 在窗口内、还没有 notes_state」的摘要标成 queued。
 

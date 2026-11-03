@@ -77,8 +77,14 @@ export function createLifeLoop({
   log = () => {},
   decay = null,
   associate = null,
+  onEvent = null,
 }) {
   if (!ltm) throw new Error('life-loop: 缺 ltm');
+  // BRAIN_PATCH：实时脑图的可选回调（缺省不调）；回调出错一律吞掉，生活回路照常。
+  const fire = (type, payload) => {
+    if (typeof onEvent !== 'function') return;
+    try { onEvent(type, payload); } catch { /* 脑图的问题不影响生活回路 */ }
+  };
   if (!statePath) throw new Error('life-loop: 缺 statePath');
 
   const quiet = normalizeQuiet(options.quiet);
@@ -438,6 +444,7 @@ export function createLifeLoop({
     // 只记来源和编号：素材原文（聊天、账本）不进日志。
     lastRecall = { at: t, pick }; // RAG_PATCH（P3）：给 composeOwnLifeAsync 当联想种子（同步版不用）
     log(`忽然想起：${pick.source} · ${pick.candId}`);
+    fire('life.recall', { key: `private:${String(ownerQQ?.() ?? '')}`, nodes: [pick.candId], data: () => ({ node: pick.candId, text: pick.text }) });
     return `【忽然想起】${pick.text}\n只是脑子里冒出来的旧事：想跟他聊就自然地提一句，不想就当想想，或者写进日记。别说「我想起了一条记忆」这种话。`;
   }
 
@@ -445,6 +452,12 @@ export function createLifeLoop({
   function composeOwnLife({ kind, now: t, remainingSlots } = {}) {
     try {
       const at = Number(t) || now();
+      fire('life.ownLife', {
+        key: `private:${String(ownerQQ?.() ?? '')}`,
+        n: Number.isFinite(Number(remainingSlots)) ? { remainingSlots: Number(remainingSlots) } : {},
+        e: { kind: typeof kind === 'string' ? kind : '' },
+        data: { kind: kind ?? null, remainingSlots: Number.isFinite(Number(remainingSlots)) ? Number(remainingSlots) : null }
+      });
       const parts = [];
       const diary = diaryLine(kind, at);
       if (diary) parts.push(diary);
@@ -564,6 +577,7 @@ export function createLifeLoop({
       state.history.push({ at: t, kind: 'associate', candId, from: pick.candId });
       saveNow();
       log(`顺着想到：${candId} ← ${pick.candId}`);
+      fire('life.assoc', { key: `private:${String(ownerQQ?.() ?? '')}`, nodes: [pick.candId, candId], data: { hops: [pick.candId, candId] } });
 
       const via = chosen.via.slice(0, 2).map((v) => `「${v}」`).join('');
       const tail = via ? `（都和${via}有关）` : '';
@@ -640,6 +654,16 @@ export function createLifeLoop({
         try {
           await deliverPromiseWake(viewerKey, promiseWakeText(userId, items));
           log(`到期唤醒已投递：${userId}（${items.length} 条）`);
+          for (const it of items) {
+            fire('life.promiseDue', {
+              key: viewerKey, nodes: [`ltm:${it.id}`],
+              data: () => {
+                let name = '';
+                try { name = String(ltm.personView?.(userId)?.name ?? ''); } catch { name = ''; }
+                return { node: `ltm:${it.id}`, userId, name, text: it.text };
+              }
+            });
+          }
         } catch (e) {
           log(`到期唤醒投递失败：${userId} · ${e?.message ?? e}`);
         }

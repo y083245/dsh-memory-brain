@@ -47,7 +47,8 @@ export function sumPriorCalls(usage, day, runId) {
 
 export function createPersona({
   stateDir, roleName, roleCard, sessions, ownerQQ, peopleStats = () => [],
-  redact = (s) => s, log = () => {}, fetchImpl = fetch, now = () => Date.now(), onWeeklyReport = null
+  redact = (s) => s, log = () => {}, fetchImpl = fetch, now = () => Date.now(), onWeeklyReport = null,
+  onAppraised = null, onNightly = null
 }) {
   const store = createPersonaStore({ rootDir: stateDir });
   const settings = () => mergeSettings(store.readConfig().settings ?? {});
@@ -163,6 +164,11 @@ export function createPersona({
       persist('core');
     }
     store.appendAppraisal(role, key, { at: t, msgId, userId, target: a.target, kind: a.kind, label: a.emotion.label, intensity: a.intensity, salience: a.salience, source: a.source });
+    // BRAIN_PATCH：实时脑图的可选回调（判读日志写完之后；缺省不调，异常吞掉，判读管线不变）。
+    // inject 是当时的注入开关（脑图据此标「影子」）。
+    if (typeof onAppraised === 'function') {
+      try { onAppraised({ key, msgId, userId, kind: a.kind, label: a.emotion?.label, intensity: a.intensity, salience: a.salience, source: a.source, inject: s.inject === true }); } catch { /* 脑图的问题不影响判读 */ }
+    }
     persist('emotion', 'people');
     writeLive();
   }
@@ -231,6 +237,10 @@ export function createPersona({
       persist('core', 'people', 'meta');
       writeLive();
       log(`[persona] 夜间结算完成 ${r.day}：性格变化 ${JSON.stringify(r.changes.core)}`);
+      // BRAIN_PATCH：实时脑图的可选回调（只有变化量数字；缺省不调，异常吞掉）。
+      if (typeof onNightly === 'function') {
+        try { onNightly({ day: r.day, changes: r.changes }); } catch { /* 脑图的问题不影响结算 */ }
+      }
       // PERSONA_PATCH：影子期（inject=false）只算不注入——周报照常写盘（控制台能看），但不回调去给主人发提示。
       if (r.report && settings().inject && settings().growth.reportToDiary && typeof onWeeklyReport === 'function') onWeeklyReport(r.report);
       return r;
