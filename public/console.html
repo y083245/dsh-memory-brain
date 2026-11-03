@@ -1844,6 +1844,18 @@ section.card fieldset { min-width:0 }
   section[data-page="api"] h2 { flex-wrap:wrap }
   section[data-page="api"] h2:after { margin-left:0; flex-basis:100%; text-align:left }
 }
+/* UPGRADE_PATCH：页头版本号与「有新版本」提示条 */
+.version-chip { font-size:12px; color:var(--muted-soft); white-space:nowrap }
+.update-banner { border:1px solid var(--warn-border); background:var(--warn-bg); color:var(--warn-fg); padding:12px 16px; border-radius:10px; margin-bottom:18px; font-size:13px; display:flex; flex-wrap:wrap; gap:8px 14px; align-items:flex-start }
+.update-banner[hidden] { display:none }
+.update-banner .update-body { flex:1 1 260px; min-width:0 }
+.update-banner ul { margin:6px 0 0; padding-left:18px }
+.update-banner li { overflow-wrap:anywhere }
+.update-banner code { overflow-wrap:anywhere; word-break:break-all }
+.update-banner .update-actions { display:flex; flex-wrap:wrap; gap:8px }
+@media(max-width:760px) {
+  .version-chip { font-size:10px }
+}
 </style>
 </head>
 <body>
@@ -1878,9 +1890,11 @@ section.card fieldset { min-width:0 }
   <div class="workspace">
     <header class="topbar">
       <div class="breadcrumb">工作空间<span>/</span><span id="breadcrumbPage">运行总览</span></div>
-      <div class="topbar-actions"><span class="status-badge" id="statusText" role="status">正在连接…</span><button id="themeToggle" class="icon-button" type="button" aria-label="切换深色模式" aria-pressed="false" title="切换深色 / 浅色主题">☾</button><button id="refreshConsole" class="icon-button" aria-label="刷新控制台状态" title="刷新状态">↻</button></div>
+      <div class="topbar-actions"><span class="version-chip" id="appVersion" title="当前版本（package.json）" hidden></span><span class="status-badge" id="statusText" role="status">正在连接…</span><button id="themeToggle" class="icon-button" type="button" aria-label="切换深色模式" aria-pressed="false" title="切换深色 / 浅色主题">☾</button><button id="refreshConsole" class="icon-button" aria-label="刷新控制台状态" title="刷新状态">↻</button></div>
     </header>
     <main id="mainContent" tabindex="-1">
+      <!-- UPGRADE_PATCH：有新版本时的提示（只提示，升级走 scripts/update.sh） -->
+      <div class="update-banner" id="updateBanner" role="status" hidden></div>
       <div class="page-heading"><div><div class="eyebrow">QQ BRIDGE / CONSOLE</div><h1 id="pageTitle">让每一次连接，都自然发生。</h1><p id="pageDescription">掌握桥接状态，轻松管理你的 QQ 智能伙伴。</p></div>
         <div class="search-wrap"><label class="sr-only" for="consoleSearch">搜索功能或参数</label><input id="consoleSearch" type="search" placeholder="搜索功能或参数…" autocomplete="off" aria-controls="searchResults" aria-expanded="false"><div id="searchResults" class="search-results" hidden></div></div>
       </div>
@@ -1953,6 +1967,7 @@ section.card fieldset { min-width:0 }
             <button id="roleCreate">新建人格</button>
             <button id="roleDuplicate">另存为副本</button>
             <button id="roleDelete" class="danger">删除</button>
+            <button id="roleResetFactory" hidden title="删掉你改过的版本，回到仓库自带的出厂内容">恢复出厂</button>
             <button id="roleFormReset">清空表单</button>
             <span class="meta" id="roleCreateMsg"></span>
           </div>
@@ -1987,6 +2002,7 @@ section.card fieldset { min-width:0 }
         <button id="simPromptEdit">编辑</button>
         <button id="simPromptSave" disabled>保存并同步到 DSH</button>
         <button id="simPromptRestore">还原上次备份</button>
+        <button id="simPromptResetFactory" disabled title="删掉你改过的提示词（state/preset-overrides/），回到预设自带的出厂版本">恢复出厂</button>
         <button id="simPromptCancel" disabled>取消编辑</button>
         <span class="meta" id="simPromptMsg"></span>
       </div>
@@ -3416,8 +3432,18 @@ function setRoleMsg(text, ok) {
   el.className = ok === undefined ? 'meta' : (ok ? 'meta ok' : 'meta err');
 }
 
+// UPGRADE_PATCH：角色卡来源徽标
+const ROLE_ORIGIN_LABEL = {
+  factory: { text: '出厂', title: '仓库自带的角色卡，没有改过' },
+  modified: { text: '已修改', title: '改过的出厂卡：你的版本存在 state/roles/，升级不会覆盖；可在编辑区「恢复出厂」' },
+  user: { text: '自建', title: '你自己建的角色卡，存在 state/roles/' },
+};
+
 function renderRoleEditor() {
   const editing = roleEditorState.mode === 'edit';
+  // UPGRADE_PATCH：只有改过的出厂卡才能「恢复出厂」
+  const resetBtn = document.getElementById('roleResetFactory');
+  if (resetBtn) resetBtn.hidden = !(editing && roleEditorState.origin === 'modified');
   document.getElementById('roleEditorMeta').textContent = editing
     ? `正在编辑「${roleEditorState.name}」：改完点「保存修改」；改名字会同时重命名文件。`
     : '当前是「新建」模式：填好名称与内容后点「新建人格」；名称与已有的人格同名则会改为保存修改。';
@@ -3445,7 +3471,7 @@ async function openRoleForEdit(name) {
   if (!res.ok) { setRoleMsg(res.error || '读取失败', false); return; }
   document.getElementById('newRoleName').value = name;
   document.getElementById('newRoleContent').value = res.content;
-  roleEditorState = { mode: 'edit', name };
+  roleEditorState = { mode: 'edit', name, origin: res.origin || null };
   renderRoleEditor();
   updateRoleEditorWarnings();
   setRoleMsg(`已载入「${name}」（${res.chars} 字符）`, true);
@@ -3494,6 +3520,14 @@ async function refreshRoles() {
         const badge = document.createElement('span');
         badge.className = 'persona-badge';
         badge.textContent = '启用中';
+        head.appendChild(badge);
+      }
+      // UPGRADE_PATCH：出厂 / 已修改 / 自建（改过的在 state/roles/，升级不会覆盖）
+      if (ROLE_ORIGIN_LABEL[role.origin]) {
+        const badge = document.createElement('span');
+        badge.className = 'persona-badge' + (role.origin === 'modified' ? ' warn' : '');
+        badge.textContent = ROLE_ORIGIN_LABEL[role.origin].text;
+        badge.title = ROLE_ORIGIN_LABEL[role.origin].title;
         head.appendChild(badge);
       }
       if (role.truncated) {
@@ -3564,8 +3598,10 @@ async function refreshSimPrompt() {
     setSimEditing(false);
     setSimMsg('');
     const status = r.status || {};
+    // UPGRADE_PATCH：overridden = 用户改过（存在 state/preset-overrides/，升级不会覆盖）
     document.getElementById('simPromptStatus').textContent =
-      `${status.label || simPromptPreset} · ${r.chars} 字符${status.installed ? ' · 已同步到 DSH' : ' · 尚未同步到 DSH'}`;
+      `${status.label || simPromptPreset} · ${r.chars} 字符${r.overridden ? ' · 已修改' : ' · 出厂'}${status.installed ? ' · 已同步到 DSH' : ' · 尚未同步到 DSH'}`;
+    document.getElementById('simPromptResetFactory').disabled = !r.overridden;
     document.getElementById('simPromptWarnings').textContent = (r.warnings || []).length
       ? '⚠️ ' + r.warnings.join('；') : '';
     document.getElementById('simPromptRestart').textContent =
@@ -3720,6 +3756,17 @@ document.getElementById('roleDelete').addEventListener('click', async () => {
   refresh();
 });
 document.getElementById('roleFormReset').addEventListener('click', () => resetRoleForm());
+// UPGRADE_PATCH：恢复出厂 = 删掉 state/roles/<名>.md，回到仓库自带的版本
+document.getElementById('roleResetFactory').addEventListener('click', async () => {
+  const name = roleEditorState.mode === 'edit' ? roleEditorState.name : '';
+  if (!name) return;
+  if (!confirm(`把「${name}」恢复成出厂版本？你改过的内容会被删掉（不可撤销，需要的话先「另存为副本」）。`)) return;
+  const r = await api('/api/roles/reset', 'POST', { name });
+  if (!r.ok) { setRoleMsg('❌ ' + (r.error || '恢复失败'), false); return; }
+  await openRoleForEdit(name);
+  setRoleMsg(`✅ 「${name}」已恢复出厂`, true);
+  refreshRoles();
+});
 document.getElementById('newRoleContent').addEventListener('input', updateRoleEditorWarnings);
 
 // ── 仿真提示词 ──────────────────────────────────────────────────────────────
@@ -3750,6 +3797,14 @@ document.getElementById('simPromptSave').addEventListener('click', async () => {
   setSimMsg(`✅ 已保存${r.synced ? '并同步到 DSH' : ''}；重启 DSH 后生效`, true);
   document.getElementById('simPromptWarnings').textContent = (r.warnings || []).length ? '⚠️ ' + r.warnings.join('；') : '';
   document.getElementById('simPromptStatus').textContent = `${r.status?.label || simPromptPreset} · ${content.length} 字符 · 已保存，待重启 DSH`;
+});
+// UPGRADE_PATCH：恢复出厂 = 删掉覆盖文件、重新生成 preset；删之前会自动备份，点错了可「还原上次备份」
+document.getElementById('simPromptResetFactory').addEventListener('click', async () => {
+  if (!confirm('把该代仿真提示词恢复成出厂版本？你改过的内容会先自动备份，之后可以「还原上次备份」找回。重启 DSH 后生效。')) return;
+  const r = await api('/api/preset/sim-prompt/reset', 'POST', { preset: simPromptPreset });
+  if (!r.ok) { setSimMsg('❌ ' + (r.error || '恢复失败'), false); return; }
+  await refreshSimPrompt();
+  setSimMsg(r.reset ? '✅ 已恢复出厂；重启 DSH 后生效' : '本来就是出厂版本', true);
 });
 document.getElementById('simPromptRestore').addEventListener('click', async () => {
   if (!confirm('还原到该代预设上一次保存前的备份？当前改动会丢失（原文件会先自动备份）。')) return;
@@ -5704,7 +5759,58 @@ document.getElementById('usageClear').addEventListener('click', async () => {
 
 setConsolePage(location.hash.slice(1), { updateHash:false });
 
+// ── UPGRADE_PATCH：版本号与「有新版本」提示（接口约定 §6）──────────────────────
+// 只提示：版本号、CHANGELOG 摘要前 3 条、升级命令（可复制）。升级本身只走 scripts/update.sh。
+// 「不再提示这个版本」存 localStorage；隐私模式等读写失败时只是每次都提示，不影响页面。
+const UPDATE_DISMISS_KEY = 'qq-console-update-dismissed';
+function updateDismissedVersion() {
+  try { return localStorage.getItem(UPDATE_DISMISS_KEY) || ''; } catch { return ''; }
+}
+function setUpdateDismissedVersion(version) {
+  try { localStorage.setItem(UPDATE_DISMISS_KEY, String(version || '')); } catch {}
+}
+function renderUpdateBanner(r) {
+  const box = document.getElementById('updateBanner');
+  if (!box) return;
+  if (!r || !r.ok || !r.newer || !r.latest || updateDismissedVersion() === r.latest) {
+    box.hidden = true;
+    box.replaceChildren();
+    return;
+  }
+  const notes = Array.isArray(r.notes) ? r.notes.slice(0, 3) : [];
+  const items = notes.map((n) => `<li><strong>${esc(n.version)}</strong>${n.date ? ' · ' + esc(n.date) : ''}${n.summary ? '：' + esc(n.summary) : ''}</li>`).join('');
+  const command = String(r.command || 'bash scripts/update.sh');
+  box.innerHTML = `<div class="update-body"><strong>有新版本 ${esc(r.latest)}</strong>（当前 ${esc(r.version ? 'v' + r.version : '未知')}）。在仓库目录里运行 <code>${esc(command)}</code> 升级，数据会先备份。${items ? `<ul>${items}</ul>` : ''}</div>`
+    + '<div class="update-actions"><button type="button" class="small" data-update-act="copy">复制命令</button>'
+    + '<button type="button" class="small" data-update-act="dismiss">不再提示这个版本</button>'
+    + '<button type="button" class="small" data-update-act="close" aria-label="关闭提示">关闭</button></div>';
+  box.hidden = false;
+  box.querySelector('[data-update-act="copy"]').addEventListener('click', async (event) => {
+    const btn = event.currentTarget;
+    try { await navigator.clipboard.writeText(command); btn.textContent = '已复制'; }
+    catch { window.prompt('复制这条命令：', command); }
+  });
+  box.querySelector('[data-update-act="dismiss"]').addEventListener('click', () => { setUpdateDismissedVersion(r.latest); box.hidden = true; });
+  box.querySelector('[data-update-act="close"]').addEventListener('click', () => { box.hidden = true; });
+}
+async function refreshUpdateStatus() {
+  try {
+    const r = await api('/api/update/status');
+    const chip = document.getElementById('appVersion');
+    if (chip && r && r.ok && r.version) {
+      chip.textContent = 'v' + r.version;
+      const last = r.lastUpgrade;
+      chip.title = last && last.at
+        ? `当前版本 v${r.version}；上次升级 ${last.from || '?'} → ${last.to || '?'}（${last.at}，${last.result || '?'}）`
+        : `当前版本 v${r.version}`;
+      chip.hidden = false;
+    }
+    renderUpdateBanner(r);
+  } catch {}
+}
+
 refresh(); refreshRoles(); refreshWhitelist(); refreshSessions(); refreshPending(); refreshPresets(); loadSocialForm(); loadV2Config(); refreshV2Activity(); loadV2ToolLog(); loadV2SessionOptions(); refreshSocialStatus(); refreshSlang(); loadSlangConfig(); loadSecurity(); refreshSimPrompt(); refreshDshModel(); refreshUsage(); refreshUsageChart(); refreshUsageRecent();
+refreshUpdateStatus();
 setInterval(() => { refresh(); refreshSessions(); refreshPending(); refreshSocialStatus(); refreshSlang(); }, 3000);
 // 用量看板只在本页可见时轮询：既保证「实时」，又不让其它页白白多打两份接口。
 setInterval(() => { if (currentConsolePage !== 'usage') return; refreshUsage(); refreshUsageChart(); refreshUsageRecent(); }, 3000);

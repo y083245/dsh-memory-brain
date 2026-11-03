@@ -1,6 +1,6 @@
 {
   "name": "qq-bridge",
-  "version": "0.2.1-r1",
+  "version": "0.3.1",
   "private": true,
   "license": "MIT",
   "description": "Bridge between SnowLuma (OneBot v11 / QQ) and DeepSeek Harness Web API: QQ messages become DSH agent prompts, agent replies go back to QQ. Targets the DSH Cookie-auth / slash-RPC / remote.mux protocol generation, so it deliberately names no DSH version here.",
@@ -36,6 +36,9 @@
     "test:r2-audit": "node scripts/test-reserved2-internal-audit.mjs",
     "test:report": "node scripts/test-daily-report.mjs && node scripts/test-daily-report-bridge.mjs",
     "test:apihub": "node scripts/test-rag-control.mjs && node scripts/test-api-hub.mjs && node scripts/test-dsh-credentials.mjs && node scripts/test-rag-scripts.mjs",
+    "test:upgrade": "node scripts/test-upgrade-notes.mjs && node scripts/test-migrate.mjs && node scripts/test-update.mjs",
+    "test:overlay": "node scripts/test-role-store.mjs && node scripts/test-preset-overlay.mjs && node scripts/test-update-check.mjs && node scripts/test-overlay-bridge.mjs",
+    "test:rag-config-local": "node scripts/test-rag-config-local.mjs",
     "test-wait:e2e": "node scripts/test-dsh-v2-wait.mjs",
     "test-vision": "node scripts/test-vision-media.mjs",
     "test-forward": "node scripts/test-forward.mjs",

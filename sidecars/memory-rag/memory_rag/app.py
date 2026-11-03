@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 
 from .archive import valid_key
 from .indexer import IndexBusy
+from .migrations import SchemaTooNew
 from .recall import associate as run_associate, recall as run_recall, summaries as run_summaries
 from .service import RebuildRunning, Service, request_at
 
@@ -85,6 +86,14 @@ def _ready():
         raise HTTPException(503, f"{svc.mismatch}（运行 python -m memory_rag.cli rebuild）")
 
 
+def _writable():
+    """UPGRADE_PATCH：库比程序新（回滚过代码）时所有写路径回 409，库文件一个字节不动。"""
+    try:
+        svc.check_writable()
+    except SchemaTooNew as e:
+        raise HTTPException(409, str(e)) from None
+
+
 def _recall_ready(key: str) -> None:
     """RAG_PATCH（P3）：联想三接口共用的前置检查（顺序与 /search 一致）。
 
@@ -123,6 +132,7 @@ def health():
 
 @app.post("/index/run")
 def index_run():
+    _writable()  # UPGRADE_PATCH
     _ready()
     return svc.indexer.run()
 
@@ -130,6 +140,7 @@ def index_run():
 @app.post("/forget")
 def forget(req: ForgetReq):
     """RAG_PATCH（P2）：忘掉一个会话的向量记忆（桥接删完存档后调用）。"""
+    _writable()  # UPGRADE_PATCH
     if not valid_key(req.key):
         raise HTTPException(400, "key 必填，格式 group:<群号> 或 private:<QQ号>")
     if svc.indexer is None:
@@ -155,6 +166,7 @@ def forget(req: ForgetReq):
 @app.post("/rebuild", status_code=202)
 def rebuild():
     """RAG_PATCH（P2）：后台全量重建。故意不调 _ready()：口径不一致时正需要它来修。"""
+    _writable()  # UPGRADE_PATCH
     try:
         job = svc.start_rebuild()
     except RebuildRunning:
@@ -225,6 +237,7 @@ def notes(req: NotesReq):
 @app.post("/notes/backfill")
 def notes_backfill(req: NotesBackfillReq):
     """SUGGEST_PATCH：把最近 hours 小时内、还没抽过候选的摘要标成 queued（真的回补在提炼循环里）。"""
+    _writable()  # UPGRADE_PATCH
     hours = req.hours if req.hours is not None else 72
     if isinstance(hours, bool) or not isinstance(hours, int) or not (1 <= hours <= 168):
         raise HTTPException(400, "hours 必须是 1～168 的整数")
@@ -238,6 +251,7 @@ def notes_backfill(req: NotesBackfillReq):
 @app.post("/distill/retry")
 def distill_retry():
     """手动重试提炼失败的块（控制台用）。不按会话查东西，所以不需要 key。"""
+    _writable()  # UPGRADE_PATCH
     if svc.distiller is None:
         raise HTTPException(503, f"{svc.mismatch or '向量库不可用'}")
     return {"ok": True, "retried": svc.distiller.retry_failed()}
@@ -246,7 +260,8 @@ def distill_retry():
 def _loop(interval: float):
     while True:
         try:
-            if svc.indexer:
+            # UPGRADE_PATCH：只读模式（库比程序新）不索引、不提炼、不消费遗忘请求
+            if svc.indexer and not svc.readonly:
                 # RAG_PATCH（P2）：先消费遗忘请求，再增量索引——否则可能先把墓碑前的旧内容又索引一遍
                 svc.process_forget_requests()
                 svc.indexer.run()

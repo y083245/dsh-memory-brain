@@ -238,10 +238,29 @@ uv pip install --python .venv/bin/python -e .
 <details>
 <summary><b>点这里展开</b></summary>
 
-- `./start-all.sh`：按顺序启动 DSH → QQ → SnowLuma → 本项目；RAG 开关开着时连记忆服务一起起（`--rag` = 只起记忆服务并打开开关；`./stop-all.sh --rag` = 停掉并关上开关）。脚本开头的程序路径是作者本机的，请按你的安装位置改，或用 `DSH_DIR`、`SNOW_DIR`、`QQ_BIN` 等环境变量覆盖。
+- `./start-all.sh`：按顺序启动 DSH → QQ → SnowLuma → 本项目；RAG 开关开着时连记忆服务一起起（`--rag` = 只起记忆服务并打开开关；`./stop-all.sh --rag` = 停掉并关上开关）。脚本开头的程序路径是作者本机的，请用 `DSH_DIR`、`SNOW_DIR`、`QQ_BIN` 等环境变量覆盖（可以写进 `~/.bashrc`）；**不要直接改脚本**，否则升级时 `scripts/update.sh` 会因为「有本地改动」停下来。
 - `scripts/systemd/install.sh`：把本项目和记忆服务装成 systemd 用户服务，崩溃自动拉起；加 `--enable` 开机自启（QQ 仍需人工扫码登录）。
 
 </details>
+
+---
+
+## 🔄 升级到新版本
+
+在项目目录里执行：
+
+```bash
+bash scripts/update.sh --check   # 先看看：当前版本 → 最新版本、升级要重启什么
+bash scripts/update.sh           # 真正升级（会先备份 state/ 和 config.json，问一次再重启）
+```
+
+**第一次升级**（v0.3.0 及更早的版本里还没有这个脚本）先执行这一条，把脚本取下来：
+
+```bash
+git fetch origin && git checkout origin/main -- scripts/update.sh
+```
+
+脚本只会重启本项目、记忆服务和 DSH 中需要重启的那几个，**永远不会动 QQ 和 SnowLuma**。升级失败时会打印回滚命令（`bash scripts/rollback.sh`）。每个版本改了什么、要注意什么，见 [CHANGELOG.md](CHANGELOG.md)。
 
 ---
 

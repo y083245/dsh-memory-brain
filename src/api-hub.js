@@ -150,14 +150,66 @@ function normalizeSegment(raw) {
   };
 }
 
+/**
+ * UPGRADE_PATCH（接口约定 §1.3）：出厂 config.yml + 用户的 config.local.yml 合并。
+ * 与 memory-rag 的 `memory_rag/config.py` `merge_config` 同一套规则（同一份用例
+ * sidecars/memory-rag/tests/fixtures/config_merge_cases.json）：映射递归合并；列表与标量整体替换；
+ * 覆盖里值为 null 的键 = 删除该键（回到代码缺省）；覆盖顶层不是映射 = 没有覆盖；覆盖顶层的 state_dir 忽略。
+ * 两个参数都不改，返回新对象。
+ */
+export function mergeRagConfig(base, local) {
+  const clone = (v) => (v === undefined ? v : structuredClone(v));
+  if (!isPlainObject(local)) return clone(base);
+  const { state_dir: _ignored, ...rest } = local;
+  return mergeNode(base, rest);
+}
+
+function mergeNode(base, local) {
+  if (!(isPlainObject(base) && isPlainObject(local))) return structuredClone(local);
+  const out = structuredClone(base);
+  for (const [k, v] of Object.entries(local)) {
+    if (v === null) delete out[k];
+    else if (Object.prototype.hasOwnProperty.call(out, k)) out[k] = mergeNode(out[k], v);
+    else out[k] = structuredClone(v);
+  }
+  return out;
+}
+
+const ragLocalWarned = new Set();
+
+/**
+ * 覆盖文件路径：`<state>/long-memory/rag/config.local.yml`，`<state>` 按**出厂** config.yml 的
+ * state_dir（或 MEMORY_RAG_STATE_DIR）相对 config.yml 所在目录解析——与 memory-rag 的 load_config 一致。
+ */
+function ragLocalConfigPath(root, doc) {
+  const cfgDir = path.join(root, 'sidecars', 'memory-rag');
+  const state = process.env.MEMORY_RAG_STATE_DIR || (typeof doc?.state_dir === 'string' && doc.state_dir) || '../../state';
+  return path.join(path.resolve(cfgDir, state), 'long-memory', 'rag', 'config.local.yml');
+}
+
 function readYamlConfig(root) {
+  let doc;
   try {
     const text = fs.readFileSync(path.join(root, 'sidecars', 'memory-rag', 'config.yml'), 'utf8');
-    const doc = YAML.load(text);
-    return isPlainObject(doc) ? doc : {};
+    doc = YAML.load(text);
+    if (!isPlainObject(doc)) return {};
   } catch {
     return {};
   }
+  // UPGRADE_PATCH：没有覆盖文件时原样返回出厂内容；覆盖读不懂 → 告警一次（这里没有 log，只记住）、按没有覆盖处理
+  const localFile = ragLocalConfigPath(root, doc);
+  let local;
+  try {
+    local = YAML.load(fs.readFileSync(localFile, 'utf8'));
+  } catch (error) {
+    if (error?.code !== 'ENOENT' && !ragLocalWarned.has(localFile)) {
+      ragLocalWarned.add(localFile);
+      try { console.warn('⚠️ config.local.yml 读不了，按没有覆盖处理'); } catch {}
+    }
+    return doc;
+  }
+  if (!isPlainObject(local) || Object.keys(local).length === 0) return doc;
+  return mergeRagConfig(doc, local);
 }
 
 /**

@@ -17,8 +17,11 @@
 #   为 bundled = 本脚本管（yes），local / cloud = 用户自己的，不管（no）；
 #   没有设置文件时按 sidecars/memory-rag/config.yml 的 embedding.provider
 #   （local 或缺 = 管，api = 不管）。设置文件读不懂 / kind 不认识时也按 config.yml 回落，并在 stderr 说明。
+#   UPGRADE_PATCH：config.yml 先合并用户覆盖 <state>/long-memory/rag/config.local.yml 再看 provider
+#   （合并规则同 memory_rag/config.py 的 merge_config；覆盖坏了在 stderr 说明、按没有覆盖算）。
 # - 错误一律写 stderr；stdout 只放给 shell 读的那一个词。
 
+import copy
 import json
 import os
 import stat
@@ -28,6 +31,8 @@ import tempfile
 CONFIG_NAME = 'config.json'
 SETTINGS_REL = ('state', 'long-memory', 'rag', 'embedding-settings.json')
 RAG_YML_REL = ('sidecars', 'memory-rag', 'config.yml')
+# UPGRADE_PATCH：用户覆盖，相对 state 目录（state 按出厂 config.yml 的 state_dir / MEMORY_RAG_STATE_DIR 解析）
+RAG_LOCAL_REL = ('long-memory', 'rag', 'config.local.yml')
 
 RAG_KINDS = ('bundled', 'local', 'cloud')
 
@@ -142,8 +147,49 @@ def _settings_kind(path):
     return None, 'embedding-settings.json 的 kind 不认识，按 config.yml 判断'
 
 
+def _merge(base, local):
+    if not (isinstance(base, dict) and isinstance(local, dict)):
+        return copy.deepcopy(local)
+    out = copy.deepcopy(base)
+    for key, value in local.items():
+        if value is None:
+            out.pop(key, None)
+        elif key in out:
+            out[key] = _merge(out[key], value)
+        else:
+            out[key] = copy.deepcopy(value)
+    return out
+
+
+def merge_config(base, local):
+    """UPGRADE_PATCH：与 memory_rag/config.py 的 merge_config 逐条一致（复制而不 import：
+    本脚本由系统 python3 直接跑，测试还会把它单独复制进假 HOME，旁边没有 memory_rag 包）。
+    映射递归合并；列表与标量整体替换；null = 删键；覆盖顶层不是映射 = 没有覆盖；覆盖里的 state_dir 忽略。"""
+    if not isinstance(local, dict):
+        return copy.deepcopy(base)
+    return _merge(base, {key: value for key, value in local.items() if key != 'state_dir'})
+
+
+def _local_override(yaml, yml_path, document):
+    """UPGRADE_PATCH：读用户覆盖；返回 (覆盖或 None, 说明)。不存在 / 读不懂都按没有覆盖。"""
+    state = os.environ.get('MEMORY_RAG_STATE_DIR') or document.get('state_dir') or '../../state'
+    if not os.path.isabs(str(state)):
+        state = os.path.join(os.path.dirname(os.path.abspath(yml_path)), str(state))
+    path = os.path.join(str(state), *RAG_LOCAL_REL)
+    try:
+        with open(path, 'r', encoding='utf-8') as handle:
+            local = yaml.safe_load(handle)
+    except FileNotFoundError:
+        return None, None
+    except Exception:
+        return None, 'config.local.yml 读不了，按没有覆盖处理'
+    if local is not None and not isinstance(local, dict):
+        return None, 'config.local.yml 顶层不是映射，按没有覆盖处理'
+    return local, None
+
+
 def _config_yml_provider(repo):
-    """按 config.yml 的 embedding.provider 判断（文件不存在 = local）。"""
+    """按 config.yml（合并用户覆盖后）的 embedding.provider 判断（文件不存在 = local）。"""
     path = os.path.join(repo, *RAG_YML_REL)
     if not os.path.exists(path):
         return 'local', None
@@ -158,11 +204,14 @@ def _config_yml_provider(repo):
         return 'local', 'config.yml 读不了，按 local 处理'
     if not isinstance(document, dict):
         return 'local', 'config.yml 顶层不是对象，按 local 处理'
+    local, note = _local_override(yaml, path, document)
+    if local:
+        document = merge_config(document, local)
     embedding = document.get('embedding')
     provider = embedding.get('provider') if isinstance(embedding, dict) else None
     if provider == 'api':
-        return 'api', None
-    return 'local', None
+        return 'api', note
+    return 'local', note
 
 
 def cmd_embedding_managed(repo):

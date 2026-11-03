@@ -16,6 +16,7 @@ from .embeddings import Embedder, embedding_settings_path, make_embedder_from_st
 from .fts import ChunkDB
 from .indexer import IndexBusy, Indexer
 from .l2 import L2
+from .migrations import BACKUP_MAX_AGE_S, SchemaTooNew, backup_files, readonly_message, remove_backups
 from .search import Searcher
 from .store import IndexMismatch, VectorStore, drop_collections, read_collection_meta
 
@@ -53,6 +54,10 @@ class Service:
             self.embedder = make_embedder_from_state(
                 self.cfg.get("embedding") or {}, paths.state, existing_meta)
         self.db = ChunkDB(paths.rag / "rag.sqlite3")
+        # UPGRADE_PATCH：库比程序新（回滚过代码）→ 只读：读接口照常，写路径一律 SchemaTooNew
+        self.readonly = self.db.readonly
+        if not self.readonly:
+            self._drop_backups(older_than_s=BACKUP_MAX_AGE_S)
         self.mismatch: str | None = None
         try:
             self.vstore = VectorStore(paths.rag / "chroma", self.embedder.model_id, self.embedder.dim)
@@ -82,11 +87,31 @@ class Service:
         """
         if not (self.l2 and self.vstore):
             return
+        if self.readonly:  # UPGRADE_PATCH：标「待补」是写库；只读时留到升级回去再说
+            return
         if self.vstore.summaries_reset or self.vstore.count_summaries() < self.l2.count_vec_done():
             self.l2.mark_all_vec_pending()
 
+    def _drop_backups(self, older_than_s: float | None = None) -> None:
+        """UPGRADE_PATCH：迁移备份里有删除前的聊天原文，删除成功后 / 启动时过期的要清掉（规则见 migrations.py 文首）。
+
+        只读模式不清（备份是用户还原用的）；失败只告警，绝不影响删除结果和启动。
+        """
+        if self.readonly:
+            return
+        try:
+            remove_backups(self.db.path, older_than_s=older_than_s)
+        except Exception as e:
+            print(f"迁移备份清理失败（{type(e).__name__}）", file=sys.stderr)
+
+    def check_writable(self) -> None:
+        """UPGRADE_PATCH：只读模式下抛 SchemaTooNew（HTTP 层翻成 409）。"""
+        if self.readonly:
+            raise SchemaTooNew(readonly_message(int(self.db.schema["db"])))
+
     def rebuild(self) -> None:
         """删掉派生数据从头建：换模型、改维度、改切块参数之后用。原始存档不动。"""
+        self.check_writable()  # UPGRADE_PATCH：要在动 Chroma 之前拦住
         if self.vstore is None:
             # APIHUB_PATCH：换向量口径后的重建不能 rmtree 掉 chroma 目录——chromadb 1.5.x
             # 在同一进程里按路径缓存 System，删了磁盘文件也还是那份旧集合，重建当场再抛
@@ -108,10 +133,12 @@ class Service:
         """把一个会话从向量记忆里清掉（块、向量、水位、检索缓存）。存档由桥接负责。"""
         if not valid_key(key):
             raise ValueError(f"会话 key 不合法：{key}")
+        self.check_writable()  # UPGRADE_PATCH
         if self.indexer is None:
             raise RuntimeError("向量库口径不一致")
         n = self.indexer.forget_key(key)
         self.searcher.rows.invalidate(key)
+        self._drop_backups()  # UPGRADE_PATCH：删完了，旧备份里的同一批聊天也不能留
         return {"ok": True, "key": key, "removed_chunks": n}
 
     def forget_requests(self) -> list[tuple[Path, str, int]]:
@@ -141,6 +168,12 @@ class Service:
         """消费遗忘请求，返回处理过的 key。处理期间文件里的 at 变了（桥接又写了新请求）就留着。"""
         if self.indexer is None:
             raise RuntimeError("向量库口径不一致")
+        if self.readonly:
+            # UPGRADE_PATCH：只读时消费不了遗忘请求。查的正是有待删请求的会话 → 当作「索引正忙」，
+            # 读接口回 503、桥接降级；宁可查不到，也不能返回已经删掉的内容。别的会话照常读。
+            if any(only_key is None or key == only_key for _, key, _ in self.forget_requests()):
+                raise IndexBusy("只读模式：有待处理的遗忘请求")
+            return []
         done: list[str] = []
         for path, key, at in self.forget_requests():
             if only_key is not None and key != only_key:
@@ -160,12 +193,15 @@ class Service:
                 except OSError:
                     pass
             done.append(key)
+        if done:
+            self._drop_backups()  # UPGRADE_PATCH：消费到遗忘请求 = 删过东西，旧备份一并清掉
         return done
 
     # ---------------------------------------------------------------- 重建任务（P2）
 
     def start_rebuild(self) -> dict:
         """起一个后台全量重建任务，立刻返回任务快照。已有任务没跑完则抛 RebuildRunning。"""
+        self.check_writable()  # UPGRADE_PATCH
         with self._job_lock:
             if self.job is not None and self.job.get("finished_at") is None:
                 raise RebuildRunning("已有重建任务在进行")
@@ -193,6 +229,8 @@ class Service:
                         path.unlink()
                     except OSError:
                         pass
+            if pending:
+                self._drop_backups()  # UPGRADE_PATCH：重建顺带消费了遗忘请求，同样要清旧备份
         except Exception as e:  # 后台线程里的异常只能写进任务，让 /health 看得见
             job["error"] = repr(e)
         finally:
@@ -223,4 +261,6 @@ class Service:
         out["forget_requests"] = [key for _, key, _ in self.forget_requests()]
         # RAG_PATCH（P3）：提炼层状态（只有计数与错误类别，不含原文与密钥）
         out["distill"] = self.distiller.status() if self.distiller else None
+        # UPGRADE_PATCH：数据版本（接口约定 §2.1）；update.sh 健康检查看 readonly
+        out["schema"] = {**self.db.schema, "backups": len(backup_files(self.db.path))}
         return out

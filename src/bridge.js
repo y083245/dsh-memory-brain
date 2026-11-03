@@ -79,6 +79,13 @@ import { createDailyReport, isErrorLine, dayOf } from './daily-report.js';
 import { createRagControl, defaultRagExec } from './rag-control.js';
 import { createApiHub, readEmbeddingKind } from './api-hub.js';
 import * as dshCredentials from './dsh-credentials.js';
+// UPGRADE_PATCH（docs/design/UPGRADE_SPEC.md §3、接口约定 docs/design/worker-kit/upgrade/contract.md）：
+// 角色卡 / 仿真提示词的用户修改只写 state/ 下的覆盖层，出厂文件（被 git 跟踪）程序永远不写；
+// 版本检查只读、只提示。三个都是 bridge.js 顶层 import，测试 harness 要同样注入（坑 12）。
+import { createRoleStore } from './role-store.js';
+import { effectivePresetYaml, readOverride, writeOverride, removeOverride } from './preset-overlay.js';
+import { buildPatches } from '../scripts/build-agent-preset-patches.mjs';
+import { createUpdateCheck } from './update-check.js';
 
 // LIFE_LOOP_PATCH（规格 §8.1）：这三种唤醒本来就是桥接自己产出的「本地文案」——own-life 的
 // 自己的时间、到期的约定、每周周报。以前它们会被通用唤醒分支整段替换掉（F1），现在有文案时
@@ -303,20 +310,16 @@ function readActivityTail(n) {
   }
 }
 
+// UPGRADE_PATCH：列表 = （出厂 roles/ ∪ 用户 state/roles/）− hidden；没有覆盖层时与改动前逐项相同。
 function listRoles() {
-  try {
-    return fs.readdirSync(path.join(ROOT, 'roles'))
-      .filter((f) => f.endsWith('.md') && f !== 'README.md')
-      .map((f) => f.slice(0, -3))
-      .sort((a, b) => a.localeCompare(b, 'zh-CN'));
-  } catch {
-    return [];
-  }
+  return roleStore.list();
 }
 
 // ── 人格文件读写 ────────────────────────────────────────────────────────────
 // 人格提示词 = roles/<名称>.md，由桥接在每条消息前注入（热生效，无需重启 DSH）。
 const ROLES_DIR = path.join(ROOT, 'roles');
+// UPGRADE_PATCH：所有读写角色卡的地方都走它（出厂 roles/ 只读，用户版在 state/roles/）。
+const roleStore = createRoleStore({ root: ROOT, stateDir: STATE_DIR, log: (...args) => log(...args) });
 const ROLE_NAME_MAX = 40;
 const ROLE_CONTENT_MAX_BYTES = 64 * 1024;
 // 注入上限：**按模式筛完小节之后**再截断，避免另一模式的专属内容白白占掉预算。
@@ -340,8 +343,9 @@ const WINDOWS_RESERVED_NAMES = new Set([
   ...Array.from({ length: 9 }, (_, i) => `LPT${i + 1}`),
 ]);
 
+// UPGRADE_PATCH：实际读的那个文件（有用户版就是 state/roles/ 里的）；不存在返回 null。
 function roleFilePath(name) {
-  return path.join(ROLES_DIR, name + '.md');
+  return roleStore.path(name);
 }
 
 function firstMeaningfulLine(content) {
@@ -377,12 +381,15 @@ function roleWarnings(content, mode = 'v2') {
 function roleSummaries() {
   return listRoles().map((name) => {
     const file = roleFilePath(name);
+    // UPGRADE_PATCH：出厂 / 已修改 / 自建（控制台徽标与「恢复出厂」按钮用）
+    const origin = roleStore.origin(name);
     try {
       const stat = fs.statSync(file);
       const content = fs.readFileSync(file, 'utf8');
       const stats = roleCharStats(content);
       return {
         name,
+        origin,
         bytes: stat.size,
         chars: content.length,
         lines: content.split('\n').length,
@@ -398,7 +405,7 @@ function roleSummaries() {
         warnings: roleWarnings(content).length,
       };
     } catch {
-      return { name, bytes: 0, chars: 0, lines: 0, mtime: 0, excerpt: '', injectedV1: 0, injectedV2: 0, charsV1: 0, charsV2: 0, hasModeTags: false, truncated: false, warnings: 0 };
+      return { name, origin, bytes: 0, chars: 0, lines: 0, mtime: 0, excerpt: '', injectedV1: 0, injectedV2: 0, charsV1: 0, charsV2: 0, hasModeTags: false, truncated: false, warnings: 0 };
     }
   });
 }
@@ -423,12 +430,12 @@ function validateRoleContent(raw) {
 }
 
 function readRoleContent(name) {
-  return fs.readFileSync(roleFilePath(name), 'utf8');
+  return roleStore.read(name);
 }
 
+// UPGRADE_PATCH：只写 state/roles/<名>.md（出厂卡改过 = 「已修改」，删掉用户版即恢复出厂）。
 function writeRoleContent(name, content) {
-  fs.mkdirSync(ROLES_DIR, { recursive: true });
-  atomicWriteText(roleFilePath(name), content + (content.endsWith('\n') ? '' : '\n'));
+  roleStore.write(name, content + (content.endsWith('\n') ? '' : '\n'));
 }
 
 // ── 二代仿真预设提示词（「仿真」层）────────────────────────────────────────
@@ -477,13 +484,47 @@ function installedPresetYaml(name) {
 // 真正在用的那个（main() 内，带 strict 开关）在名字不可用时返回 '' 让调用方拒绝建会话。
 // 同理不再保留 PRESET_NAME_SET：它只服务于那个死函数，留着只会诱惑下一个人去用它。
 
+// UPGRADE_PATCH：text / prefix 是**生效版本**（出厂 + state/preset-overrides/ 的覆盖）；
+// factoryText / factoryPrefix 是出厂原文，保存时以它为底重新渲染、并判断「和出厂一样就删覆盖」。
+// 没有覆盖时两组完全相同，与改动前读出厂文件的结果一致。
 function readPresetPromptText(name) {
   const file = presetSourceYaml(name);
   if (!fs.existsSync(file)) throw new Error(`找不到预设文件 ${path.relative(ROOT, file)}`);
-  const text = fs.readFileSync(file, 'utf8');
-  const prefix = extractPresetPrefix(text);
+  const factoryText = fs.readFileSync(file, 'utf8');
+  const factoryPrefix = extractPresetPrefix(factoryText);
+  if (factoryPrefix === null) throw new Error('预设里找不到 persona.prefix（结构可能已变化）');
+  const text = effectivePresetYaml(ROOT, name, { log });
+  const prefix = text === factoryText ? factoryPrefix : extractPresetPrefix(text);
   if (prefix === null) throw new Error('预设里找不到 persona.prefix（结构可能已变化）');
-  return { text, prefix };
+  return { text, prefix, factoryText, factoryPrefix, overridden: readOverride(ROOT, name) !== null };
+}
+
+/**
+ * UPGRADE_PATCH：把用户的提示词落到覆盖层并刷新派生产物。
+ * content 与出厂一样 → 删覆盖而不是存一份相同的；null → 删覆盖（恢复出厂）。
+ * 顺序：写覆盖 → 重新生成派生 patch → 同步 DSH 旧安装目录（存在时，写生效版本）。
+ * patch 生成失败时把覆盖还原成之前的样子再重新生成一次，然后抛错（调用方回 500）。
+ */
+function applyPresetOverride(name, content) {
+  const { factoryPrefix } = readPresetPromptText(name);
+  const previous = readOverride(ROOT, name);
+  const next = content === null || content === factoryPrefix ? null : content;
+  if (next === null) removeOverride(ROOT, name);
+  else writeOverride(ROOT, name, next);
+  try {
+    buildPatches({ root: ROOT });
+  } catch (error) {
+    try {
+      if (previous === null) removeOverride(ROOT, name);
+      else writeOverride(ROOT, name, previous);
+      buildPatches({ root: ROOT });
+    } catch {}
+    throw new Error(`重新生成 preset patch 失败：${error?.message ?? error}`);
+  }
+  // 安装副本**不做仓库内备份**——它的内容与生效版本一致，备份它没有额外价值。
+  const installed = installedPresetYaml(name);
+  if (fs.existsSync(installed)) atomicWriteText(installed, effectivePresetYaml(ROOT, name, { log }));
+  return { overridden: next !== null };
 }
 
 // 备份文件名带上预设名：两个预设的主文件名都叫 agent.cordis.yml，
@@ -492,13 +533,15 @@ function presetBackupPrefix(name) {
   return `${name}.${path.basename(presetSourceYaml(name))}`;
 }
 
+// UPGRADE_PATCH：备份的是**生效版本**的完整 YAML（没有覆盖时就是出厂原文，有覆盖时含用户的提示词），
+// 和以前的备份同一种格式、同一个文件名前缀，旧备份照样能列出、能还原；还原只取其中的 prefix 写回覆盖层。
 function backupPresetFile(name) {
   const file = presetSourceYaml(name);
   if (!fs.existsSync(file)) return null;
   fs.mkdirSync(PRESET_BACKUP_DIR, { recursive: true });
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const dest = path.join(PRESET_BACKUP_DIR, `${presetBackupPrefix(name)}.${stamp}`);
-  fs.copyFileSync(file, dest);
+  atomicWriteText(dest, effectivePresetYaml(ROOT, name, { log }));
   const prefix = presetBackupPrefix(name) + '.';
   const backups = fs.readdirSync(PRESET_BACKUP_DIR).filter((f) => f.startsWith(prefix)).sort();
   for (const stale of backups.slice(0, Math.max(0, backups.length - PRESET_BACKUP_KEEP))) {
@@ -528,6 +571,8 @@ function presetStatus(name) {
     sourceFile: path.relative(ROOT, presetSourceYaml(name)),
     installed: fs.existsSync(installedPresetYaml(name)),
     requiresRestart: true,
+    // UPGRADE_PATCH：state/preset-overrides/ 里有用户改过的提示词
+    overridden: readOverride(ROOT, name) !== null,
   };
 }
 
@@ -1889,7 +1934,8 @@ async function main() {
     persona = createPersona({
       stateDir: path.join(STATE_DIR, 'persona'),
       roleName: () => readRoleState().role || 'default',
-      roleCard: (name) => { try { return fs.readFileSync(path.join(ROOT, 'roles', `${path.basename(String(name))}.md`), 'utf8'); } catch { return ''; } },
+      // UPGRADE_PATCH：读生效版本（有用户版就用用户版）
+      roleCard: (name) => { try { return roleStore.read(path.basename(String(name))); } catch { return ''; } },
       sessions: () => state.sessions,
       ownerQQ: () => String(cfg.ownerQQ ?? ''),
       // PERSONA_PATCH（v2 §8 A1）：关系冷启动用聊天存档的人物统计（消息数、首末次时间）。
@@ -1929,6 +1975,29 @@ async function main() {
   } catch (error) {
     log(`⚠️ API 管理模块未启用：${error?.message ?? error}`);
     apiHub = null;
+  }
+
+  // ── UPGRADE_PATCH：版本检查（接口约定 §6）——只读、只提示，启动 60 秒后一次、之后每 24 小时。
+  // config.json 的 update.check:false 关掉；QQB_NO_UPDATE_CHECK=1（测试 harness）时零请求、不建定时器。
+  // 失败静默；创建失败只告警，接口退回 state:'off'。
+  let updateCheck = null;
+  try {
+    updateCheck = createUpdateCheck({
+      root: ROOT,
+      stateDir: STATE_DIR,
+      // loadConfig() 只保留它认识的字段，update 会被丢掉；直接读文件，改开关也不用重启。
+      readConfig: () => readJsonSafe(path.join(ROOT, 'config.json'), {}),
+      fetch: (...args) => fetch(...args),
+      env: process.env,
+      setTimeout,
+      setInterval,
+      now: Date.now,
+      log,
+    });
+    updateCheck.start();
+  } catch (error) {
+    log(`⚠️ 版本检查未启用：${error?.message ?? error}`);
+    updateCheck = null;
   }
 
   // ── DECAY_PATCH：记忆代谢的记账助手（子项目 2 · docs/design/MEMORY_DECAY_SPEC.md） ──
@@ -4542,7 +4611,8 @@ async function main() {
           const rs = readRoleState();
           if (body.role && typeof body.role === 'string') {
             const name = sanitizeRoleName(body.role);
-            if (!fs.existsSync(path.join(ROOT, 'roles', name + '.md'))) {
+            // UPGRADE_PATCH：出厂或用户版任一存在（且没被删除隐藏）即可
+            if (!roleStore.exists(name)) {
               sendJson({ ok: false, error: `角色「${name}」不存在（roles/${name}.md）` }, 400);
               return;
             }
@@ -4582,11 +4652,13 @@ async function main() {
         if (req.method === 'GET' && url.pathname === '/api/roles/content') {
           let name;
           try { name = validateRoleName(url.searchParams.get('name')); } catch (error) { sendJson({ ok: false, error: error.message }, 400); return; }
-          if (!fs.existsSync(roleFilePath(name))) { sendJson({ ok: false, error: `人格「${name}」不存在` }, 404); return; }
+          if (!roleStore.exists(name)) { sendJson({ ok: false, error: `人格「${name}」不存在` }, 404); return; }
           const content = readRoleContent(name);
           sendJson({
             ok: true,
             name,
+            // UPGRADE_PATCH：'factory' / 'modified' / 'user'
+            origin: roleStore.origin(name),
             content,
             chars: content.length,
             bytes: Buffer.byteLength(content, 'utf8'),
@@ -4616,7 +4688,7 @@ async function main() {
           let name; let content;
           try { name = validateRoleName(body.name); content = validateRoleContent(body.content); }
           catch (error) { sendJson({ ok: false, error: error.message }, 400); return; }
-          if (fs.existsSync(roleFilePath(name))) { sendJson({ ok: false, error: `人格「${name}」已存在` }, 400); return; }
+          if (roleStore.exists(name)) { sendJson({ ok: false, error: `人格「${name}」已存在` }, 400); return; }
           writeRoleContent(name, content);
           log(`控制台：创建人格「${name}」（${content.length} 字符）`);
           sendJson({ ok: true, role: name, warnings: roleWarnings(content) });
@@ -4627,7 +4699,7 @@ async function main() {
           let name; let content;
           try { name = validateRoleName(body.name); content = validateRoleContent(body.content); }
           catch (error) { sendJson({ ok: false, error: error.message }, 400); return; }
-          if (!fs.existsSync(roleFilePath(name))) { sendJson({ ok: false, error: `人格「${name}」不存在` }, 404); return; }
+          if (!roleStore.exists(name)) { sendJson({ ok: false, error: `人格「${name}」不存在` }, 404); return; }
           writeRoleContent(name, content);
           log(`控制台：更新人格「${name}」（${content.length} 字符）`);
           sendJson({ ok: true, role: name, chars: content.length, warnings: roleWarnings(content) });
@@ -4639,9 +4711,10 @@ async function main() {
           try { from = validateRoleName(body.from); to = validateRoleName(body.to); }
           catch (error) { sendJson({ ok: false, error: error.message }, 400); return; }
           if (from === to) { sendJson({ ok: true, role: to, renamed: false }); return; }
-          if (!fs.existsSync(roleFilePath(from))) { sendJson({ ok: false, error: `人格「${from}」不存在` }, 404); return; }
-          if (fs.existsSync(roleFilePath(to))) { sendJson({ ok: false, error: `人格「${to}」已存在` }, 400); return; }
-          fs.renameSync(roleFilePath(from), roleFilePath(to));
+          if (!roleStore.exists(from)) { sendJson({ ok: false, error: `人格「${from}」不存在` }, 404); return; }
+          if (roleStore.exists(to)) { sendJson({ ok: false, error: `人格「${to}」已存在` }, 400); return; }
+          // UPGRADE_PATCH：新名写成用户版；旧名若是出厂卡则记进 hidden（出厂文件不动）
+          roleStore.rename(from, to);
           const rs = readRoleState();
           const switched = rs.role === from;
           if (switched) writeRoleState(to, rs.mode);
@@ -4653,13 +4726,28 @@ async function main() {
           const body = await readBody();
           let name;
           try { name = validateRoleName(body.name); } catch (error) { sendJson({ ok: false, error: error.message }, 400); return; }
-          if (!fs.existsSync(roleFilePath(name))) { sendJson({ ok: false, error: `人格「${name}」不存在` }, 404); return; }
-          fs.rmSync(roleFilePath(name));
+          if (!roleStore.exists(name)) { sendJson({ ok: false, error: `人格「${name}」不存在` }, 404); return; }
+          // UPGRADE_PATCH：删用户版；出厂卡记进 state/roles/hidden.json（出厂文件不动）
+          roleStore.remove(name);
           const rs = readRoleState();
           const cleared = rs.role === name;
           if (cleared) writeRoleState(null, rs.mode);
           log(`控制台：删除人格「${name}」${cleared ? '（该人格正在启用，已同时清除当前人格）' : ''}`);
           sendJson({ ok: true, deleted: name, clearedCurrent: cleared });
+          return;
+        }
+        // UPGRADE_PATCH：恢复出厂 = 删掉 state/roles/<名>.md，只对「已修改」的出厂卡有效。
+        // 写法照 /api/persona/：除了集中关卡，这里再显式拒绝一次智能体调用。
+        if (req.method === 'POST' && url.pathname === '/api/roles/reset') {
+          if (req.headers['x-agent-call'] !== undefined || req.headers['x-agent-token'] !== undefined) { sendJson({ ok: false, error: '该接口仅控制台可用' }, 403); return; }
+          const body = await readBody();
+          let name;
+          try { name = validateRoleName(body.name); } catch (error) { sendJson({ ok: false, error: error.message }, 400); return; }
+          if (!roleStore.exists(name)) { sendJson({ ok: false, error: `人格「${name}」不存在` }, 404); return; }
+          if (roleStore.origin(name) !== 'modified') { sendJson({ ok: false, error: `人格「${name}」不是改过的出厂卡，没有可恢复的出厂版本` }, 400); return; }
+          roleStore.reset(name);
+          log(`控制台：人格「${name}」已恢复出厂`);
+          sendJson({ ok: true, role: name, origin: roleStore.origin(name) });
           return;
         }
 
@@ -4668,9 +4756,11 @@ async function main() {
           const preset = knownPresetName(url.searchParams.get('preset'));
           if (!preset) { sendJson({ ok: false, error: `未知预设（只支持 ${Object.values(PRESET_NAMES).join(' / ')}）` }, 400); return; }
           try {
-            const { prefix } = readPresetPromptText(preset);
+            const { prefix, overridden } = readPresetPromptText(preset);
             sendJson({
               ok: true,
+              // UPGRADE_PATCH：content 是生效的提示词；overridden = 用户改过（存在 state/preset-overrides/）
+              overridden,
               content: prefix,
               chars: prefix.length,
               bytes: Buffer.byteLength(prefix, 'utf8'),
@@ -4687,9 +4777,9 @@ async function main() {
           const body = await readBody();
           const preset = knownPresetName(body.preset);
           if (!preset) { sendJson({ ok: false, error: `未知预设（只支持 ${Object.values(PRESET_NAMES).join(' / ')}）` }, 400); return; }
-          let nextText;
+          let normalizedContent;
           try {
-            const { text, prefix } = readPresetPromptText(preset);
+            const { prefix, factoryText } = readPresetPromptText(preset);
             // 内容没变就不要写：写回会把折叠块规整成字面量块（值不变但排版变化），
             // 让一次"打开又保存"把整个提示词块变成全删全加的 diff，失去可复审性。
             const normalized = String(body.content ?? '').replace(/\r\n/g, '\n').replace(/\n+$/, '');
@@ -4697,28 +4787,19 @@ async function main() {
               sendJson({ ok: true, unchanged: true, chars: prefix.length, warnings: presetPromptWarnings(prefix), synced: fs.existsSync(installedPresetYaml(preset)), requiresRestart: false, status: presetStatus(preset) });
               return;
             }
-            nextText = renderPresetPromptYaml(text, body.content, preset === PRESET_NAMES.v1 ? 'v1' : 'v2');
+            // UPGRADE_PATCH：校验照旧（以出厂 YAML 为底渲染一次，过安全不变量与读回一致性），
+            // 但结果不写回出厂文件，只把正文存进覆盖层。
+            renderPresetPromptYaml(factoryText, body.content, preset === PRESET_NAMES.v1 ? 'v1' : 'v2');
+            normalizedContent = normalized;
           } catch (error) {
             sendJson({ ok: false, error: error?.message ?? '校验失败' }, 400);
             return;
           }
           const warnings = presetPromptWarnings(body.content);
-          let sourceBackup = null;
           try {
-            sourceBackup = backupPresetFile(preset);
-            atomicWriteText(presetSourceYaml(preset), nextText);
-            // 同步到 DSH 实际读取的安装目录。
-            // 注意：安装副本**不做仓库内备份**——它的内容与刚写好的源文件一致，
-            // 备份它等于把含本机绝对路径的快照塞进仓库工作区，没有额外价值。
-            const installed = installedPresetYaml(preset);
-            if (fs.existsSync(installed)) {
-              fs.copyFileSync(presetSourceYaml(preset), installed);
-            }
+            backupPresetFile(preset);
+            applyPresetOverride(preset, normalizedContent);
           } catch (error) {
-            // 尽力回滚源文件，避免留下半截状态
-            if (sourceBackup && fs.existsSync(sourceBackup)) {
-              try { fs.copyFileSync(sourceBackup, presetSourceYaml(preset)); } catch {}
-            }
             sendJson({ ok: false, error: `写入失败：${error?.message ?? error}` }, 500);
             return;
           }
@@ -4765,16 +4846,53 @@ async function main() {
               sendJson({ ok: false, error: `该备份不满足当前的安全不变量，拒绝还原：${blockers.join('；')}` }, 400);
               return;
             }
+            // UPGRADE_PATCH：还原 = 把备份里的提示词写回覆盖层（与出厂相同则删覆盖），出厂文件不动
             backupPresetFile(preset);
-            atomicWriteText(presetSourceYaml(preset), restored);
-            const installed = installedPresetYaml(preset);
-            if (fs.existsSync(installed)) fs.copyFileSync(presetSourceYaml(preset), installed);
+            applyPresetOverride(preset, restoredPrefix.replace(/\r\n/g, '\n').replace(/\n+$/, ''));
             log(`控制台：${preset} 仿真提示词已还原自备份 ${target}；需重启 DSH 生效`);
             sendJson({ ok: true, restoredFrom: target, requiresRestart: true });
           } catch (error) {
             sendJson({ ok: false, error: error?.message ?? '还原失败' }, 500);
           }
           return;
+        }
+        // UPGRADE_PATCH：恢复出厂 = 删覆盖 → 重新生成派生 patch → 同步安装目录。删之前照样备份一次，
+        // 点错了还能从「备份」里还原回来。
+        if (req.method === 'POST' && url.pathname === '/api/preset/sim-prompt/reset') {
+          if (req.headers['x-agent-call'] !== undefined || req.headers['x-agent-token'] !== undefined) { sendJson({ ok: false, error: '该接口仅控制台可用' }, 403); return; }
+          const body = await readBody();
+          const preset = knownPresetName(body.preset);
+          if (!preset) { sendJson({ ok: false, error: `未知预设（只支持 ${Object.values(PRESET_NAMES).join(' / ')}）` }, 400); return; }
+          const had = readOverride(ROOT, preset) !== null;
+          try {
+            if (had) backupPresetFile(preset);
+            applyPresetOverride(preset, null);
+          } catch (error) {
+            sendJson({ ok: false, error: `恢复出厂失败：${error?.message ?? error}` }, 500);
+            return;
+          }
+          log(`控制台：${preset} 仿真提示词${had ? '已恢复出厂；需重启 DSH 生效' : '本来就是出厂版本'}`);
+          sendJson({ ok: true, reset: had, requiresRestart: had, status: presetStatus(preset) });
+          return;
+        }
+
+        // ── UPGRADE_PATCH：版本检查（仅控制台；接口约定 §6）──────────────────────
+        if (url.pathname === '/api/update/status' || url.pathname === '/api/update/check') {
+          if (req.headers['x-agent-call'] !== undefined || req.headers['x-agent-token'] !== undefined) { sendJson({ ok: false, error: '该接口仅控制台可用' }, 403); return; }
+          const updateStatus = () => (updateCheck
+            ? updateCheck.status()
+            : { version: null, state: 'off', latest: null, newer: false, notes: [], upgrade: null, command: 'bash scripts/update.sh', checkedAt: null, lastUpgrade: null });
+          if (req.method === 'GET' && url.pathname === '/api/update/status') {
+            sendJson({ ok: true, ...updateStatus() });
+            return;
+          }
+          if (req.method === 'POST' && url.pathname === '/api/update/check') {
+            await readBody();
+            // 60 秒内最多真查一次；被节流时直接回当前结果
+            const checked = updateCheck ? await updateCheck.checkNow() : false;
+            sendJson({ ok: true, checked, ...updateStatus() });
+            return;
+          }
         }
 
         // ── 黑话库管理 ──────────────────────────────────────────────────────
@@ -11121,9 +11239,10 @@ async function main() {
       // {"role":"../../../../Users/Public/x"} 会让 roles/ 之外的文件被读进来并注入每一条提示词。
       const safeName = sanitizeRoleName(rs.role);
       if (!safeName || safeName.includes('..')) return '';
-      const roleFile = path.join(ROLES_DIR, safeName + '.md');
+      // UPGRADE_PATCH：生效版本的文件（state/roles/ 优先）；roleStore 对两个目录都做了「解析后仍在目录内」检查
+      const roleFile = roleStore.path(safeName);
+      if (!roleFile) return '';
       const resolved = path.resolve(roleFile);
-      if (!resolved.startsWith(path.resolve(ROLES_DIR) + path.sep)) return '';
       if (!fs.existsSync(resolved)) return '';
       const stateStat = fs.statSync(ROLE_STATE_FILE);
       const roleStat = fs.statSync(roleFile);
@@ -11133,7 +11252,8 @@ async function main() {
       //    带上名字后，切换角色（例如 a.md → b.md）永远不会误命中。
       // ② 同名的原地重写若长度变了（大多数编辑都会变），size 变化也能击穿缓存。
       // 代价只是多几次 stat，比"热注入路径上一直发旧人格"划算得多。
-      const cacheKey = `${safeName}:${stateStat.mtimeMs}:${stateStat.size}:${roleStat.mtimeMs}:${roleStat.size}`;
+      // UPGRADE_PATCH：带上实际文件路径——「恢复出厂 / 改成用户版」时 mtime 与 size 可能恰好相同
+      const cacheKey = `${safeName}:${resolved}:${stateStat.mtimeMs}:${stateStat.size}:${roleStat.mtimeMs}:${roleStat.size}`;
       if (roleHintCache.key === cacheKey) return roleHintCache.raw;
       const raw = fs.readFileSync(roleFile, 'utf8');
       roleHintCache = { key: cacheKey, raw };
@@ -12657,8 +12777,8 @@ async function main() {
           writeRoleState(null, roleState.mode);
           await sendToQQ(key, '已清除角色，恢复正常人格。');
         } else {
-          const roleFile = path.join(ROOT, 'roles', name + '.md');
-          if (!fs.existsSync(roleFile)) {
+          // UPGRADE_PATCH：出厂或用户版任一存在即可
+          if (!roleStore.exists(name)) {
             await sendToQQ(key, `角色「${name}」不存在。角色文件放 qq-bridge/roles/ 目录。`);
           } else {
             writeRoleState(name, roleState.mode);

@@ -20,6 +20,16 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import yaml from 'js-yaml';
 
+// UPGRADE_PATCH：agent.cordis.yml 读「生效版本」（出厂 + state/preset-overrides/ 里用户改的提示词）。
+// 按需加载而不是静态 import：有些测试夹具（test-audit-setup.mjs）只把 scripts/ 拷进临时仓库，
+// 没有 src/。那种仓库里不可能有覆盖层；真有覆盖文件却加载不了覆盖层模块时明确报错，绝不悄悄忽略。
+let presetOverlay = null;
+try {
+  presetOverlay = await import('../src/preset-overlay.js');
+} catch (error) {
+  if (error?.code !== 'ERR_MODULE_NOT_FOUND') throw error;
+}
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = path.resolve(__dirname, '..');
 
@@ -50,17 +60,47 @@ const RELATIVE_ROW_REWRITES = new Map([
 ]);
 
 export const BUNDLE_DIR = path.join(REPO_ROOT, 'plugins', 'qq-agent-presets');
-export function patchFileFor(name) {
-  return path.join(BUNDLE_DIR, 'presets', `${name}.patch.yml`);
+// UPGRADE_PATCH：root 可选（缺省 = 本仓库）。桥接保存提示词时传自己的 ROOT 重新生成，
+// 测试 harness 的临时仓库根也靠它，绝不会去写开发目录里的 patch。
+export function patchFileFor(name, root = REPO_ROOT) {
+  return path.join(root, 'plugins', 'qq-agent-presets', 'presets', `${name}.patch.yml`);
 }
-function sourceDirFor(name) {
-  return path.join(REPO_ROOT, 'dsh', 'agent-presets', name);
+function sourceDirFor(name, root = REPO_ROOT) {
+  return path.join(root, 'dsh', 'agent-presets', name);
 }
 
 function readYaml(file) {
   let text;
   try {
     text = fs.readFileSync(file, 'utf8');
+  } catch (error) {
+    throw new Error(`读取失败 ${file}：${error?.message ?? error}`);
+  }
+  try {
+    return yaml.load(text);
+  } catch (error) {
+    throw new Error(`${file} 不是合法 YAML：${error?.message ?? error}`);
+  }
+}
+
+/**
+ * UPGRADE_PATCH：生效版本的 agent.cordis.yml 文本（setup-dsh.mjs 也用它和旧安装目录比较）。
+ * 没有覆盖文件时就是出厂原文。
+ */
+export function effectiveSourceYaml(name, root = REPO_ROOT) {
+  if (presetOverlay) return presetOverlay.effectivePresetYaml(root, name);
+  if (fs.existsSync(path.join(root, 'state', 'preset-overrides', `${name}.prefix.md`))) {
+    throw new Error(`${name}: 有仿真提示词覆盖（state/preset-overrides/），但加载不了 src/preset-overlay.js`);
+  }
+  return fs.readFileSync(path.join(sourceDirFor(name, root), 'agent.cordis.yml'), 'utf8');
+}
+
+/** UPGRADE_PATCH：生效版本的行列表（报错信息沿用 readYaml 的口径）。 */
+function readEffectiveRows(root, name) {
+  const file = path.join(sourceDirFor(name, root), 'agent.cordis.yml');
+  let text;
+  try {
+    text = effectiveSourceYaml(name, root);
   } catch (error) {
     throw new Error(`读取失败 ${file}：${error?.message ?? error}`);
   }
@@ -112,14 +152,15 @@ function normalizeRows(rows, preset) {
 }
 
 /** 渲染一个 preset 的 patch 文件内容。 */
-export function renderPatch(name) {
-  const dir = sourceDirFor(name);
+export function renderPatch(name, { root = REPO_ROOT } = {}) {
+  const dir = sourceDirFor(name, root);
   const meta = readYaml(path.join(dir, 'preset.yml'));
   if (!meta || typeof meta !== 'object' || Array.isArray(meta)) throw new Error(`${name}: preset.yml 必须是映射`);
   for (const field of ['name', 'description', 'order']) {
     if (meta[field] === undefined) throw new Error(`${name}: preset.yml 缺少 ${field}`);
   }
-  const plugins = normalizeRows(readYaml(path.join(dir, 'agent.cordis.yml')), name);
+  // UPGRADE_PATCH：没有覆盖时 effectivePresetYaml 返回出厂原文，产物与改动前逐字节相同。
+  const plugins = normalizeRows(readEffectiveRows(root, name), name);
   const row = {
     id: presetRowId(name),
     name: '@deepseek-ai/dsh-agent-preset',
@@ -144,18 +185,18 @@ export function renderPatch(name) {
 }
 
 /** 生成（或校验）全部 patch 文件。@returns {{file:string,changed:boolean}[]} */
-export function buildPatches({ check = false, log = () => {} } = {}) {
+export function buildPatches({ check = false, log = () => {}, root = REPO_ROOT } = {}) {
   const results = [];
   for (const name of PRESETS) {
-    const file = patchFileFor(name);
-    const content = renderPatch(name);
+    const file = patchFileFor(name, root);
+    const content = renderPatch(name, { root });
     const current = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : null;
     const changed = current !== content;
     if (changed && !check) {
       fs.mkdirSync(path.dirname(file), { recursive: true });
       fs.writeFileSync(file, content, 'utf8');
     }
-    log(`${changed ? (check ? '✗ 需重新生成' : '✓ 已生成') : '· 已是最新'} ${path.relative(REPO_ROOT, file)}`);
+    log(`${changed ? (check ? '✗ 需重新生成' : '✓ 已生成') : '· 已是最新'} ${path.relative(root, file)}`);
     results.push({ file, changed });
   }
   return results;

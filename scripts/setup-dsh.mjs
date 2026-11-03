@@ -19,7 +19,8 @@ import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import yaml from 'js-yaml';
-import { BUNDLE_DIR, PRESETS, buildPatches, patchFileFor } from './build-agent-preset-patches.mjs';
+// UPGRADE_PATCH：effectiveSourceYaml —— 旧安装目录要和「生效版本」（出厂 + state/preset-overrides/）比，而不是只和出厂比。
+import { BUNDLE_DIR, PRESETS, buildPatches, effectiveSourceYaml, patchFileFor } from './build-agent-preset-patches.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '..');
@@ -110,11 +111,14 @@ function reportLegacyPresetDir() {
   for (const name of PRESETS) {
     const installed = path.join(legacy, name, 'agent.cordis.yml');
     if (!fs.existsSync(installed)) continue;
-    const source = path.join(REPO_ROOT, 'dsh', 'agent-presets', name, 'agent.cordis.yml');
-    const same = fs.existsSync(source) && fs.readFileSync(installed, 'utf8') === fs.readFileSync(source, 'utf8');
+    // UPGRADE_PATCH：用户改的提示词现在放在 state/preset-overrides/<preset>.prefix.md（控制台写），
+    // 生效版本 = 出厂 + 覆盖；没有覆盖时就是出厂原文，与改动前的比较完全一样。
+    let effective = null;
+    try { effective = effectiveSourceYaml(name, REPO_ROOT); } catch {}
+    const same = effective !== null && fs.readFileSync(installed, 'utf8') === effective;
     log(same
-      ? `  · ${name}：旧目录副本与仓库源一致（无内容丢失）`
-      : `  ⚠️ ${name}：旧目录副本与仓库源**不一致**——那份手改内容不会再生效，请人工合并到 dsh/agent-presets/${name}/agent.cordis.yml`);
+      ? `  · ${name}：旧目录副本与当前生效的预设一致（无内容丢失）`
+      : `  ⚠️ ${name}：旧目录副本与当前生效的预设**不一致**——那份手改内容不会再生效；提示词部分请到控制台「仿真提示词」页重新保存（会存进 state/preset-overrides/${name}.prefix.md），不要改 dsh/agent-presets/${name}/agent.cordis.yml`);
   }
 }
 

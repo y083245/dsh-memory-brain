@@ -44,9 +44,20 @@ import { createDailyReport, isErrorLine, dayOf } from '../src/daily-report.js';
 import { createRagControl } from '../src/rag-control.js';
 import { createApiHub, readEmbeddingKind } from '../src/api-hub.js';
 import * as dshCredentials from '../src/dsh-credentials.js';
+// UPGRADE_PATCH：角色卡 / 仿真提示词覆盖层、派生 patch 生成、版本检查（bridge.js 顶层 import，同样要注入；坑 12）。
+// buildPatches 由桥接带 root: ROOT 调用，ROOT 在这里是临时目录，绝不会写开发目录里的 patch。
+import { createRoleStore } from '../src/role-store.js';
+import { effectivePresetYaml, readOverride, writeOverride, removeOverride } from '../src/preset-overlay.js';
+import { buildPatches } from './build-agent-preset-patches.mjs';
+import { createUpdateCheck } from '../src/update-check.js';
+// UPGRADE_PATCH：角色卡统计 / 分节（bridge.js 顶层 import）。以前没注入，/api/roles 系列在 harness 里一调就报
+// 「roleCharStats is not defined」；覆盖层的接口测试要真跑这些路由，所以补上。
+import * as roleCard from '../src/role-card.js';
 
 // 硬性闸门：整个测试进程里禁止默认实现 spawn systemctl（rag-control 的第一行会检查它）。
 process.env.QQB_NO_SYSTEMCTL = '1';
+// UPGRADE_PATCH：版本检查在测试进程里一律关掉（零请求、不建定时器）；VM 的 process 桩里也设了一份。
+process.env.QQB_NO_UPDATE_CHECK = '1';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 export async function bridgeHarness({ config = {}, savedState, files = {}, globals = {} } = {}) {
@@ -217,6 +228,8 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     getDailyReport() { return dailyReport; },
     // SUGGEST_PATCH：账本建议实例（验证候选 / 计次 / 采用；创建失败时是 null）。
     getLedgerSuggest() { return ledgerSuggest; },
+    // UPGRADE_PATCH：版本检查实例（验证在 harness 里恒为 off、零请求）。
+    getUpdateCheck() { return updateCheck; },
     setSelfIdentity(display, id) {
       selfDisplayName = String(display ?? '');
       selfUserId = String(id ?? '');
@@ -242,7 +255,9 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     // 之前只给 pid/platform/kill/exit，导致 `process.env.FFMPEG_PATH` 直接抛 TypeError。
     // APIHUB_PATCH：QQB_RUN_DIR 指到临时目录 —— rag-control 会读 embed.log 的最后一条提示，
     // 测试绝不能去读线上的 ~/.ai-companion-run。
-    process: { pid: process.pid, platform: process.platform, kill: process.kill, env: { QQB_RUN_DIR: path.join(temp, 'run') }, exit: (code) => { throw new Error('unexpected exit ' + code); } },
+    // UPGRADE_PATCH：DSH_HOME 也给 VM 一份——桥接的 installedPresetYaml() 读的是 VM 里的 process.env，
+    // 缺了它会落到 os.homedir()/.dsh；仿真提示词保存会同步那里的旧安装目录，测试绝不能碰真的 ~/.dsh。
+    process: { pid: process.pid, platform: process.platform, kill: process.kill, env: { QQB_RUN_DIR: path.join(temp, 'run'), QQB_NO_UPDATE_CHECK: '1', DSH_HOME: dshHome }, exit: (code) => { throw new Error('unexpected exit ' + code); } },
     setTimeout: (fn, ms) => { const timer = setTimeout(fn, ms); timers.add(timer); return timer; },
     clearTimeout, setInterval: () => ({ unref() {} }), clearInterval: () => {},
     NodeApiClient: class { constructor() { return api; } },
@@ -257,6 +272,9 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     createDailyReport, isErrorLine, dayOf,
     // APIHUB_PATCH：RAG 开关 / API 管理 / DSH 凭据（bridge.js 顶层 import；默认 execFile 换替身）。
     createRagControl, defaultRagExec: fakeRagExec, createApiHub, readEmbeddingKind, dshCredentials,
+    // UPGRADE_PATCH：覆盖层与版本检查（版本检查被 QQB_NO_UPDATE_CHECK=1 关着，fetch 也是上面的记录型替身）。
+    createRoleStore, effectivePresetYaml, readOverride, writeOverride, removeOverride, buildPatches, createUpdateCheck,
+    ...roleCard,
     ...markdown, ...sensitive, ...wait, ...safeFetch, ...forward, ...slang, ...sticker,
     ...modelPrices, ...tokenLedger, ...voiceLib, ...stateAcl, ...presetPrompt,
     // 桥接的出图出口会调归一化（体积/动图抽帧）：VM 里必须能拿到这几个函数。

@@ -1,0 +1,140 @@
+[
+  {
+    "name": "覆盖为空映射：结果等于出厂",
+    "base": {"state_dir": "../../state", "search": {"rrf_k": 60, "top_chunks": 5}},
+    "local": {},
+    "expected": {"state_dir": "../../state", "search": {"rrf_k": 60, "top_chunks": 5}}
+  },
+  {
+    "name": "覆盖为 null（空文件）：视为没有覆盖",
+    "base": {"recall": {"tau": 0.4}},
+    "local": null,
+    "expected": {"recall": {"tau": 0.4}}
+  },
+  {
+    "name": "覆盖顶层是列表：视为没有覆盖",
+    "base": {"recall": {"tau": 0.4}},
+    "local": ["recall", "tau"],
+    "expected": {"recall": {"tau": 0.4}}
+  },
+  {
+    "name": "覆盖顶层是标量：视为没有覆盖",
+    "base": {"recall": {"tau": 0.4}},
+    "local": "tau: 0.5",
+    "expected": {"recall": {"tau": 0.4}}
+  },
+  {
+    "name": "嵌套映射里替换一个标量，兄弟键保留",
+    "base": {"recall": {"tau": 0.4, "exclude_recent_hours": 12, "min_chars": 4}},
+    "local": {"recall": {"tau": 0.5}},
+    "expected": {"recall": {"tau": 0.5, "exclude_recent_hours": 12, "min_chars": 4}}
+  },
+  {
+    "name": "三层嵌套递归合并",
+    "base": {"embedding": {"provider": "local", "api": {"model": "m1", "dim": 1024, "batch": 32}}},
+    "local": {"embedding": {"api": {"dim": 768}}},
+    "expected": {"embedding": {"provider": "local", "api": {"model": "m1", "dim": 768, "batch": 32}}}
+  },
+  {
+    "name": "列表整体替换，不拼接",
+    "base": {"distill": {"self_names": ["小肥鱼", "小鲸鱼"], "enabled": true}},
+    "local": {"distill": {"self_names": ["阿鱼"]}},
+    "expected": {"distill": {"self_names": ["阿鱼"], "enabled": true}}
+  },
+  {
+    "name": "空列表也是整体替换",
+    "base": {"recall": {"stopwords": ["嗯", "好"]}},
+    "local": {"recall": {"stopwords": []}},
+    "expected": {"recall": {"stopwords": []}}
+  },
+  {
+    "name": "顶层标量替换",
+    "base": {"segmenter": {"llm": false}, "version_note": "a"},
+    "local": {"version_note": "b"},
+    "expected": {"segmenter": {"llm": false}, "version_note": "b"}
+  },
+  {
+    "name": "值为 null 删除嵌套键（回到代码缺省）",
+    "base": {"distill": {"model": "deepseek-flash", "daily_limit": 300}},
+    "local": {"distill": {"daily_limit": null}},
+    "expected": {"distill": {"model": "deepseek-flash"}}
+  },
+  {
+    "name": "值为 null 删除整段顶层映射",
+    "base": {"associate": {"min_age_days": 2}, "recall": {"tau": 0.4}},
+    "local": {"associate": null},
+    "expected": {"recall": {"tau": 0.4}}
+  },
+  {
+    "name": "null 删除出厂没有的键：什么都不发生",
+    "base": {"recall": {"tau": 0.4}},
+    "local": {"recall": {"nope": null}, "absent": null},
+    "expected": {"recall": {"tau": 0.4}}
+  },
+  {
+    "name": "出厂没有的键：新增（含嵌套映射）",
+    "base": {"recall": {"tau": 0.4}},
+    "local": {"recall": {"extra": 1}, "newsec": {"a": {"b": 2}}},
+    "expected": {"recall": {"tau": 0.4, "extra": 1}, "newsec": {"a": {"b": 2}}}
+  },
+  {
+    "name": "覆盖里的顶层 state_dir 被忽略",
+    "base": {"state_dir": "../../state", "recall": {"tau": 0.4}},
+    "local": {"state_dir": "/elsewhere", "recall": {"tau": 0.45}},
+    "expected": {"state_dir": "../../state", "recall": {"tau": 0.45}}
+  },
+  {
+    "name": "覆盖里 state_dir: null 也被忽略（不删出厂的）",
+    "base": {"state_dir": "../../state"},
+    "local": {"state_dir": null},
+    "expected": {"state_dir": "../../state"}
+  },
+  {
+    "name": "嵌套层里叫 state_dir 的键照常合并（只忽略顶层）",
+    "base": {"x": {"state_dir": "a"}},
+    "local": {"x": {"state_dir": "b"}},
+    "expected": {"x": {"state_dir": "b"}}
+  },
+  {
+    "name": "映射换成标量：整体替换",
+    "base": {"price": {"cache_hit": 0.02, "output": 4}},
+    "local": {"price": 1},
+    "expected": {"price": 1}
+  },
+  {
+    "name": "标量换成映射：整体替换",
+    "base": {"model": null},
+    "local": {"model": {"name": "x"}},
+    "expected": {"model": {"name": "x"}}
+  },
+  {
+    "name": "映射换成列表：整体替换",
+    "base": {"cue": {"a": 1}},
+    "local": {"cue": [1, 2]},
+    "expected": {"cue": [1, 2]}
+  },
+  {
+    "name": "覆盖里的空映射不清空出厂映射",
+    "base": {"search": {"rrf_k": 60}},
+    "local": {"search": {}},
+    "expected": {"search": {"rrf_k": 60}}
+  },
+  {
+    "name": "false / 0 / 空字符串是正常值，不是删除",
+    "base": {"distill": {"enabled": true, "daily_limit": 300, "model": "m"}},
+    "local": {"distill": {"enabled": false, "daily_limit": 0, "model": ""}},
+    "expected": {"distill": {"enabled": false, "daily_limit": 0, "model": ""}}
+  },
+  {
+    "name": "出厂值本身是 null 时被覆盖成具体值",
+    "base": {"distill": {"model": null, "timeout_s": 30}},
+    "local": {"distill": {"model": "deepseek-pro"}},
+    "expected": {"distill": {"model": "deepseek-pro", "timeout_s": 30}}
+  },
+  {
+    "name": "列表里的映射不递归合并，整体替换",
+    "base": {"routes": [{"a": 1, "b": 2}]},
+    "local": {"routes": [{"a": 9}]},
+    "expected": {"routes": [{"a": 9}]}
+  }
+]
