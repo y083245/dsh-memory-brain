@@ -61,7 +61,7 @@ function messageInConversation(input, conversation, conversationKey) {
 
 const drop = (reason) => ({ decision: 'drop', reason });
 
-function validDeliveryRef(platform, value) {
+export function validDeliveryRef(platform, value) {
   if (typeof value !== 'string') return false;
   if (platform === 'telegram') {
     // The poller's checkpoint is update_id + 1, so leave room for that increment.
