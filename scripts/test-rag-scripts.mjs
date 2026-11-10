@@ -26,6 +26,41 @@ const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'qqb-test-rag-scripts-'));
 const FAKE_BIN = path.join(ROOT, 'fakebin');
 fs.mkdirSync(FAKE_BIN, { recursive: true });
 
+// Node 编排直接探测 TCP / HTTP，不走 PATH 里的假 ss。两个探测都读同一份假单元状态，
+// 避免开发机已运行的 embedding / memory-rag 改变测试分支。
+const NETWORK_STUB = path.join(ROOT, 'rag-network.cjs');
+fs.writeFileSync(NETWORK_STUB, String.raw`
+const { EventEmitter } = require('node:events');
+const fs = require('node:fs');
+const net = require('node:net');
+const path = require('node:path');
+const units = { 8091: 'qq-embedding.service', 8093: 'qq-memory-rag.service' };
+function running(host, port) {
+  if (host !== '127.0.0.1' || !Object.hasOwn(units, port)) {
+    throw new Error('Unexpected network probe in RAG fixture');
+  }
+  const file = path.join(process.env.HOME, '.fake-state', units[port]);
+  try { return fs.readFileSync(file, 'utf8').trim() === 'active'; }
+  catch (error) { if (error.code === 'ENOENT') return false; throw error; }
+}
+net.connect = ({ host, port }) => {
+  const socket = new EventEmitter();
+  socket.setTimeout = () => {};
+  socket.destroy = () => {};
+  const open = running(host, port);
+  queueMicrotask(() => {
+    if (open) socket.emit('connect');
+    else socket.emit('error', new Error('fixture port is closed'));
+  });
+  return socket;
+};
+globalThis.fetch = async (value) => {
+  const url = new URL(value);
+  if (url.protocol !== 'http:' || url.pathname !== '/health') throw new Error('Unexpected health URL');
+  return { ok: running(url.hostname, url.port), json: async () => ({ status: 'ok', embedding: {} }) };
+};
+`);
+
 // CI 的 Python 不一定装了 PyYAML。rag-config.py 只用它读 config.yml 的
 // `embedding.provider`，这里放一个最小替身，避免测试依赖机器的 pip 状态。
 const PYYAML_DIR = path.join(ROOT, 'pyyaml');
@@ -49,6 +84,8 @@ function fakeCommand(name, body) {
   fs.chmodSync(file, 0o755);
 }
 
+// 带 cap_sys_ptrace 的 Node 会忽略 NODE_OPTIONS，改用显式参数加载测试替身。
+fakeCommand('node', 'exec "$NODE_BIN" --require "$QQB_RAG_NETWORK_STUB" "$@"');
 fakeCommand('systemctl', [
   'echo "$*" >> "$HOME/.fake-log/systemctl.log"',
   'last="${!#}"',
@@ -56,6 +93,8 @@ fakeCommand('systemctl', [
   '  *LoadState*) echo loaded ;;',
   '  *ActiveState*)',
   '    if [ -f "$HOME/.fake-state/$last" ]; then cat "$HOME/.fake-state/$last"; else echo inactive; fi ;;',
+  '  "--user start "*) echo active > "$HOME/.fake-state/$last" ;;',
+  '  "--user stop "*) echo inactive > "$HOME/.fake-state/$last" ;;',
   'esac',
   'exit 0',
 ].join('\n'));
@@ -69,6 +108,8 @@ function envFor(home, extra = {}) {
   return {
     HOME: home,
     PATH: `${FAKE_BIN}:${path.dirname(process.execPath)}:/usr/bin:/bin`,
+    NODE_BIN: process.execPath,
+    QQB_RAG_NETWORK_STUB: NETWORK_STUB,
     XDG_RUNTIME_DIR: path.join(home, 'run'),
     PYTHONPATH: [PYYAML_DIR, process.env.PYTHONPATH].filter(Boolean).join(path.delimiter),
     EMBED_BIN: path.join(home, 'llama.cpp', 'build', 'bin', 'llama-server'),
@@ -270,8 +311,9 @@ await test('已安装单元 + managed=yes：start-all.sh --rag 写 true 并起�
   const startCalls = logLines(home.home, 'systemctl');
   assert.ok(startCalls.includes('--user start qq-embedding.service'), `要起 embedding：${startCalls.join(' | ')}`);
   assert.ok(startCalls.includes('--user start qq-memory-rag.service'), `要起 memory-rag：${startCalls.join(' | ')}`);
+  assert.match(started.stdout, /embedding 已就绪（8091）/);
+  assert.match(started.stdout, /memory-rag 已就绪（8093）/);
 
-  markActive(home, ['qq-embedding.service', 'qq-memory-rag.service']);
   const stopped = runScript(home, 'stop-all.sh', ['--rag']);
   assert.equal(stopped.code, 0, stopped.stderr);
   assert.equal(enabledOf(home), false);
@@ -294,6 +336,7 @@ await test('managed=no（自己部署的本地服务）：start 只起 memory-ra
   assert.deepEqual(embedCalls, ['--user show -p LoadState --value qq-embedding.service'],
     `不该启停或等待 qq-embedding：${embedCalls.join(' | ')}`);
   assert.match(started.stdout, /向量模型：自己部署 \/ 云端，不由本脚本管理/);
+  assert.match(started.stdout, /memory-rag 已就绪（8093）/);
 });
 
 await test('managed=no：stop 只停 memory-rag，不停 qq-embedding', () => {

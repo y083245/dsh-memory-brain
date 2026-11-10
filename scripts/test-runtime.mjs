@@ -189,7 +189,8 @@ await test('Windows RAG 管理器：pid 模式、installed=false、启停走注�
     deps: {
       isPortOpen: async () => false,
       gpuFreeMiB: async () => 24000,
-      isFile: () => true,
+      isFile: (file) => !file.endsWith('python.exe'),
+      execFile: async () => ({ code: 0 }),
       spawnDetached: async (options) => { spawns.push(path.basename(options.logFile)); return { pid: 4000 + spawns.length }; },
       writePidFile: () => {},
       waitForHealth: async () => true,

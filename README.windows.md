@@ -111,6 +111,8 @@ start-all.bat
 
 ## 五、可选：开启向量记忆 memory-rag
 
+Windows 首次开启 RAG 时会检查 Python 3.12+ 和项目依赖。环境缺失时，启动器会使用 PATH 中已安装的 `uv` 准备项目虚拟环境。首次下载可能需要几分钟。也可以手动安装：
+
 ```bat
 cd sidecars\memory-rag
 uv venv --python 3.12 .venv
@@ -119,8 +121,7 @@ cd ..\..
 start-all.bat --rag
 ```
 
-或者在控制台「API 管理」页打开 RAG 开关。本地 embedding 需要 **≥ 10 GB 空闲显存**；不够时会自动跳过，检索退回关键词（BM25）。
-没有显卡可以在控制台选「云端 API」。停止：`stop-all.bat --rag`。
+也可以在控制台「API 管理」页打开 RAG 开关。本地 embedding 需要 **≥ 10 GB 空闲显存**，不够时检索会退回关键词（BM25）。「云端 API」只替代本地向量模型，本机仍运行 Python RAG 服务。启动失败时先查看控制台原因，Python 进程日志默认在 `%USERPROFILE%\.ai-companion-run\memory-rag.log`。停止服务用 `stop-all.bat --rag`。
 
 ---
 

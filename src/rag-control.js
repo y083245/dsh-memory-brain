@@ -19,6 +19,7 @@ import { execFile as nodeExecFile } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createProcessManager } from './process-manager.mjs';
+import { MemoryRagStartError } from './runtime/rag-services.mjs';
 import { EMBEDDING_UNIT, MEMORY_RAG_UNIT, STEP } from './rag-constants.js';
 
 export { EMBEDDING_UNIT, MEMORY_RAG_UNIT, STEP };
@@ -113,6 +114,7 @@ export function createRagControl({
   let locked = false;
   let busyOp = null; // null | 'start' | 'stop' | 'save-embedding'
   let step = null;
+  let startFailure = null;
 
   let modeCache = null; // 'systemd' | 'script' | 'pid'，缓存到桥接重启
 
@@ -250,11 +252,12 @@ export function createRagControl({
     // 3. memory-rag 不可达。
     if (!health) {
       base.phase = 'failed';
-      base.reason = memory.state === 'failed'
+      base.reason = startFailure ?? (memory.state === 'failed'
         ? 'memory-rag 启动失败，看 ~/.ai-companion-run/memory-rag.log'
-        : 'memory-rag 没在运行';
+        : 'memory-rag 没在运行');
       return base;
     }
+    startFailure = null;
 
     // 4. 重建进行中。
     const job = base.job;
@@ -320,6 +323,7 @@ export function createRagControl({
     try {
       writeEnabled(value);
       enabledNow = value;
+      startFailure = null;
     } catch (error) {
       locked = false;
       busyOp = null;
@@ -328,7 +332,10 @@ export function createRagControl({
     }
     const task = value ? doStart() : doStop();
     task
-      .catch((error) => log(`[rag-control] ${value ? '启动' : '停止'}失败：${error?.message ?? error}`))
+      .catch((error) => {
+        if (value && error instanceof MemoryRagStartError) startFailure = error.message;
+        log(`[rag-control] ${value ? '启动' : '停止'}失败：${error?.message ?? error}`);
+      })
       .finally(() => { locked = false; busyOp = null; step = null; });
     return state();
   }
@@ -355,11 +362,17 @@ export function createRagControl({
   async function restartMemoryRag({ embeddingBefore, embeddingAfter } = {}) {
     const beforeManaged = embeddingBefore === 'bundled' || embeddingBefore === 'legacy-local';
     const afterManaged = embeddingAfter === 'bundled' || embeddingAfter === 'legacy-local';
-    await processManager.restart({
-      beforeManaged,
-      afterManaged,
-      onStep: (value) => { step = value; }
-    });
+    startFailure = null;
+    try {
+      await processManager.restart({
+        beforeManaged,
+        afterManaged,
+        onStep: (value) => { step = value; }
+      });
+    } catch (error) {
+      if (error instanceof MemoryRagStartError) startFailure = error.message;
+      throw error;
+    }
     step = STEP.wait;
     await waitHealthy();
   }

@@ -16,7 +16,8 @@ import yaml from 'js-yaml';
 import { extractPresetPrefix, presetPromptBlockers, presetPromptWarnings, renderPresetPromptYaml } from './preset-prompt.js';
 import { GEN1_ROLE_LINE_RE, parseRoleSections, roleCharStats, roleSectionReport, selectRoleText } from './role-card.js';
 import { fileURLToPath } from 'node:url';
-import { SnowLumaWebSocketClient, text } from '@snowluma/sdk';
+import { createQQAdapter } from './channels/qq.js';
+import { canonicalLegacyQQKey as canonicalV2Key } from './core/identity.mjs';
 import { NodeApiClient, unwrap, createTurnCollector, discoverDshLaunchToken } from './dsh-client.js';
 import { describeEndpoint, modelSetupHint, resolveDshEndpoint } from './dsh-discovery.js';
 import { discoverDshBaseUrl } from './dsh-endpoint.js';
@@ -729,11 +730,6 @@ function redactSensitiveText(text) {
     if (token && raw.includes(token)) raw = raw.split(token).join('***');
   }
   return raw;
-}
-
-// 防止底层网关把文本中的 [CQ: 当作 CQ 码解析：替换为全角冒号。
-function escapeCqText(text) {
-  return String(text ?? '').replace(/\[CQ:/gi, '[CQ：');
 }
 
 // 兼容模型把单条消息序列化成 JSON 字符串的情况，例如 "\"你好\"" → "你好"。
@@ -1557,15 +1553,6 @@ function allowed(kind, id, cfg) {
   const allowList = cfg.allow[kind] ?? cfg.allow[kind + 's'] ?? [];
   if (allowList.length > 0) return allowList.map(String).includes(s);
   return cfg.allowAllWhenEmpty;
-}
-
-// 二代会话 key 规范化：只接受 group:正整数 / private:正整数，并去掉前导零，避免同一会话出现多个别名。
-function canonicalV2Key(key) {
-  const m = /^(group|private):(\d+)$/.exec(String(key ?? '').trim());
-  if (!m) return null;
-  const id = Number(m[2]);
-  if (!Number.isSafeInteger(id) || id <= 0) return null;
-  return `${m[1]}:${id}`;
 }
 
 // ── 执行期会话绑定（SELF_KEY）──────────────────────────────────────────────
@@ -6258,10 +6245,7 @@ async function main() {
           if (!allowed(kind, id, cfg)) { sendJson({ ok: false, error: `目标不在白名单内（${kind} ${id}），请先加入白名单` }, 403); return; }
           if (!modeAllowed(`${kind}:${id}`, kind, id, cfg, currentMode)) { sendJson({ ok: false, error: `当前模式（${currentMode}）不允许向 ${kind}:${id} 发送测试消息` }, 403); return; }
           try {
-            const safeMessage = escapeCqText(redactKnownTokensOnly(message));
-            const result = kind === 'private'
-              ? await bot.sendPrivateMessage(id, text(safeMessage))
-              : await bot.sendGroupMessage(id, text(safeMessage));
+            const result = await qq.sendText(kind, id, redactKnownTokensOnly(message));
             log(`控制台：测试发送 ${kind}:${id} 成功`);
             sendJson({ ok: true, kind, id, message_id: result?.message_id ?? result });
           } catch (error) {
@@ -9599,8 +9583,7 @@ async function main() {
       sendChain = sendChain
         .then(async () => {
           assertSendAllowed();
-          if (kind === 'private') await withTimeout(bot.sendPrivateMessage(Number(id), text(escapeCqText(part))), SEND_TIMEOUT_MS, `QQ发送 ${kind}:${id}`);
-          else await withTimeout(bot.sendGroupMessage(Number(id), text(escapeCqText(part))), SEND_TIMEOUT_MS, `QQ发送 ${kind}:${id}`);
+          await withTimeout(qq.sendText(kind, id, part), SEND_TIMEOUT_MS, `QQ发送 ${kind}:${id}`);
         })
         .catch((error) => {
           lastSendFailed.set(key, true);
@@ -9792,8 +9775,7 @@ async function main() {
       sendChain = sendChain
         .then(async () => {
           assertSendAllowed();
-          if (kind === 'private') await withTimeout(bot.sendPrivateMessage(Number(id), text(escapeCqText(msg))), SEND_TIMEOUT_MS, `QQ发送 ${kind}:${id}`);
-          else await withTimeout(bot.sendGroupMessage(Number(id), text(escapeCqText(msg))), SEND_TIMEOUT_MS, `QQ发送 ${kind}:${id}`);
+          await withTimeout(qq.sendText(kind, id, msg), SEND_TIMEOUT_MS, `QQ发送 ${kind}:${id}`);
           sent.push(msg);
         })
         .catch((error) => {
@@ -9814,43 +9796,13 @@ async function main() {
 
 
   async function onebotSend(kind, id, message, replyToMessageId, atUserId = null) {
-    const segments = [];
-    if (replyToMessageId !== undefined && replyToMessageId !== null && String(replyToMessageId).trim() !== '') {
-      const rid = String(replyToMessageId).trim();
-      if (!/^-?[1-9]\d*$/.test(rid)) throw new Error('replyToMessageId 必须是非零整数（消息 id 可能为负数）');
-      segments.push({ type: 'reply', data: { id: rid } });
-    }
-    if (atUserId !== undefined && atUserId !== null && String(atUserId).trim() !== '') {
-      const at = String(atUserId).trim();
-      // 只允许正整数 QQ 号，禁止 @all，避免被滥用成 @全体成员
-      if (!/^\d+$/.test(at)) throw new Error('atUserId 必须是正整数 QQ 号，且不能为 all');
-      segments.push({ type: 'at', data: { qq: at } });
-    }
     const rawMessage = String(message ?? '');
     const hasKnownToken = hasKnownTokenFragment(rawMessage);
     if (hasKnownToken) {
       log(`发送内容包含会话令牌，已阻止发送 (${kind}:${id})`);
       throw new Error('发送内容包含会话令牌，已阻止发送');
     }
-    segments.push({ type: 'text', data: { text: escapeCqText(rawMessage) } });
-    const action = kind === 'private' ? 'send_private_msg' : 'send_group_msg';
-    const params = kind === 'private' ? { user_id: Number(id), message: segments } : { group_id: Number(id), message: segments };
-    const httpUrl = String(cfg.snowluma?.httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '');
-    const res = await fetch(`${httpUrl}/${action}`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        ...(cfg.snowluma?.accessToken ? { authorization: `Bearer ${cfg.snowluma.accessToken}` } : {})
-      },
-      body: JSON.stringify(params),
-      signal: AbortSignal.timeout(15000)
-    });
-    const body = await res.json().catch(() => ({}));
-    if (!res.ok || body.status !== 'ok' || body.retcode !== 0) {
-      const hint = res.status === 426 ? '（HTTP 426：snowluma.httpUrl 可能指向了 WebSocket 端口，请检查 config.json 的 snowluma.httpUrl 是否为 OneBot HTTP API 地址）' : '';
-      throw new Error(`OneBot ${action} 失败: ${body.wording || body.retcode || res.status}${hint}`);
-    }
-    return body.data;
+    return qq.sendStructuredText(kind, id, rawMessage, replyToMessageId, atUserId);
   }
 
   // ── 图片/表情字节解析（供一代自动内联与二代按需工具） ────────────────────
@@ -15118,40 +15070,14 @@ async function main() {
     }
   }
 
-  // QQ 侧（SnowLuma OneBot WebSocket 客户端）
-  const bot = new SnowLumaWebSocketClient({
-    url: cfg.snowluma.wsUrl,
-    // WS 与 HTTP 的 token 在 SnowLuma 里是两个值；wsAccessToken 单独给 WebSocket 用（start-all 会自动探测写入）。
-    accessToken: cfg.snowluma.wsAccessToken || cfg.snowluma.accessToken || undefined,
-    reconnect: true
+  const qq = await createQQAdapter(cfg.snowluma);
+  const { bot } = qq;
+  qq.bindIngress({
+    onMessage: (kind, id, event) => handleIncoming(kind, id, event, cfg),
+    onPoke: handlePokeNotice,
+    onRecall: handleRecallNotice,
+    log,
   });
-
-  bot.onPrivateMessage(async (event) => {
-    // 统一按字符串比较：网关可能把 id 序列化成 number/string 混用，
-    // 用 `===` 漏掉自己发的消息会进入正常处理（reserved2 下 AI 会回答自己 / chat 下可能回复循环）。
-    if (String(event?.user_id ?? '') === String(event?.self_id ?? '')) return;
-    try { await handleIncoming('private', event.user_id, event, cfg); } catch (error) { log('处理私聊消息出错:', error?.message ?? error); }
-  });
-  bot.onGroupMessage(async (event) => {
-    if (String(event?.sender?.user_id ?? '') === String(event?.self_id ?? '')
-      || String(event?.user_id ?? '') === String(event?.self_id ?? '')) return;
-    try { await handleIncoming('group', event.group_id, event, cfg); } catch (error) { log('处理群消息出错:', error?.message ?? error); }
-  });
-  bot.onNotice('notify', async (event) => {
-    try { await handlePokeNotice(event); } catch (error) { log('处理拍一拍事件出错:', error?.message ?? error); }
-  });
-  // 撤回事件走独立的 notice_type（group_recall / friend_recall），不是 notify 的 sub_type。
-  for (const noticeType of ['group_recall', 'friend_recall']) {
-    try {
-      bot.onNotice(noticeType, async (event) => {
-        try { handleRecallNotice({ ...event, notice_type: noticeType }); }
-        catch (error) { log('处理撤回事件出错:', error?.message ?? error); }
-      });
-    } catch (error) {
-      // 不同 OneBot 实现的订阅方法可能不同；注册失败不影响主链路。
-      log(`（撤回事件订阅不可用 ${noticeType}：${error?.message ?? error}）`);
-    }
-  }
 
   // ── 上游健康：任何事件包都算「SnowLuma 还活着」，心跳还额外带接收链路健康度 ──
   // 用 onEvent 挂一个**旁路**订阅（不影响主链路）：

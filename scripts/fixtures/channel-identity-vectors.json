@@ -1,0 +1,31 @@
+{
+  "valid": [
+    {
+      "kind": "conversation",
+      "key": "c1_WyJ0ZWxlZ3JhbSIsIjQxIixudWxsLCJncm91cCIsIi0xMDAxMjMiLCI3Il0",
+      "ref": {"platform": "telegram", "accountId": "41", "tenantId": null, "chatType": "group", "chatId": "-100123", "threadId": "7"}
+    },
+    {
+      "kind": "person",
+      "key": "p1_WyJmZWlzaHUiLCJjbGlfZml4dHVyZSIsInRlbmFudF9hIiwib3Vfc2FtZSJd",
+      "ref": {"platform": "feishu", "accountId": "cli_fixture", "tenantId": "tenant_a", "userId": "ou_same"}
+    },
+    {
+      "kind": "message",
+      "key": "m1_W1sidGVsZWdyYW0iLCI0MSIsbnVsbCwiZ3JvdXAiLCItMTAwMTIzIiwiNyJdLCItMTIzIiwiMTkiXQ",
+      "ref": {
+        "conversation": {"platform": "telegram", "accountId": "41", "tenantId": null, "chatType": "group", "chatId": "-100123", "threadId": "7"},
+        "platformChatId": "-123",
+        "messageId": "19"
+      }
+    }
+  ],
+  "invalid": [
+    "c1_WyJ0ZWxlZ3JhbSIsIjQxIixudWxsLCJncm91cCIsIi0xMDAxMjMiLCI3Il0=",
+    "c1_WyJ0ZWxlZ3JhbSIsIjQxIixudWxsLCJncm91cCIsIi0xMDAxMjMiLCI3Il1",
+    "c1_WyJ0ZWxlZ3JhbSIsIjQxIixudWxsLCJncm91cCIsIi0wMTAwMTIzIiwiNyJd",
+    "c1_WyJmZWlzaHUiLCJjbGlfZml4dHVyZSIsbnVsbCwicHJpdmF0ZSIsIm9jX2ZpeHR1cmUiLG51bGxd",
+    "private:42",
+    "qqb-p-42"
+  ]
+}

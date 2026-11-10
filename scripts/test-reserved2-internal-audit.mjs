@@ -2,7 +2,7 @@
 // 不该被出站审计当成「回复被拦截」，更不该因此往 QQ 发拦截提示（2026-10-30 线上误报）。
 // 这里用 bridgeHarness 起真实桥接代码，再把 DSH 事件流灌进去，跑真正的 pumpMux 回合结束分支。
 //
-// 为什么不是直接调 bridgeHarness 返回的函数：harness 为了安全在 `bot.onPrivateMessage` 处
+// 为什么不是直接调 bridgeHarness 返回的函数：harness 为了安全在 `qq.bindIngress` 处
 // 提前 return（不注册 QQ 回调、不启动 pumpMux），所以它导出的对象里**没有** pumpMux。
 // 因此本测试在 harness 建好的同一个 VM 上下文里，用同样的源码改写方式再跑一份模块
 // （只多导出 pumpMux 等几个句柄），不修改 harness 本身，也不碰线上进程。
@@ -56,7 +56,7 @@ function instrumentedSource(temp, exposureNames) {
   }, { out: [], droppingImport: false }).out.join('\n');
   source = source.replaceAll('import.meta.url', JSON.stringify(pathToFileURL(path.join(temp, 'src/bridge.js')).href));
   source = source.slice(0, source.indexOf("process.on('SIGINT'"));
-  const marker = '  bot.onPrivateMessage(async (event) => {';
+  const marker = '  qq.bindIngress({';
   const idx = source.indexOf(marker);
   if (idx < 0) throw new Error('找不到 harness 注入点（bridge.js 结构变了？）');
   const exposure = `

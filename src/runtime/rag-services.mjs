@@ -6,7 +6,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { commandSpec } from './commands.mjs';
 import { isPortOpen } from './ports.mjs';
-import { execFileP, readPidFile, isPidAlive, spawnDetached, stopPidFile, writePidFile } from './process.mjs';
+import { execFileP, readPidFile, isPidAlive, removePidFile, spawnDetached, stopPidFile, writePidFile } from './process.mjs';
+import { MemoryRagStartError, prepareWindowsRagPython } from './rag-python.mjs';
+
+export { MemoryRagStartError };
 
 export const EMBED_PORT = 8091;
 export const RAG_PORT = 8093;
@@ -38,15 +41,16 @@ export async function fetchHealth(port, { timeoutMs = 10000, fetchImpl = globalT
  * 为什么不是只等端口：llama-server 刚监听时模型可能还没加载完（/health 503），
  * memory-rag 也可能先起来、embedding 还没就绪。
  */
-export async function waitForHealth(port, seconds, { fetchImpl, accept = (data) => !!data, intervalMs = 1000, timeoutMs = 10000 } = {}) {
+export async function waitForHealth(port, seconds, { fetchImpl, accept = (data) => !!data, shouldContinue = () => true, intervalMs = 1000, timeoutMs = 10000 } = {}) {
   const deadline = Date.now() + Math.max(0, Number(seconds) || 0) * 1000;
-  for (;;) {
+  while (shouldContinue()) {
     const data = await fetchHealth(port, { timeoutMs, fetchImpl });
     if (data && accept(data)) return true;
     const left = deadline - Date.now();
-    if (left <= 0) return false;
+    if (left <= 0 || !shouldContinue()) return false;
     await new Promise((resolve) => setTimeout(resolve, Math.min(intervalMs, left)));
   }
+  return false;
 }
 
 export async function embeddingReady({ timeoutMs = 5000, fetchImpl } = {}) {
@@ -126,23 +130,43 @@ export async function startMemoryRagService({
 } = {}) {
   const portOpen = deps.isPortOpen ?? isPortOpen;
   if (await portOpen(RAG_PORT)) return { started: false, skipped: 'already-running' };
-  if (!python?.command) return { started: false, skipped: 'missing-python' };
-  const spec = (deps.commandSpec ?? commandSpec)(python.command, [
-    ...(python.args ?? []),
+  const windows = platform === 'win32';
+  const interpreter = windows ? await prepareWindowsRagPython({ ragDir, python, log, deps }) : python;
+  if (!interpreter?.command) return { started: false, skipped: 'missing-python' };
+  // 另一个启动入口可能在准备 Python 期间已启动服务。
+  if (windows && await portOpen(RAG_PORT)) return { started: false, skipped: 'already-running' };
+  const spec = (deps.commandSpec ?? commandSpec)(interpreter.command, [
+    ...(interpreter.args ?? []),
     '-W', 'ignore::SyntaxWarning',
     '-m', 'memory_rag.app'
   ], { platform });
-  const spawned = await (deps.spawnDetached ?? spawnDetached)({
-    ...spec,
-    cwd: ragDir,
-    logFile: path.join(runDir, 'memory-rag.log'),
-    platform
-  });
-  (deps.writePidFile ?? writePidFile)(path.join(runDir, RAG_PID), spawned.pid);
+  let spawned;
+  try {
+    spawned = await (deps.spawnDetached ?? spawnDetached)({
+      ...spec,
+      cwd: ragDir,
+      logFile: path.join(runDir, 'memory-rag.log'),
+      platform
+    });
+  } catch (error) {
+    if (!windows) throw error;
+    throw new MemoryRagStartError('无法启动 memory-rag 的 Python 进程。请检查项目目录和运行日志目录的权限。', { cause: error });
+  }
+  const pidFile = path.join(runDir, RAG_PID);
+  (deps.writePidFile ?? writePidFile)(pidFile, spawned.pid);
+  const exited = () => spawned.child?.exitCode != null || spawned.child?.signalCode != null;
   const healthy = await (deps.waitForHealth ?? waitForHealth)(RAG_PORT, waitSeconds, {
     fetchImpl: deps.fetchImpl,
+    shouldContinue: () => !windows || !exited(),
     accept: (data) => data && Object.prototype.hasOwnProperty.call(data, 'embedding')
   });
+  if (windows && !healthy) {
+    if (exited()) {
+      if (readPidFile(pidFile) === spawned.pid) removePidFile(pidFile);
+      throw new MemoryRagStartError('memory-rag 的 Python 进程已退出。请查看运行目录的 memory-rag.log。');
+    }
+    throw new MemoryRagStartError('memory-rag 未在启动时限内响应 8093 端口的健康检查。请查看运行目录的 memory-rag.log。');
+  }
   log(`[rag] memory-rag 已启动（PID ${spawned.pid}）${healthy ? '，端口已就绪' : '，端口未就绪'}`);
   return { started: true, pid: spawned.pid, healthy };
 }

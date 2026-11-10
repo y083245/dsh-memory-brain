@@ -1,3 +1,5 @@
+import { createQQAdapter } from '../src/channels/qq.js';
+import { canonicalLegacyQQKey as canonicalV2Key } from '../src/core/identity.mjs';
 import { resolveInstalledPreset, synchronizePreset } from '../src/preset-sync.js';
 import { renderPatch } from './build-agent-preset-patches.mjs';
 // Execute the real bridge initialization/functions against temporary files and fake peers.
@@ -207,7 +209,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
   }, { out: [], droppingImport: false }).out.join('\n');
   source = source.replaceAll('import.meta.url', JSON.stringify(pathToFileURL(path.join(temp, 'src/bridge.js')).href));
   source = source.slice(0, source.indexOf("process.on('SIGINT'"));
-  source = source.replace('  bot.onPrivateMessage(async (event) => {', `
+  source = source.replace('  qq.bindIngress({', `
   const setStickerEntries = (next) => { stickerEntries = Array.isArray(next) ? next : []; };
   const getStickerEntries = () => stickerEntries;
   return {
@@ -266,7 +268,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     setPresets(value) { dshPresetIds = value; dshDefaultPreset = 'standard'; },
     resetEpoch() { sessionEpoch++; },
   };
-  bot.onPrivateMessage(async (event) => {`);
+  qq.bindIngress({`);
   const timers = new Set();
   const context = vm.createContext({
     fs, os, path, http, crypto, fileURLToPath, URL, Buffer, AbortSignal, console: { log() {}, error() {} },
@@ -284,7 +286,12 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     setTimeout: (fn, ms) => { const timer = setTimeout(fn, ms); timers.add(timer); return timer; },
     clearTimeout, setInterval: () => ({ unref() {} }), clearInterval: () => {},
     NodeApiClient: class { constructor() { return api; } },
-    SnowLumaWebSocketClient: FakeBot, text: (s) => s,
+    SnowLumaWebSocketClient: FakeBot,
+    canonicalV2Key,
+    createQQAdapter: (config) => createQQAdapter(config, {
+      loadSdk: async () => ({ SnowLumaWebSocketClient: context.SnowLumaWebSocketClient, text: (s) => s }),
+      fetch: (...args) => context.fetch(...args),
+    }),
     discoverDshLaunchToken: () => '', unwrap, createTurnCollector,
     // DSH 端点发现（src/dsh-discovery.js）：测试里固定为 dsh web，不去扫真实进程。
     resolveDshEndpoint: async ({ baseUrl }) => ({ baseUrl, kind: 'web' }),

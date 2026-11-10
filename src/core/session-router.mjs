@@ -29,6 +29,10 @@
  *     store them before treating a change as durable.
  */
 
+import { canonicalLegacyQQKey as canonicalConversationKey } from './identity.mjs';
+
+export { canonicalConversationKey };
+
 /** Simulation is the safe default: no local tools, whitelist-gated. */
 const SIMULATION_MODES = Object.freeze(['chat', 'reserved', 'reserved2']);
 
@@ -115,19 +119,6 @@ const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
 function isPlainObject(v) {
   return v !== null && typeof v === 'object' && !Array.isArray(v)
     && (Object.getPrototypeOf(v) === Object.prototype || Object.getPrototypeOf(v) === null);
-}
-
-/**
- * Canonicalise `private:<id>` / `group:<id>`.
- * Mirrors the bridge's own canonicalV2Key: only `\d+`, safe integer, non-zero.
- * Returns null for anything else so callers can fail closed explicitly.
- */
-export function canonicalConversationKey(key) {
-  const m = /^(group|private):(\d+)$/.exec(String(key ?? '').trim());
-  if (!m) return null;
-  const id = Number(m[2]);
-  if (!Number.isSafeInteger(id) || id <= 0) return null;
-  return `${m[1]}:${id}`;
 }
 
 function requireKey(key) {
