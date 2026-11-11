@@ -12,11 +12,11 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Sequence
 
-from .archive import NameBook, Row, RowCache, fmt_line, valid_key
+from .archive import NameBook, Row, fmt_line, timestamp_day, valid_key
 from .embeddings import Embedder, EmbeddingUnavailable
 from .fts import ChunkDB, bm25_lines, query_tokens
 from .indexer import Indexer
-from .l2 import L2, hubs_for_key
+from .l2 import L2
 from .recall import score_linked
 from .store import VectorStore
 
@@ -65,7 +65,7 @@ class Searcher:
         self.indexer = indexer
         # RAG_PATCH（P3）：L2 与 ChunkDB 同库同锁；L2() 构造是幂等的，不需要等 Service 装配
         self.l2 = L2(db)
-        self.rows = RowCache(cfg["paths"].archive)
+        self.rows = indexer.rows
 
     @property
     def names(self) -> NameBook:
@@ -76,7 +76,13 @@ class Searcher:
                routes: Sequence[str] = ("vector", "bm25", "pending", "summary", "graph"),
                use_keywords: bool = True, debug: bool = False) -> dict:
         if not valid_key(key):
-            raise ValueError("key 必填且必须是 group:<号> 或 private:<号>")
+            raise ValueError("key 必须是有效的会话键")
+        with self.indexer.channel_read(key):
+            return self._search(key, query, keywords, date_from, date_to, speaker, k, expand,
+                                routes, use_keywords, debug)
+
+    def _search(self, key, query, keywords, date_from, date_to, speaker, k, expand,
+                routes, use_keywords, debug) -> dict:
         k = self.top_chunks if k is None else max(1, int(k))
         expand = self.expand if expand is None else max(0, int(expand))
         t_from, t_to = day_range(date_from), day_range(date_to, end=True)
@@ -127,7 +133,7 @@ class Searcher:
             pend = [r for r in self.indexer.pending_rows(key)
                     if (t_from is None or r.t >= t_from) and (t_to is None or r.t <= t_to)]
             if pend:
-                n_docs, df = self.db.doc_freq(tokens)
+                n_docs, df = self.db.doc_freq(tokens, key)
                 scores = bm25_lines([fmt_line(r, self.names) for r in pend], tokens, n_docs, df)
                 ranked = sorted((s, i) for i, s in enumerate(scores) if s > 0)[::-1][: self.top]
                 ids = []
@@ -150,7 +156,7 @@ class Searcher:
             seed_ids = [str(r["summary_id"]) for r in self.l2.summaries_by_chunks(key, seed_chunks).values()]
             seeds = {e for ents in self.l2.entities_of(key, seed_ids).values() for e in ents}
             seeds |= set(self.l2.entities_in_text(key, query + " " + " ".join(kws), min_len=2))
-            seeds -= hubs_for_key(key)
+            seeds -= self.l2.hubs_for_key(key)
             if seeds:
                 linked = self.l2.linked_summaries(key, sorted(seeds), exclude_ids=seed_ids)
                 scores = score_linked(self.l2, key, linked)
@@ -206,14 +212,20 @@ class Searcher:
         for r in rs:
             if sp == "我" and r.is_self:
                 return True
-            if not r.is_self and (sp in (r.user_id or "") or sp in self.names.name(r).lower() or sp in r.name.lower()):
+            if not r.is_self and (speaker.strip() == r.person_key or sp in (r.user_id or "")
+                                  or sp in self.names.name(r).lower() or sp in r.name.lower()):
                 return True
         return False
 
     @staticmethod
     def _span(rows: Sequence[Row], ab: tuple[int, int]) -> dict:
         a, b = ab
-        return {"file": rows[a].file, "line_start": rows[a].line, "file_end": rows[b].file, "line_end": rows[b].line}
+        first, last = rows[a], rows[b]
+        span = {"file": first.file, "line_start": first.line, "file_end": last.file, "line_end": last.line}
+        if first.record_id:
+            span.update(byte_start=first.offset, byte_end=last.end,
+                        record_id_start=first.record_id, record_id_end=last.record_id)
+        return span
 
     def _expand(self, rows: Sequence[Row], a: int, b: int, n: int) -> tuple[int, int]:
         """前后各扩 n 条，但不跨 30 分钟段边界：段外的话和这件事无关。"""
@@ -260,8 +272,8 @@ class Searcher:
             a, b = rows[m["s"]], rows[m["e"]]
             out.append({
                 "ids": m["ids"], "score": round(m["score"], 5), "sources": m["sources"],
-                "title": "；".join(t for t in m["titles"] if t), "day": datetime.fromtimestamp(a.t / 1000).strftime("%Y-%m-%d"),
+                "title": "；".join(t for t in m["titles"] if t), "day": timestamp_day(a.t),
                 "t_start": int(a.t), "t_end": int(b.t), "text": m["text"],
-                "file": a.file, "line_start": a.line, "file_end": b.file, "line_end": b.line,
+                **self._span(rows, (m["s"], m["e"])),
             })
         return out

@@ -23,6 +23,9 @@ import sqlite3
 import unicodedata
 from typing import TYPE_CHECKING, Sequence
 
+from .archive import is_channel_key, key_dir
+from .channel_identity import decode_identity_key
+
 if TYPE_CHECKING:  # 只为了类型提示：运行时不 import，避免 fts ↔ l2 循环引用
     from .fts import ChunkDB
 
@@ -133,12 +136,16 @@ def normalize_name(s: str) -> str:
     return "".join(out)
 
 
+def scoped_entity(key: str, entity_id: str) -> str:
+    return f"{key_dir(key)}:{entity_id}" if is_channel_key(key) else entity_id
+
+
 def hubs_for_key(key: str) -> set[str]:
     """枢纽点：连接一切、区分不了话题，联想与图谱都要把它们去掉。
 
     「她」是所有会话共有的点；私聊里对方本人是那个会话的枢纽点（私聊的每一块都提到他）。
     群会话只去掉 `self`：群里的每个人只出现在部分话题里，是有信息量的。"""
-    hubs = {SELF}
+    hubs = {scoped_entity(key, SELF)}
     k = str(key or "")
     if k.startswith("private:") and k.split(":", 1)[1].isdigit():
         hubs.add(f"qq:{k.split(':', 1)[1]}")
@@ -169,6 +176,7 @@ def _delete_summary_rows(cur: sqlite3.Cursor, summary_id: str) -> None:
     还会从候选里漏出来（规格 §3.4）。
     """
     cur.execute("DELETE FROM summaries_fts WHERE summary_id=?", (summary_id,))
+    cur.execute("DELETE FROM channel_terms WHERE kind='summary' AND id=?", (summary_id,))
     cur.execute("DELETE FROM summary_entities WHERE summary_id=?", (summary_id,))
     cur.execute("DELETE FROM relations WHERE summary_id=?", (summary_id,))
     cur.execute("DELETE FROM ledger_notes WHERE summary_id=?", (summary_id,))
@@ -213,6 +221,7 @@ def delete_key_rows(cur: sqlite3.Cursor, key: str) -> None:
     必须在删 `chunks` **之前**调用：`distill_state` 只按 chunk_id 记，要靠 `chunks` 子查询才能找到。
     """
     cur.execute("DELETE FROM summaries_fts WHERE summary_id IN (SELECT summary_id FROM summaries WHERE key=?)", (key,))
+    cur.execute("DELETE FROM channel_terms WHERE key=?", (key,))
     cur.execute("DELETE FROM summary_entities WHERE key=?", (key,))
     cur.execute("DELETE FROM relations WHERE key=?", (key,))
     cur.execute("DELETE FROM distill_state WHERE chunk_id IN (SELECT chunk_id FROM chunks WHERE key=?)", (key,))
@@ -229,6 +238,7 @@ def clear_rows(cur: sqlite3.Cursor) -> None:
     for t in ("summaries_fts", "summary_entities", "relations", "distill_state",
               "ledger_notes", "notes_state", "summaries", "entities"):
         cur.execute(f"DELETE FROM {t}")
+    cur.execute("DELETE FROM channel_terms WHERE kind='summary'")
 
 
 class L2:
@@ -238,6 +248,19 @@ class L2:
         self.lock = db.lock
 
     # ---------------------------------------------------------------- 读（P2 用）
+
+    def hubs_for_key(self, key: str) -> set[str]:
+        hubs = hubs_for_key(key)
+        if is_channel_key(key) and decode_identity_key(key)["chatType"] == "private":
+            # The private counterpart is anchored to the indexed person identity.
+            # A Feishu conversation ID alone does not identify its participant.
+            with self.lock:
+                rows = self.conn.execute(
+                    "SELECT DISTINCT entity_id FROM summary_entities WHERE key=? AND entity_id GLOB ?",
+                    (key, scoped_entity(key, "person:p1_*") ),
+                ).fetchall()
+            hubs.update(row["entity_id"] for row in rows)
+        return hubs
 
     def get_summaries(self, key: str, ids: Sequence[str]) -> dict[str, dict]:
         ids = [str(i) for i in (ids or ()) if i]
@@ -354,9 +377,11 @@ class L2:
         if not toks:
             return []
         match = " OR ".join(f'"{t}"' for t in toks)
-        sql = ("SELECT s.summary_id AS id, bm25(summaries_fts) AS sc "
-               "FROM summaries_fts JOIN summaries s ON s.summary_id = summaries_fts.summary_id "
-               "WHERE summaries_fts MATCH ? AND s.key=?")
+        channel = is_channel_key(key)
+        table, id_col = ("scope_fts", "id") if channel else ("summaries_fts", "summary_id")
+        sql = (f"SELECT s.summary_id AS id, bm25({table}) AS sc "
+               f"FROM {table} JOIN summaries s ON s.summary_id = {table}.{id_col} "
+               f"WHERE {table} MATCH ? AND s.key=?")
         args: list = [match, key]
         if t_end_lte is not None:
             sql += " AND s.t_end <= ?"
@@ -364,8 +389,7 @@ class L2:
         sql += " ORDER BY sc LIMIT ?"
         args.append(int(limit))
         try:
-            with self.lock:
-                rows = self.conn.execute(sql, args).fetchall()
+            rows = self.db.fts_query(sql, args, scope=(key, "summary") if channel else None)
         except sqlite3.OperationalError:
             return []
         return [(r["id"], -float(r["sc"])) for r in rows]
@@ -448,7 +472,7 @@ class L2:
             keys = [str(k) for k in keys]
             if not keys:
                 return empty
-        kw = "" if keys is None else f"key IN ({_marks(len(keys))})"
+        kw = "key NOT GLOB 'c1_*'" if keys is None else f"key IN ({_marks(len(keys))})"
         kargs = [] if keys is None else list(keys)
         with self.lock:
             s_where = f" WHERE {kw}" if kw else ""
@@ -474,7 +498,8 @@ class L2:
                 ent_rows += self.conn.execute(
                     f"SELECT entity_id, type, name, qq FROM entities WHERE entity_id IN ({_marks(len(part))})",
                     part).fetchall()
-            n_where = "" if keys is None else f" WHERE n.key IN ({_marks(len(keys))}) AND s.key IN ({_marks(len(keys))})"
+            n_where = (" WHERE n.key NOT GLOB 'c1_*' AND s.key NOT GLOB 'c1_*'" if keys is None else
+                       f" WHERE n.key IN ({_marks(len(keys))}) AND s.key IN ({_marks(len(keys))})")
             n_args = [] if keys is None else [*keys, *keys]
             n_total = int(self.conn.execute(
                 "SELECT COUNT(*) AS n FROM ledger_notes n JOIN summaries s ON s.summary_id = n.summary_id"
@@ -526,7 +551,7 @@ class L2:
             cur = self.conn.cursor()
             rows = cur.execute(
                 "SELECT s.summary_id FROM summaries s LEFT JOIN notes_state n ON n.summary_id = s.summary_id "
-                "WHERE s.t_end >= ? AND n.summary_id IS NULL", (since,)).fetchall()
+                "WHERE s.t_end >= ? AND n.summary_id IS NULL AND s.key NOT GLOB 'c1_*'", (since,)).fetchall()
             ids = [str(r["summary_id"]) for r in rows]
             if ids and not dry_run:
                 cur.executemany(
@@ -590,11 +615,11 @@ class L2:
         """
         stale: list[str] = []
         with self.lock:
-            from .fts import tokenize  # 函数内 import：fts 模块导入时也会用到本模块
+            from .fts import write_terms
 
             cur = self.conn.cursor()
             chunks = cur.execute(
-                "SELECT chunk_id, text, speaker_names FROM chunks WHERE distilled='pending'").fetchall()
+                "SELECT chunk_id, key, text, speaker_names FROM chunks WHERE distilled='pending'").fetchall()
             for c in chunks:
                 th = text_hash(c["text"])
                 row = cur.execute(
@@ -604,9 +629,7 @@ class L2:
                 if row["text_hash"] == th:
                     title = row["title"]
                     cur.execute("UPDATE chunks SET distilled='done', title=? WHERE chunk_id=?", (title, c["chunk_id"]))
-                    cur.execute("DELETE FROM chunks_fts WHERE chunk_id=?", (c["chunk_id"],))
-                    blob = " ".join(tokenize(f"{title}\n{c['speaker_names']}\n{c['text']}"))
-                    cur.execute("INSERT INTO chunks_fts(tokens, chunk_id) VALUES (?,?)", (blob, c["chunk_id"]))
+                    write_terms(cur, "chunk", c["key"], c["chunk_id"], f"{title}\n{c['speaker_names']}\n{c['text']}")
                     cur.execute("DELETE FROM distill_state WHERE chunk_id=?", (c["chunk_id"],))
                 else:
                     sid = str(row["summary_id"])
@@ -672,7 +695,7 @@ class L2:
         调用前不能持有索引锁：调模型要几十秒，拿着锁会挡住遗忘。所以这里重新核对一次。
         """
         with self.lock:
-            from .fts import tokenize
+            from .fts import write_terms
 
             cur = self.conn.cursor()
             chunk = cur.execute(
@@ -692,16 +715,15 @@ class L2:
                  title, summary, float(result.get("importance", 0.4)), float(result.get("valence", 0.0)),
                  str(model or ""), int(now_ms)),
             )
-            cur.execute("DELETE FROM summaries_fts WHERE summary_id=?", (sid,))
-            cur.execute("INSERT INTO summaries_fts(tokens, summary_id) VALUES (?,?)",
-                        (" ".join(tokenize(f"{title}\n{summary}")), sid))
+            write_terms(cur, "summary", chunk["key"], sid, f"{title}\n{summary}")
             # 同一条摘要重写时先把旧的关联、关系清掉，免得关系无限累积
             cur.execute("DELETE FROM summary_entities WHERE summary_id=?", (sid,))
             cur.execute("DELETE FROM relations WHERE summary_id=?", (sid,))
             for e in result.get("entities") or ():
-                eid = str(e.get("entity_id") or "")
-                if not eid:
+                entity_id = str(e.get("entity_id") or "")
+                if not entity_id:
                     continue
+                eid = scoped_entity(chunk["key"], entity_id)
                 cur.execute(
                     "INSERT OR IGNORE INTO entities(entity_id, type, name, norm, qq, created_at) VALUES (?,?,?,?,?,?)",
                     (eid, str(e.get("type") or "thing"), str(e.get("name") or ""), str(e.get("norm") or ""),
@@ -715,16 +737,15 @@ class L2:
             for r in result.get("relations") or ():
                 cur.execute(
                     "INSERT INTO relations(summary_id, key, src_id, dst_id, relation) VALUES (?,?,?,?,?)",
-                    (sid, chunk["key"], str(r.get("src_id") or ""), str(r.get("dst_id") or ""),
+                    (sid, chunk["key"], scoped_entity(chunk["key"], str(r.get("src_id") or "")),
+                     scoped_entity(chunk["key"], str(r.get("dst_id") or "")),
                      str(r.get("relation") or "")),
                 )
             # SUGGEST_PATCH：候选与摘要在同一个事务里写（规格 §3.3）。`notes` 缺失（手工造摘要、
             # 老调用方）按空列表处理，并照样标 done——write_summary 本身就代表「这次提炼已完成」。
             _write_note_rows(cur, sid, str(chunk["key"]), result.get("notes") or (), "distill", now_ms)
             cur.execute("UPDATE chunks SET distilled='done', title=? WHERE chunk_id=?", (title, chunk_id))
-            cur.execute("DELETE FROM chunks_fts WHERE chunk_id=?", (chunk_id,))
-            blob = " ".join(tokenize(f"{title}\n{chunk['speaker_names']}\n{chunk['text']}"))
-            cur.execute("INSERT INTO chunks_fts(tokens, chunk_id) VALUES (?,?)", (blob, chunk_id))
+            write_terms(cur, "chunk", chunk["key"], chunk_id, f"{title}\n{chunk['speaker_names']}\n{chunk['text']}")
             cur.execute("DELETE FROM distill_state WHERE chunk_id=?", (chunk_id,))
             self.conn.commit()
         return sid

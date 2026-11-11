@@ -19,6 +19,8 @@ from typing import Iterable, Sequence
 
 import jieba
 
+from .archive import is_channel_key
+
 logger = logging.getLogger(__name__)
 
 jieba.setLogLevel(60)
@@ -47,6 +49,11 @@ CREATE TABLE IF NOT EXISTS chunks (
 CREATE INDEX IF NOT EXISTS idx_chunks_key_time ON chunks(key, t_start);
 CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(tokens, chunk_id UNINDEXED, tokenize='unicode61 remove_diacritics 0');
 CREATE VIRTUAL TABLE IF NOT EXISTS chunks_vocab USING fts5vocab(chunks_fts, 'row');
+CREATE TABLE IF NOT EXISTS channel_terms (
+    key TEXT NOT NULL, kind TEXT NOT NULL, id TEXT NOT NULL, tokens TEXT NOT NULL,
+    PRIMARY KEY (key, kind, id)
+);
+CREATE INDEX IF NOT EXISTS idx_channel_terms_id ON channel_terms(kind, id);
 """
 
 # 只在查询侧去掉的高频虚词：语料小的时候 idf 压不住它们
@@ -89,6 +96,19 @@ def add_words(words: Iterable[str]) -> None:
             jieba.add_word(w, freq=200000)
 
 
+def write_terms(cur: sqlite3.Cursor, kind: str, key: str, doc_id: str, text: str) -> None:
+    tokens = " ".join(tokenize(text))
+    if is_channel_key(key):
+        cur.execute("INSERT OR REPLACE INTO channel_terms(key, kind, id, tokens) VALUES (?,?,?,?)",
+                    (key, kind, doc_id, tokens))
+    elif kind == "chunk":
+        cur.execute("DELETE FROM chunks_fts WHERE chunk_id=?", (doc_id,))
+        cur.execute("INSERT INTO chunks_fts(tokens, chunk_id) VALUES (?,?)", (tokens, doc_id))
+    else:
+        cur.execute("DELETE FROM summaries_fts WHERE summary_id=?", (doc_id,))
+        cur.execute("INSERT INTO summaries_fts(tokens, summary_id) VALUES (?,?)", (tokens, doc_id))
+
+
 class ChunkDB:
     def __init__(self, path: Path):
         self.path = path
@@ -122,6 +142,13 @@ class ChunkDB:
         # 函数内 import：fts 与 l2 互相引用，模块级 import 会成环。
         from .l2 import ensure_schema
         ensure_schema(self.conn)
+        # Native BM25 uses the statistics of the whole FTS table, even with a key filter.
+        # The temporary, memory-only corpus is loaded for one exact channel at a time.
+        self.conn.execute("PRAGMA temp_store=MEMORY")
+        self.conn.executescript("""
+            CREATE VIRTUAL TABLE temp.scope_fts USING fts5(tokens, id UNINDEXED, tokenize='unicode61 remove_diacritics 0');
+            CREATE VIRTUAL TABLE temp.scope_vocab USING fts5vocab(temp, scope_fts, 'row');
+        """)
         # UPGRADE_PATCH：表都在了再按序迁移（备份已在上面做过，这里不再备份）
         if db_version < LATEST:
             self.migration = {**migrate(self.conn, path, has_data=False), "backup": bak}
@@ -149,21 +176,35 @@ class ChunkDB:
             row = self.conn.execute("SELECT value FROM meta WHERE key=?", (k,)).fetchone()
         return None if row is None else str(row["value"])
 
-    def set_meta(self, k: str, v: str) -> None:
+    def set_meta(self, k: str, v: str, *, durable: bool = False) -> None:
         self.check_writable()  # UPGRADE_PATCH
         with self.lock:
-            self.conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?,?)", (k, v))
-            self.conn.commit()
+            if durable:
+                self.conn.execute("PRAGMA synchronous=FULL")
+            try:
+                with self.conn:
+                    self.conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?,?)", (k, v))
+            finally:
+                if durable:
+                    self.conn.execute("PRAGMA synchronous=NORMAL")
+
+    def channel_keys(self, state_prefix: str) -> set[str]:
+        with self.lock:
+            rows = self.conn.execute("""
+                SELECT substr(key, ?) AS key FROM meta WHERE key GLOB ?
+                UNION SELECT key FROM chunks WHERE key GLOB 'c1_*'
+                UNION SELECT key FROM summaries WHERE key GLOB 'c1_*'
+            """, (len(state_prefix) + 1, state_prefix + "c1_*")).fetchall()
+        return {r["key"] for r in rows if is_channel_key(r["key"])}
 
     # ---------------------------------------------------------------- 写入
 
     def upsert(self, chunks: Sequence[dict], now_ms: int) -> None:
         """chunks: [{chunk_id, text, **meta}]；块表和 FTS 在同一个事务里写，块 ID 一致。"""
         self.check_writable()  # UPGRADE_PATCH
-        with self.lock:
+        with self.lock, self.conn:
             cur = self.conn.cursor()
             for c in chunks:
-                cur.execute("DELETE FROM chunks_fts WHERE chunk_id=?", (c["chunk_id"],))
                 cur.execute(
                     """INSERT OR REPLACE INTO chunks
                        (chunk_id, key, t_start, t_end, day, speakers, speaker_names, title, cut_reason,
@@ -173,9 +214,8 @@ class ChunkDB:
                      c["speaker_names"], c.get("title", ""), c["cut_reason"], c["file_start"], c["line_start"],
                      c["file_end"], c["line_end"], c["n_msgs"], c.get("distilled", "pending"), c["text"], now_ms),
                 )
-                blob = " ".join(tokenize(f"{c.get('title', '')}\n{c['speaker_names']}\n{c['text']}"))
-                cur.execute("INSERT INTO chunks_fts(tokens, chunk_id) VALUES (?,?)", (blob, c["chunk_id"]))
-            self.conn.commit()
+                write_terms(cur, "chunk", c["key"], c["chunk_id"],
+                            f"{c.get('title', '')}\n{c['speaker_names']}\n{c['text']}")
 
     def _purge(self) -> None:
         """RAG_PATCH（P2）：删完之后把 FTS 整理干净、把 WAL 截断。调用方已持有 self.lock。
@@ -209,6 +249,7 @@ class ChunkDB:
             cur = self.conn.cursor()
             cur.execute("DELETE FROM chunks")
             cur.execute("DELETE FROM chunks_fts")
+            cur.execute("DELETE FROM channel_terms WHERE kind='chunk'")
             if not keep_l2:
                 from .l2 import clear_rows
                 clear_rows(cur)
@@ -252,9 +293,11 @@ class ChunkDB:
         if not toks:
             return []
         match = " OR ".join(f'"{t}"' for t in toks)
-        sql = """SELECT c.chunk_id AS id, bm25(chunks_fts) AS s
-                 FROM chunks_fts JOIN chunks c ON c.chunk_id = chunks_fts.chunk_id
-                 WHERE chunks_fts MATCH ? AND c.key = ?"""
+        channel = is_channel_key(key)
+        table, id_col = ("scope_fts", "id") if channel else ("chunks_fts", "chunk_id")
+        sql = f"""SELECT c.chunk_id AS id, bm25({table}) AS s
+                 FROM {table} JOIN chunks c ON c.chunk_id = {table}.{id_col}
+                 WHERE {table} MATCH ? AND c.key = ?"""
         args: list = [match, key]
         if t_from is not None:
             sql += " AND c.t_end >= ?"
@@ -265,22 +308,40 @@ class ChunkDB:
         sql += " ORDER BY s LIMIT ?"
         args.append(int(limit))
         try:
-            with self.lock:  # FIX1031_PATCH：理由见 get_meta
-                rows = self.conn.execute(sql, args).fetchall()
+            rows = self.fts_query(sql, args, scope=(key, "chunk") if channel else None)
         except sqlite3.OperationalError:
             return []
         # SQLite 的 bm25() 越小越好（负数），翻成越大越好
         return [(r["id"], -float(r["s"])) for r in rows]
 
-    def doc_freq(self, tokens: Sequence[str]) -> tuple[int, dict[str, int]]:
+    def fts_query(self, sql: str, args: Sequence, scope: tuple[str, str] | None = None) -> list:
+        with self.lock:
+            if scope is None:
+                return self.conn.execute(sql, args).fetchall()
+            # Roll back the temporary INSERT even when SQL fails. The shared connection
+            # lock ensures no reader or writer can see another channel's temporary terms.
+            self.conn.execute("SAVEPOINT scope_fts_query")
+            try:
+                self.conn.execute("INSERT INTO scope_fts(tokens,id) SELECT tokens,id FROM channel_terms WHERE key=? AND kind=?", scope)
+                return self.conn.execute(sql, args).fetchall()
+            finally:
+                self.conn.execute("ROLLBACK TO scope_fts_query")
+                self.conn.execute("RELEASE scope_fts_query")
+
+    def doc_freq(self, tokens: Sequence[str], key: str | None = None) -> tuple[int, dict[str, int]]:
         # FIX1031_PATCH：两条语句要在同一把锁里取完，否则中间可能被重建的 clear() 插进来，
         # 拿到的总数和词频来自两个不同的时刻（理由见 get_meta）。
         with self.lock:
-            n = int(self.conn.execute("SELECT COUNT(*) AS n FROM chunks").fetchone()["n"])
+            channel = key is not None and is_channel_key(key)
+            n = int(self.conn.execute("SELECT COUNT(*) AS n FROM chunks WHERE key=?" if channel else
+                                      "SELECT COUNT(*) AS n FROM chunks WHERE key NOT GLOB 'c1_*'",
+                                      (key,) if channel else ()).fetchone()["n"])
             if not tokens:
                 return n, {}
             marks = ",".join("?" for _ in tokens)
-            rows = self.conn.execute(f"SELECT term, doc FROM chunks_vocab WHERE term IN ({marks})", list(tokens)).fetchall()
+            vocab = "scope_vocab" if channel else "chunks_vocab"
+            rows = self.fts_query(f"SELECT term, doc FROM {vocab} WHERE term IN ({marks})", list(tokens),
+                                  scope=(key, "chunk") if channel else None)
         return n, {r["term"]: int(r["doc"]) for r in rows}
 
     def stats(self) -> dict:
@@ -301,7 +362,7 @@ class ChunkDB:
         免得以后有人顺手把整行 dict 吐出去。keys 为 None = 全部会话；空列表 = 什么都不给。
         speakers / speaker_names 在库里是逗号拼接（segmenter.Chunk.meta），照 distill.py 的读法拆。
         """
-        where, args = "", []
+        where, args = " WHERE key NOT GLOB 'c1_*'", []
         if keys is not None:
             keys = [str(k) for k in keys]
             if not keys:

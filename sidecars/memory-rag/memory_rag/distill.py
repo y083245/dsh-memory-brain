@@ -21,12 +21,15 @@ import sys
 import time
 import unicodedata
 from datetime import date
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Callable
 
 import httpx
 
+from .archive import is_channel_key, is_channel_person_key
 from .embeddings import EmbeddingUnavailable
+from .indexer import ChannelIndexUnavailable
 from .l2 import ENTITY_TYPES, SELF, normalize_name, text_hash
 
 # APIHUB_PATCH：单独的提炼 API 配置（控制台「API 管理」写，600）。文件不存在 = 跟随人格判读。
@@ -160,7 +163,9 @@ def validate_notes(raw, chunk: dict, max_notes: int = NOTE_MAX) -> tuple[list[di
         who = str(item.get("who") or "").strip()
         cat = str(item.get("cat") or "").strip().lower()
         text = str(item.get("text") or "").strip()
-        if not (who.isascii() and who.isdigit()) or who not in speakers:
+        key = chunk.get("key", "")
+        valid_who = is_channel_person_key(key, who) if is_channel_key(key) else who.isascii() and who.isdigit()
+        if not valid_who or who not in speakers:
             dropped += 1
             continue
         if cat not in NOTE_CATS:
@@ -194,7 +199,7 @@ def _write_json_atomic(path: Path, data: dict) -> None:
 
 class Distiller:
     def __init__(self, cfg: dict, db, l2, vstore, embedder, http: httpx.Client | None = None,
-                 now: Callable[[], float] | None = None):
+                 now: Callable[[], float] | None = None, *, indexer=None, channel_proof=None):
         d = cfg.get("distill") or {}
         self.cfg = cfg
         self.paths = cfg["paths"]
@@ -202,6 +207,8 @@ class Distiller:
         self.l2 = l2
         self.vstore = vstore
         self.embedder = embedder
+        self.indexer = indexer
+        self.channel_proof = channel_proof
         self.enabled = bool(d.get("enabled", True))
         self.key_file = str(d.get("key_file") or "persona/config.json")
         self.model_override = d.get("model")
@@ -392,6 +399,31 @@ class Distiller:
     def retry_failed(self) -> int:
         return self.l2.retry_failed()
 
+    def _chunk_proof(self, chunk: dict):
+        key = chunk["key"]
+        if not is_channel_key(key):
+            return None
+        proof = self._channel_proof(key)
+        current = self.db.get([chunk["chunk_id"]]).get(chunk["chunk_id"])
+        if current is None or current["key"] != key or text_hash(current["text"]) != chunk["text_hash"]:
+            raise ChannelIndexUnavailable()
+        return proof
+
+    def _channel_proof(self, key: str):
+        if self.channel_proof is None or self.indexer is None:
+            raise ChannelIndexUnavailable()
+        return self.channel_proof(key)
+
+    def _commit(self, key: str, proof, action, *args):
+        if proof is None:
+            return action(*args)
+        with self.indexer.lock:
+            try:
+                self.channel_proof(key, proof)
+            except ChannelIndexUnavailable:
+                return None
+            return action(*args)
+
     def run_once(self, now_ms: int | None = None) -> dict:
         """跑一轮：对账 → 补摘要向量 → 挑块提炼 → 再补一次向量。返回的只有数字。"""
         now = int(now_ms if now_ms is not None else self.now())
@@ -402,9 +434,10 @@ class Distiller:
         if not self.enabled:
             return {"skipped": "disabled"}
 
-        stale = self.l2.reconcile()
-        if stale and self.vstore is not None:
-            self.vstore.delete_summaries(stale)
+        with self.indexer.lock if self.indexer is not None else nullcontext():
+            stale = self.l2.reconcile()
+            if stale and self.vstore is not None:
+                self.vstore.delete_summaries(stale)
         counts["reconciled"] = len(stale)
 
         counts["vectors"] += self._fill_vectors()
@@ -418,15 +451,21 @@ class Distiller:
         for chunk in self.l2.pending_chunks(now, self.per_round):
             if self._day()["calls"] >= self.daily_limit:
                 break
+            try:
+                proof = self._chunk_proof(chunk)
+            except ChannelIndexUnavailable:
+                counts["dropped"] += 1
+                continue
+            scope, cid = chunk["key"], chunk["chunk_id"]
             body = self._body_chars(chunk["text"])
             if body < self.min_chars or int(chunk["n_msgs"]) < 2:
-                self.l2.mark_skipped(chunk["chunk_id"])
+                self._commit(scope, proof, self.l2.mark_skipped, cid)
                 counts["skipped"] += 1
                 continue
             parsed, err = self._call(chunk, key, base_url, model)
             counts["calls"] += 1
             if err:
-                self.l2.mark_failed(chunk["chunk_id"], err, now)
+                self._commit(scope, proof, self.l2.mark_failed, cid, err, now)
                 counts["failed"] += 1
                 self.last_error = err
                 continue
@@ -434,7 +473,7 @@ class Distiller:
             counts["entities_dropped"] += fields["entities_dropped"]
             counts["relations_dropped"] += fields["relations_dropped"]
             if fields["title"] is None or fields["summary"] is None:
-                self.l2.mark_failed(chunk["chunk_id"], "invalid fields", now)
+                self._commit(scope, proof, self.l2.mark_failed, cid, "invalid fields", now)
                 counts["failed"] += 1
                 self.last_error = "invalid fields"
                 continue
@@ -443,7 +482,7 @@ class Distiller:
             counts["notes_dropped"] += notes_dropped
             result = self._resolve(fields, chunk)
             result["notes"] = notes
-            sid = self.l2.write_summary(chunk["chunk_id"], chunk["text_hash"], result, model, now)
+            sid = self._commit(scope, proof, self.l2.write_summary, cid, chunk["text_hash"], result, model, now)
             if sid is None:
                 # 调模型期间块被遗忘或改写了：丢弃这次结果，不算失败（规格 §4.1）
                 counts["dropped"] += 1
@@ -489,21 +528,26 @@ class Distiller:
         for it in self.l2.queued_notes(limit):
             if self._day()["calls"] >= self.daily_limit:
                 break
+            try:
+                proof = self._chunk_proof(it)
+            except ChannelIndexUnavailable:
+                continue
+            scope, sid = it["key"], it["summary_id"]
             if not it["text"] or text_hash(it["text"]) != it["text_hash"]:
-                self.l2.mark_notes_failed(it["summary_id"], now_ms)
+                self._commit(scope, proof, self.l2.mark_notes_failed, sid, now_ms)
                 counts["failed"] += 1
                 continue
-            chunk = {"text": it["text"], "speakers": it["speakers"], "speaker_names": it["speaker_names"]}
+            chunk = {"key": scope, "text": it["text"], "speakers": it["speakers"], "speaker_names": it["speaker_names"]}
             parsed, err = self._call(chunk, key, base_url, model)
             counts["calls"] += 1
             self._bump_usage(backfill_calls=1)
             if err:
-                self.l2.mark_notes_failed(it["summary_id"], now_ms)
+                self._commit(scope, proof, self.l2.mark_notes_failed, sid, now_ms)
                 counts["failed"] += 1
                 self.last_error = err
                 continue
             notes, dropped = validate_notes(parsed.get("notes"), chunk)
-            written = self.l2.write_notes(it["summary_id"], notes, "backfill", now_ms)
+            written = self._commit(scope, proof, self.l2.write_notes, sid, notes, "backfill", now_ms) or 0
             counts["notes"] += written
             counts["dropped"] += dropped
             self._bump_usage(notes=written, notes_dropped=dropped)
@@ -514,19 +558,38 @@ class Distiller:
     def _fill_vectors(self) -> int:
         if self.embedder is None or self.vstore is None:
             return 0
-        items = self.l2.need_vectors(self.per_round)
+        items = []
+        for it in self.l2.need_vectors(self.per_round):
+            key, sid = it["key"], it["summary_id"]
+            proof = None
+            if is_channel_key(key):
+                try:
+                    proof = self._channel_proof(key)
+                except ChannelIndexUnavailable:
+                    continue
+                current = self.l2.get_summaries(key, [sid]).get(sid)
+                if current is None or any(current[k] != it[k] for k in ("title", "summary")):
+                    continue
+            items.append((it, proof))
         if not items:
             return 0
         try:
-            vecs = self.embedder.embed_docs([f"{it['title']}：{it['summary']}" for it in items])
+            vecs = self.embedder.embed_docs([f"{it['title']}：{it['summary']}" for it, _ in items])
         except EmbeddingUnavailable:
             return 0  # 不算错：摘要已经写进 SQLite，下一轮再补
         except Exception as e:  # 假 embedding / 意外错误都不该拖垮提炼
             print(f"[distill] 补向量失败：{type(e).__name__}", file=sys.stderr)
             return 0
-        ids = [it["summary_id"] for it in items]
-        self.vstore.upsert_summaries(ids, vecs, [{"key": it["key"], "t_start": it["t_start"],
-                                                  "t_end": it["t_end"]} for it in items])
+        legacy = [(it, vec) for (it, proof), vec in zip(items, vecs) if proof is None]
+        count = self._store_vectors(legacy)
+        for (it, proof), vec in zip(items, vecs):
+            if proof is not None:
+                count += self._commit(it["key"], proof, self._store_vectors, [(it, vec)]) or 0
+        return count
+
+    def _store_vectors(self, items) -> int:
+        ids = [it["summary_id"] for it, _ in items]
+        self.vstore.upsert_summaries(ids, [vec for _, vec in items], [it for it, _ in items])
         self.l2.mark_vec_done(ids)
         return len(ids)
 
@@ -553,9 +616,12 @@ class Distiller:
 
     def _call(self, chunk: dict, key: str, base_url: str, model: str) -> tuple[dict | None, str | None]:
         """返回 (解析后的 JSON, 错误类别)。错误类别只写类别与 HTTP 状态，绝不写正文。"""
+        prompt = SYSTEM_PROMPT
+        if is_channel_key(chunk.get("key", "")):
+            prompt = prompt.replace("QQ号", "发言人编号").replace("QQ 号", "发言人编号")
         body = {
             "model": model,
-            "messages": [{"role": "system", "content": SYSTEM_PROMPT},
+            "messages": [{"role": "system", "content": prompt},
                          {"role": "user", "content": self._user_content(chunk)}],
             "response_format": {"type": "json_object"},
             "temperature": 0.3,
@@ -678,9 +744,10 @@ class Distiller:
             if name == "我" or name in self.self_names:
                 ent = {"entity_id": SELF, "type": "person", "name": "我", "norm": normalize_name("我"), "qq": None}
             elif name in by_name and by_name[name]:
-                qq = by_name[name]
-                ent = {"entity_id": f"qq:{qq}", "type": "person", "name": name,
-                       "norm": normalize_name(name), "qq": qq}
+                uid = by_name[name]
+                channel = is_channel_key(chunk.get("key", ""))
+                ent = {"entity_id": f"person:{uid}" if channel else f"qq:{uid}", "type": "person", "name": name,
+                       "norm": normalize_name(name), "qq": None if channel else uid}
             else:
                 norm = normalize_name(name)
                 if not norm:

@@ -9,7 +9,12 @@
 // 一律不往外带（避免绝对路径触发出站审计，见 CLAUDE.md 坑 6）。
 // DECAY_PATCH：`refs` 只给桥接内部用（检索命中映射回存档行），桥接不得把它发给 AI；
 // 它被定义成不可枚举属性，所以 `JSON.stringify(search())` 也不会把它带出去。
+import { channelArchiveDirectory } from './core/channel-archive.mjs';
+import { decodeIdentityKey, sameAccount } from './core/identity.mjs';
+
 const KEY_RE = /^(group|private):\d+$/;
+const CHANNEL_MONTH_RE = /^(?:\d{4}|\+\d{6})-(?:0[1-9]|1[0-2])\.jsonl$/;
+const RECORD_ID_RE = /^record_[a-f0-9]{64}$/;
 const DEFAULT_URL = 'http://127.0.0.1:8093';
 const DEFAULT_TIMEOUT_MS = 3000;
 const MAX_QUERY_CHARS = 500;
@@ -29,6 +34,87 @@ const MAX_ASSOCIATE_EXCLUDE = 200;
 
 // Node 的 URL.hostname 对 IPv6 会保留方括号，两种写法都认。
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
+
+const isChannelKey = (key) => typeof key === 'string' && key.startsWith('c1_');
+
+function scopedKey(raw) {
+  if (typeof raw !== 'string') return null;
+  const legacy = raw.trim();
+  if (KEY_RE.test(legacy)) return legacy;
+  if (!isChannelKey(raw)) return null;
+  try { return decodeIdentityKey(raw).platform === 'qq' ? null : raw; }
+  catch { return null; }
+}
+
+function channelPersonInScope(key, conversation) {
+  if (!key.startsWith('p1_')) return false;
+  try { return sameAccount(decodeIdentityKey(key), conversation); }
+  catch { return false; }
+}
+
+function channelEvidence(item, ref, directory) {
+  const inDirectory = (relative) => relative.startsWith(`${directory}/`) && CHANNEL_MONTH_RE.test(relative.slice(directory.length + 1));
+  if (!ref || !inDirectory(ref.file) || !inDirectory(ref.fileEnd) ||
+      typeof item.file_end !== 'string' || !item.file_end ||
+      !Number.isSafeInteger(item.line_start) || !Number.isSafeInteger(item.line_end)) return null;
+  const { file, fileEnd, lineStart, lineEnd } = ref;
+  // Expanded years sort after the four-digit years, matching both archive readers.
+  const reversedMonths = file.length > fileEnd.length || (file.length === fileEnd.length && file > fileEnd);
+  const sameFile = file === fileEnd;
+  if (reversedMonths || (sameFile && lineStart > lineEnd)) return null;
+  const { byte_start, byte_end, record_id_start, record_id_end } = item;
+  if (byte_start !== undefined && (!Number.isSafeInteger(byte_start) || byte_start < 0)) return null;
+  if (byte_end !== undefined && (!Number.isSafeInteger(byte_end) || byte_end <= 0)) return null;
+  if (sameFile && byte_start !== undefined && byte_end !== undefined && byte_start >= byte_end) return null;
+  const validRecordId = (id) => typeof id === 'string' && RECORD_ID_RE.test(id);
+  if (record_id_start !== undefined && !validRecordId(record_id_start)) return null;
+  if (record_id_end !== undefined && !validRecordId(record_id_end)) return null;
+  if (byte_start !== undefined) ref.byteStart = byte_start;
+  if (byte_end !== undefined) ref.byteEnd = byte_end;
+  if (record_id_start !== undefined) ref.recordIdStart = record_id_start;
+  if (record_id_end !== undefined) ref.recordIdEnd = record_id_end;
+  return ref;
+}
+
+function graphFields(row, names) {
+  const picked = {};
+  for (const name of names.split(' ')) {
+    const value = row[name];
+    if (value === null || typeof value === 'string' || Number.isFinite(value)) picked[name] = value;
+    else if (Array.isArray(value) && (name === 'speakers' || name === 'speaker_names')) {
+      picked[name] = value.filter((v) => typeof v === 'string');
+    }
+  }
+  return picked;
+}
+
+function channelGraphView(graph) {
+  const summaryKeys = new Map(graph.summaries.map(({ summary_id, key }) => [summary_id, key]));
+  const summaryEntities = graph.summary_entities.filter((link) =>
+    typeof link.summary_id === 'string' && summaryKeys.get(link.summary_id) === link.key && typeof link.entity_id === 'string');
+  const linkedSummaries = new Map();
+  for (const { entity_id, summary_id } of summaryEntities) {
+    if (!linkedSummaries.has(entity_id)) linkedSummaries.set(entity_id, new Set());
+    linkedSummaries.get(entity_id).add(summary_id);
+  }
+  const entities = graph.entities.filter((entity) => linkedSummaries.has(entity.entity_id));
+  const entityIds = new Set(entities.map((entity) => entity.entity_id));
+  const relations = graph.relations.filter((link) => typeof link.summary_id === 'string' &&
+    summaryKeys.get(link.summary_id) === link.key && entityIds.has(link.src_id) && entityIds.has(link.dst_id));
+  return {
+    ok: true,
+    chunks: graph.chunks.map((c) => graphFields(c, 'chunk_id key day t_start t_end title n_msgs speakers speaker_names')),
+    summaries: graph.summaries.map((s) => graphFields(s, 'summary_id chunk_id key day t_start t_end title summary importance valence')),
+    entities: entities.map((e) => ({ ...graphFields(e, 'entity_id type name qq'), n: linkedSummaries.get(e.entity_id).size })),
+    summary_entities: summaryEntities.filter((link) => entityIds.has(link.entity_id))
+      .map((link) => graphFields(link, 'summary_id entity_id key')),
+    relations: relations.map((link) => graphFields(link, 'summary_id key src_id dst_id relation')),
+    notes: graph.notes.map((n) => graphFields(n, 'note_id summary_id key who who_name cat text due created_at')),
+    truncated: Object.fromEntries(['chunks', 'summaries', 'entities', 'notes']
+      .filter((key) => Number.isSafeInteger(graph.truncated[key]) && graph.truncated[key] >= 0)
+      .map((key) => [key, graph.truncated[key]]))
+  };
+}
 
 function clampInt(value, min, max, fallback) {
   const n = Number(value);
@@ -197,6 +283,13 @@ export function createMemoryRagClient({ url = DEFAULT_URL, timeoutMs = DEFAULT_T
   const recallTimeout = clampInt(recallTimeoutMs, 100, 5000, RECALL_DEFAULT_TIMEOUT_MS);
   // 503（向量库口径不一致）每 10 分钟只提示一次，免得每次检索都刷日志。
   let lastMismatchLogAt = 0;
+  let lastChannelWarningAt = 0;
+
+  function warnChannelUnavailable() {
+    if (Date.now() - lastChannelWarningAt <= 10 * 60 * 1000) return;
+    lastChannelWarningAt = Date.now();
+    log('[rag] 渠道记忆索引或协议不可用，检索可降级为本地关键词');
+  }
 
   async function request(pathname, init, timeoutMs = timeout) {
     try {
@@ -221,14 +314,41 @@ export function createMemoryRagClient({ url = DEFAULT_URL, timeoutMs = DEFAULT_T
     return { ok: response.ok, status: response.status, data };
   }
 
+  async function requestScoped(pathname, payload, timeoutMs = timeout) {
+    const channel = isChannelKey(payload.key) || payload.keys?.some(isChannelKey);
+    if (channel) {
+      const startedAt = performance.now();
+      const health = await callJson('/health?protocol=channel', { method: 'GET', redirect: 'error' }, timeoutMs);
+      const protocol = health?.data?.archive_protocol;
+      if (!health?.ok || health.data?.ok !== true || protocol?.identity !== 1 || protocol.archive !== 1 || protocol.index !== 1) {
+        warnChannelUnavailable();
+        return null;
+      }
+      if (!enabled()) return null;
+      timeoutMs -= Math.floor(performance.now() - startedAt);
+      if (timeoutMs <= 0) {
+        warnChannelUnavailable();
+        return null;
+      }
+    }
+    const response = await request(pathname, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+      ...(channel ? { redirect: 'error' } : {})
+    }, timeoutMs);
+    if (channel && !response?.ok && response?.status !== 404) warnChannelUnavailable();
+    return response;
+  }
+
   /**
    * POST /search。任何失败（网络、超时、4xx/5xx、坏 JSON、结构不对、key 不一致）都返回 null。
    * 返回结构只保留 { semantic, hint?, items: [{ day, title, sources, text }] }。
    */
   async function search(params = {}) {
     if (!enabled()) return null;
-    const key = String(params.key ?? '').trim();
-    if (!KEY_RE.test(key)) {
+    const key = scopedKey(params.key);
+    if (!key) {
       log(`[rag] 拒绝检索：会话 key 不合法`);
       return null;
     }
@@ -251,14 +371,11 @@ export function createMemoryRagClient({ url = DEFAULT_URL, timeoutMs = DEFAULT_T
     const wantDebug = params.debug === true;
     if (wantDebug) payload.debug = true;
 
-    const response = await request('/search', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
+    const channel = isChannelKey(key);
+    const response = await requestScoped('/search', payload);
     if (!response) return null;
     if (!response.ok) {
-      if (response.status === 503 && Date.now() - lastMismatchLogAt > 10 * 60 * 1000) {
+      if (!channel && response.status === 503 && Date.now() - lastMismatchLogAt > 10 * 60 * 1000) {
         lastMismatchLogAt = Date.now();
         log('[rag] memory-rag 报 503：向量库口径与配置不一致，需要运行 cli rebuild（检索暂时降级为关键词）');
       }
@@ -274,13 +391,17 @@ export function createMemoryRagClient({ url = DEFAULT_URL, timeoutMs = DEFAULT_T
     if (!data || typeof data !== 'object' || !Array.isArray(data.items)) return null;
 
     // 纵深防御：服务端必须回同一个会话。跑偏了就整份丢掉，绝不把别会话的原文交给 AI。
-    if (String(data.key ?? '') !== key) {
+    if ((channel ? data.key : String(data.key ?? '')) !== key) {
       log(`[rag] 拒绝返回：响应 key 与请求不一致`);
       return null;
     }
 
-    const picked = data.items
-      .filter((it) => it && typeof it === 'object' && typeof it.text === 'string' && it.text);
+    const validTextItem = (item) => item && typeof item === 'object' && typeof item.text === 'string' && item.text;
+    if (channel && (data.ok === false || (data.semantic !== 'ok' && data.semantic !== 'unavailable') ||
+      data.items.some((item) => !validTextItem(item) || Array.isArray(item) ||
+        (item.key !== undefined && item.key !== key) || typeof item.day !== 'string' || typeof item.title !== 'string' ||
+        !Array.isArray(item.sources) || item.sources.some((source) => typeof source !== 'string')))) return null;
+    const picked = channel ? data.items : data.items.filter(validTextItem);
     const items = picked.map((it) => ({
       day: typeof it.day === 'string' ? it.day : '',
       title: typeof it.title === 'string' ? it.title : '',
@@ -288,7 +409,8 @@ export function createMemoryRagClient({ url = DEFAULT_URL, timeoutMs = DEFAULT_T
       text: it.text
     }));
     // DECAY_PATCH：refs 与 items 平行（同长度、同顺序），供桥接把命中映射回存档行。
-    // 单条不合法（没有文件名 / 行号不是正整数）时这一项为 null，不影响其它条目。
+    // 旧 QQ 结果可缺引用，渠道结果必须有范围内的存档引用。
+    const directory = channel ? channelArchiveDirectory(key) : '';
     const refs = picked.map((it) => {
       const file = typeof it.file === 'string' && it.file ? it.file : '';
       const fileEnd = typeof it.file_end === 'string' && it.file_end ? it.file_end : file;
@@ -296,8 +418,10 @@ export function createMemoryRagClient({ url = DEFAULT_URL, timeoutMs = DEFAULT_T
       const lineEnd = Number(it.line_end);
       if (!file || !fileEnd) return null;
       if (!Number.isInteger(lineStart) || lineStart < 1 || !Number.isInteger(lineEnd) || lineEnd < 1) return null;
-      return { file, lineStart, fileEnd, lineEnd };
+      const ref = { file, lineStart, fileEnd, lineEnd };
+      return channel ? channelEvidence(it, ref, directory) : ref;
     });
+    if (channel && refs.some((ref) => !ref)) return null;
     const semantic = typeof data.semantic === 'string' && data.semantic ? data.semantic : 'ok';
     const hint = typeof data.hint === 'string' && data.hint.trim() ? data.hint.trim() : undefined;
     const result = { semantic, ...(hint ? { hint } : {}), items };
@@ -484,19 +608,18 @@ export function createMemoryRagClient({ url = DEFAULT_URL, timeoutMs = DEFAULT_T
 
   /** 失败一律 null；成功时校验 key 一致性，再按 parseData 取字段（不合法就 null）。 */
   async function postJson(pathname, payload, timeoutMs, parseData) {
-    const response = await request(pathname, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(payload)
-    }, timeoutMs);
+    const response = await requestScoped(pathname, payload, timeoutMs);
     if (!response || !response.ok) return null;
     let data;
     try { data = await response.json(); } catch { return null; }
     if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
-    if (String(data.key ?? '') !== payload.key) {
+    const channel = isChannelKey(payload.key);
+    if ((channel ? data.key : String(data.key ?? '')) !== payload.key) {
       log(`[rag] 拒绝返回：${pathname} 响应 key 与请求不一致`);
       return null;
     }
+    const rows = data.items ?? data.candidates;
+    if (channel && Array.isArray(rows) && rows.some((row) => row?.key !== undefined && row.key !== payload.key)) return null;
     return parseData(data);
   }
 
@@ -506,8 +629,8 @@ export function createMemoryRagClient({ url = DEFAULT_URL, timeoutMs = DEFAULT_T
    */
   async function recall(params = {}) {
     if (!enabled()) return null;
-    const key = String(params.key ?? '').trim();
-    if (!KEY_RE.test(key)) {
+    const key = scopedKey(params.key);
+    if (!key) {
       log('[rag] 拒绝自动想起：会话 key 不合法');
       return null;
     }
@@ -531,12 +654,12 @@ export function createMemoryRagClient({ url = DEFAULT_URL, timeoutMs = DEFAULT_T
 
   /**
    * POST /associate：联想链。除 key 外都可省（C2）；minAgeDays 打包成 snake_case 的 min_age_days。
-   * people 只留纯数字 QQ 号（至多 5 个），exclude 至多 200 个。
+   * people 只留纯数字 QQ 号或同账户规范人物键（至多 5 个），exclude 至多 200 个。
    */
   async function associate(params = {}) {
     if (!enabled()) return null;
-    const key = String(params.key ?? '').trim();
-    if (!KEY_RE.test(key)) {
+    const key = scopedKey(params.key);
+    if (!key) {
       log('[rag] 拒绝联想：会话 key 不合法');
       return null;
     }
@@ -545,9 +668,10 @@ export function createMemoryRagClient({ url = DEFAULT_URL, timeoutMs = DEFAULT_T
     if (text) payload.text = text;
     const t = Number(params.t);
     if (Number.isFinite(t) && t > 0) payload.t = Math.round(t);
+    const conversation = isChannelKey(key) ? decodeIdentityKey(key) : null;
     const people = (Array.isArray(params.people) ? params.people : [])
-      .map((p) => String(p ?? '').trim())
-      .filter((p) => /^\d+$/.test(p))
+      .map((p) => conversation ? (typeof p === 'string' ? p : '') : String(p ?? '').trim())
+      .filter((p) => conversation ? channelPersonInScope(p, conversation) : /^\d+$/.test(p))
       .slice(0, MAX_ASSOCIATE_PEOPLE);
     if (people.length) payload.people = people;
     const exclude = (Array.isArray(params.exclude) ? params.exclude : [])
@@ -566,8 +690,8 @@ export function createMemoryRagClient({ url = DEFAULT_URL, timeoutMs = DEFAULT_T
   /** POST /summaries：控制台按编号取摘要文字（ids 至多 100，没有 id 就不发请求）。 */
   async function summaries(params = {}) {
     if (!enabled()) return null;
-    const key = String(params.key ?? '').trim();
-    if (!KEY_RE.test(key)) {
+    const key = scopedKey(params.key);
+    if (!key) {
       log('[rag] 拒绝查摘要：会话 key 不合法');
       return null;
     }
@@ -589,8 +713,8 @@ export function createMemoryRagClient({ url = DEFAULT_URL, timeoutMs = DEFAULT_T
    */
   async function notes(params = {}, { timeoutMs } = {}) {
     if (!enabled()) return null;
-    const key = String(params.key ?? '').trim();
-    if (!KEY_RE.test(key)) {
+    const key = scopedKey(params.key);
+    if (!key) {
       log('[rag] 拒绝查账本候选：会话 key 不合法');
       return null;
     }
@@ -618,64 +742,63 @@ export function createMemoryRagClient({ url = DEFAULT_URL, timeoutMs = DEFAULT_T
   const GRAPH_TIMEOUT_MS = 5000;
   const KEY_LIST_MAX = 200;
 
-  /** POST /graph：快照用的块 / 摘要 / 实体 / 关系 / 候选（不含块原文）。keys 为空 = 全部会话。 */
+  /** POST /graph：快照用的块 / 摘要 / 实体 / 关系 / 候选（不含块原文）。keys 为空 = 旧 QQ 会话。 */
   async function graph({ keys = null, limit = 2000 } = {}) {
     if (!enabled()) return null;
+    if (keys !== null && !Array.isArray(keys)) return null;
     let list = null;
-    if (Array.isArray(keys) && keys.length) {
+    if (keys?.length) {
       list = [];
       for (const raw of keys.slice(0, KEY_LIST_MAX)) {
-        const k = String(raw ?? '').trim();
-        if (!KEY_RE.test(k)) { log('[rag] 拒绝脑图查询：会话 key 不合法'); return null; }
+        const k = scopedKey(raw);
+        if (!k) { log('[rag] 拒绝脑图查询：会话 key 不合法'); return null; }
         if (!list.includes(k)) list.push(k);
       }
     }
-    const response = await request('/graph', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ keys: list, limit: clampInt(limit, 1, 2000, 2000) })
-    }, GRAPH_TIMEOUT_MS);
+    const channel = list?.some(isChannelKey);
+    const response = await requestScoped('/graph', { keys: list, limit: clampInt(limit, 1, 2000, 2000) }, GRAPH_TIMEOUT_MS);
     if (!response || !response.ok) return null;
     let data;
     try { data = await response.json(); } catch { return null; }
     if (!data || typeof data !== 'object' || Array.isArray(data) || data.ok === false) return null;
     const arr = (v) => (Array.isArray(v) ? v.filter((x) => x && typeof x === 'object' && !Array.isArray(x)) : []);
-    const inScope = (row) => !list || list.includes(String(row.key ?? ''));
+    const inScope = (row) => list ? list.includes(row.key) : KEY_RE.test(row.key);
+    if (!list && ['chunks', 'summaries', 'summary_entities', 'relations', 'notes'].some((field) =>
+      arr(data[field]).some((row) => !inScope(row)))) return null;
+    if (channel && data.key !== undefined && (list.length !== 1 || data.key !== list[0])) return null;
     // 纵深防御：指定了会话时，带 key 的行必须落在请求的会话里（实体没有 key）。
     const chunks = arr(data.chunks).filter(inScope).map((c) => {
       const { text, ...rest } = c; // 约定里本来就不含原文；万一带了也不往外带
       return rest;
     });
-    return {
+    const result = {
       ok: true,
       chunks,
       summaries: arr(data.summaries).filter(inScope),
-      entities: arr(data.entities),
+      entities: arr(data.entities).filter((row) => row.key === undefined || inScope(row)),
       summary_entities: arr(data.summary_entities).filter(inScope),
       relations: arr(data.relations).filter(inScope),
       notes: arr(data.notes).filter(inScope),
       truncated: data.truncated && typeof data.truncated === 'object' && !Array.isArray(data.truncated) ? data.truncated : {}
     };
+    return channel ? channelGraphView(result) : result;
   }
 
   /** POST /chunk：话题块原文（点开才取）。404 → { ok:false, status:404 }；其它失败 null。 */
   async function chunk({ key, chunkId } = {}) {
     if (!enabled()) return null;
-    const k = String(key ?? '').trim();
+    const k = scopedKey(key);
     const id = String(chunkId ?? '').trim();
-    if (!KEY_RE.test(k) || !id || id.length > 200) return null;
-    const response = await request('/chunk', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ key: k, chunk_id: id })
-    });
+    if (!k || !id || id.length > 200) return null;
+    const response = await requestScoped('/chunk', { key: k, chunk_id: id });
     if (!response) return null;
     if (response.status === 404) return { ok: false, status: 404 };
     if (!response.ok) return null;
     let data;
     try { data = await response.json(); } catch { return null; }
     if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
-    if (String(data.key ?? '') !== k || String(data.chunk_id ?? '') !== id) {
+    const channel = isChannelKey(k);
+    if ((channel ? data.key : String(data.key ?? '')) !== k || (channel ? data.chunk_id : String(data.chunk_id ?? '')) !== id) {
       log('[rag] 拒绝返回：/chunk 响应 key 与请求不一致');
       return null;
     }

@@ -7,14 +7,15 @@ import os
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
-from .archive import key_dir, valid_key
+from .archive import is_channel_key, key_dir, valid_key
 from .config import load_config
 from .distill import Distiller
 from .embeddings import Embedder, embedding_settings_path, make_embedder_from_state
 from .fts import ChunkDB
-from .indexer import IndexBusy, Indexer
+from .indexer import ARCHIVE_PROTOCOL, ChannelIndexUnavailable, IndexBusy, Indexer
 from .l2 import L2
 from .migrations import BACKUP_MAX_AGE_S, SchemaTooNew, backup_files, readonly_message, remove_backups
 from .search import Searcher
@@ -78,7 +79,8 @@ class Service:
 
     def _bind_l2(self) -> None:
         self.l2 = L2(self.db)
-        self.distiller = Distiller(self.cfg, self.db, self.l2, self.vstore, self.embedder)
+        self.distiller = Distiller(self.cfg, self.db, self.l2, self.vstore, self.embedder, indexer=self.indexer,
+                                   channel_proof=self.channel_proof)
 
     def _reconcile_vectors(self) -> None:
         """摘要集合被删过 / 换过口径 / 数量少于「已标 done」的摘要 → 全部标成待补，重算向量。
@@ -164,20 +166,44 @@ class Service:
             out.append((p, key, at))
         return out
 
-    def process_forget_requests(self, only_key: str | None = None, blocking: bool = True) -> list[str]:
+    def check_channel_forget(self, key: str) -> None:
+        if is_channel_key(key):
+            try:
+                if (self.cfg["paths"].forget_requests / f"{key_dir(key)}.json").exists():
+                    raise ChannelIndexUnavailable()
+            except OSError as e:
+                raise ChannelIndexUnavailable() from e
+
+    def channel_proof(self, key: str, previous=None):
+        self.check_channel_forget(key)
+        if self.indexer is None:
+            raise ChannelIndexUnavailable()
+        proof = self.indexer.channel_proof(key, previous)
+        self.check_channel_forget(key)
+        return proof
+
+    @contextmanager
+    def channel_reads(self, keys):
+        proofs = {key: self.channel_proof(key) for key in keys or () if is_channel_key(key)}
+        yield
+        for key, proof in proofs.items():
+            self.channel_proof(key, proof)
+
+    def process_forget_requests(self, only_key: str | None = None, blocking: bool = True,
+                                legacy_only: bool = False) -> list[str]:
         """消费遗忘请求，返回处理过的 key。处理期间文件里的 at 变了（桥接又写了新请求）就留着。"""
         if self.indexer is None:
             raise RuntimeError("向量库口径不一致")
+        requests = [(p, k, at) for p, k, at in self.forget_requests()
+                    if (only_key is None or k == only_key) and (not legacy_only or not is_channel_key(k))]
         if self.readonly:
             # UPGRADE_PATCH：只读时消费不了遗忘请求。查的正是有待删请求的会话 → 当作「索引正忙」，
             # 读接口回 503、桥接降级；宁可查不到，也不能返回已经删掉的内容。别的会话照常读。
-            if any(only_key is None or key == only_key for _, key, _ in self.forget_requests()):
+            if requests:
                 raise IndexBusy("只读模式：有待处理的遗忘请求")
             return []
         done: list[str] = []
-        for path, key, at in self.forget_requests():
-            if only_key is not None and key != only_key:
-                continue
+        for path, key, at in requests:
             try:
                 self.indexer.forget_key(key, timeout=120.0 if blocking else 0)
             except IndexBusy:
@@ -236,6 +262,10 @@ class Service:
         finally:
             job["finished_at"] = int(time.time() * 1000)
 
+    def channel_health(self) -> dict:
+        return {"ok": self.indexer is not None and not self.readonly and self.embedder.healthy(),
+                **({"archive_protocol": dict(ARCHIVE_PROTOCOL)} if not self.readonly else {})}
+
     def health(self) -> dict:
         emb = self.embedder
         emb_info = {"url": getattr(emb, "base_url", None),
@@ -248,9 +278,11 @@ class Service:
         err = getattr(emb, "error", None)
         if err:
             emb_info["error"] = str(err)
-        out = {"ok": self.mismatch is None and emb.healthy(),
+        out = {"ok": self.mismatch is None and emb_info["healthy"],
                "embedding": emb_info,
                "mismatch": self.mismatch}
+        if not self.readonly:
+            out["archive_protocol"] = dict(ARCHIVE_PROTOCOL)
         if self.indexer:
             # APIHUB_PATCH：chars 是全部块文本字数之和，给重建估算用
             out["store"] = {**self.db.stats(), "vectors": self.vstore.count(),

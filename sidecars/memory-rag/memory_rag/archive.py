@@ -11,14 +11,27 @@ import json
 import re
 from collections import Counter
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
+
+from .channel_archive import (
+    ChannelArchiveChanged,
+    ChannelArchiveError,
+    channel_directory,
+    channel_keys,
+    channel_snapshot,
+    published_files,
+    records,
+)
+from .channel_identity import is_channel_key, is_channel_person_key
 
 KEY_RE = re.compile(r"^(group|private):(\d+)$")
 FILE_RE = re.compile(r"^\d{4}-\d{2}\.jsonl$")
 
 
 def key_dir(key: str) -> str:
+    if is_channel_key(key):
+        return channel_directory(key)
     m = KEY_RE.match(str(key or ""))
     if not m:
         raise ValueError(f"会话 key 不合法：{key}")
@@ -26,13 +39,13 @@ def key_dir(key: str) -> str:
 
 
 def valid_key(key: str) -> bool:
-    return bool(KEY_RE.match(str(key or "")))
+    return bool(KEY_RE.match(str(key or ""))) or is_channel_key(key)
 
 
 @dataclass
 class Row:
     key: str
-    file: str        # 相对 archive/ 的路径，如 private_100000001/2026-10.jsonl
+    file: str        # 相对所在存档根目录的路径，如 private_100000001/2026-10.jsonl
     line: int        # 1 起
     offset: int      # 本行在文件里的起始字节
     end: int         # 本行结束（含换行）的字节，增量读取的水位推到这里
@@ -41,6 +54,10 @@ class Row:
     user_id: str | None
     name: str
     text: str
+    record_id: str | None = None
+    person_key: str | None = None
+    message_key: str | None = None
+    reply_to_message_key: str | None = None
 
     @property
     def is_self(self) -> bool:
@@ -51,26 +68,87 @@ def parse_ts(s: str) -> float:
     return datetime.fromisoformat(str(s).replace("Z", "+00:00")).timestamp() * 1000.0
 
 
-def list_keys(archive: Path) -> list[str]:
+def _legacy_keys(archive: Path) -> list[str]:
     out = []
-    if not archive.is_dir():
-        return out
-    for d in sorted(archive.iterdir()):
-        k = d.name.replace("_", ":", 1)
-        if d.is_dir() and valid_key(k):
-            out.append(k)
+    if archive.is_dir():
+        for d in sorted(archive.iterdir()):
+            k = d.name.replace("_", ":", 1)
+            if d.is_dir() and KEY_RE.match(k):
+                out.append(k)
     return out
 
 
+def list_keys(archive: Path) -> list[str]:
+    return _legacy_keys(archive) + channel_keys(archive)
+
+
 def key_files(archive: Path, key: str) -> list[str]:
+    if is_channel_key(key):
+        return [file.rel for file in published_files(archive, key)]
     d = archive / key_dir(key)
     if not d.is_dir():
         return []
     return [f"{d.name}/{n.name}" for n in sorted(d.iterdir()) if FILE_RE.match(n.name)]
 
 
-def read_rows(archive: Path, key: str, start_file: str | None = None, start_offset: int = 0, start_line: int = 1) -> list[Row]:
-    """从水位处读到最新。只返回完整的行：写到一半（没有换行结尾）的最后一行留给下次。"""
+_SURROGATE = re.compile(r"[\ud800-\udfff]")
+
+
+def _safe_display(value: str) -> str:
+    # JS slice counts UTF-16 code units, so a published JSON string may
+    # end in one half of an emoji. Tokenizers need a valid Unicode string.
+    if _SURROGATE.search(value):
+        return value.encode("utf-16-le", errors="surrogatepass").decode("utf-16-le", errors="replace")
+    return value
+
+
+def _read_channel_rows(
+    archive: Path, key: str, start_file: str | None, start_offset: int, start_line: int,
+    trusted_cursor: bool,
+) -> list[Row]:
+    files = published_files(archive, key)
+    if type(start_offset) is not int or start_offset < 0 or type(start_line) is not int or start_line < 1:
+        raise ChannelArchiveError()
+    if start_file is None:
+        if start_offset != 0 or start_line != 1:
+            raise ChannelArchiveError()
+    else:
+        for index, file in enumerate(files):
+            if file.rel == start_file:
+                files = files[index:]
+                break
+        else:
+            raise ChannelArchiveError()
+
+    rows = []
+    for file in files:
+        offset, expected_line = (start_offset, start_line) if file.rel == start_file else (0, 1)
+        cursor_line = expected_line if trusted_cursor else (1 if offset == 0 else None)
+        scan_from = (offset, expected_line) if trusted_cursor else (0, 1)
+        for line, begin, end, _, row in records(file, key, *scan_from):
+            if end == offset:
+                cursor_line = line + 1
+            if begin < offset or row.get("deleted") is True:
+                continue
+            name = row.get("name")
+            rows.append(Row(
+                key=key, file=file.rel, line=line, offset=begin, end=end, t=row["timestamp"],
+                dir=row["dir"], user_id=row["userId"], name=_safe_display(name) if isinstance(name, str) else "",
+                text=_safe_display(row["text"]), record_id=row["recordId"], person_key=row["personKey"],
+                message_key=row["messageKey"], reply_to_message_key=row["replyToMessageKey"],
+            ))
+        if cursor_line != expected_line:
+            raise ChannelArchiveError()
+    return rows
+
+
+def read_rows(
+    archive: Path, key: str, start_file: str | None = None, start_offset: int = 0, start_line: int = 1,
+    *, trusted_cursor: bool = False,
+) -> list[Row]:
+    """读取水位后的完整行。仅在已核对存档快照和持久化水位后使用 trusted_cursor。"""
+    if is_channel_key(key):
+        return _read_channel_rows(archive, key, start_file, start_offset, start_line, trusted_cursor)
     rows: list[Row] = []
     files = key_files(archive, key)
     if start_file is not None and start_file in files:
@@ -120,6 +198,9 @@ class RowCache:
         self._cache: dict[str, tuple[tuple, list[Row], dict[tuple[str, int], int]]] = {}
 
     def _sig(self, key: str) -> tuple:
+        if is_channel_key(key):
+            snapshot, _ = channel_snapshot(self.archive, key)
+            return tuple((rel, file["bytes"], file["sha256"]) for rel, file in snapshot.items())
         sig = []
         for rel in key_files(self.archive, key):
             try:
@@ -141,6 +222,8 @@ class RowCache:
         if hit and hit[0] == sig:
             return hit[1], hit[2]
         rows = read_rows(self.archive, key)
+        if is_channel_key(key) and self._sig(key) != sig:
+            raise ChannelArchiveChanged()
         index = {(r.file, r.line): i for i, r in enumerate(rows)}
         self._cache[key] = (sig, rows, index)
         return rows, index
@@ -165,18 +248,20 @@ class NameBook:
             pass
         self.seen: dict[str, Counter] = {}
         if archive is not None:
-            for key in list_keys(archive):
+            for key in _legacy_keys(archive):
                 for r in read_rows(archive, key):
                     self.observe(r)
 
     def observe(self, r: Row) -> None:
-        if r.user_id and r.name and r.name != r.user_id:
+        if not is_channel_key(r.key) and r.user_id and r.name and r.name != r.user_id:
             self.seen.setdefault(r.user_id, Counter())[r.name] += 1
 
     def name(self, r: Row) -> str:
         if r.is_self:
             return "我"
         uid = r.user_id or ""
+        if is_channel_key(r.key):
+            return r.name or uid or "对方"
         if uid in self.ledger:
             return self.ledger[uid]
         c = self.seen.get(uid)
@@ -191,7 +276,26 @@ class NameBook:
         return {n for n in names if len(n) >= 2}
 
 
+def _display_timestamp(t: float) -> tuple[str, str]:
+    try:
+        d = datetime.fromtimestamp(t / 1000.0)
+    except (ValueError, OverflowError, OSError):
+        # JS Dates can exceed datetime's year range. Format such archive
+        # dates in UTC by moving them into a complete Gregorian cycle.
+        days, remainder = divmod(int(t), 86_400_000)
+        cycles, day_in_cycle = divmod(days - 10957, 146097)
+        d = datetime(2000, 1, 1) + timedelta(days=day_in_cycle, milliseconds=remainder)
+        year = d.year + cycles * 400
+        year_text = f"{year:04d}" if 0 <= year < 10000 else f"{year:+07d}"
+        return f"{year_text}-{d:%m-%d}", f"{d:%H:%M}"
+    return f"{d:%Y-%m-%d}", f"{d:%H:%M}"
+
+
+def timestamp_day(t: float) -> str:
+    return _display_timestamp(t)[0]
+
+
 def fmt_line(r: Row, names: NameBook) -> str:
-    d = datetime.fromtimestamp(r.t / 1000.0)
+    day, clock = _display_timestamp(r.t)
     text = r.text.replace("\n", " / ")
-    return f"{d:%Y-%m-%d %H:%M} {names.name(r)}：{text}"
+    return f"{day} {clock} {names.name(r)}：{text}"

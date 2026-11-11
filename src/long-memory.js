@@ -19,6 +19,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { channelArchiveDirectory, createChannelArchive } from './core/channel-archive.mjs';
+import { normalizeDateRange, normalizeKeywords } from './memory-rag-client.js';
 
 export const CATEGORIES = Object.freeze({
   trait: '性格/习惯/喜好',
@@ -992,7 +993,9 @@ export function createLongMemory({ stateDir, redact = (s) => s, log = () => {}, 
    * debug：附带 hits（存档相对路径 + 1 起行号），只给评估脚本用。
    */
   function search(key, { query = '', keywords = [], from = '', to = '', speaker = '', limit = 30, context = 0, maxChars = 3000, debug = false } = {}) {
-    const sp = String(speaker ?? '').trim().toLowerCase();
+    const speakerText = String(speaker ?? '').trim();
+    const sp = speakerText.toLowerCase();
+    const channel = isChannelKey(key);
     const fromT = from ? Date.parse(`${from}T00:00:00`) : -Infinity;
     const toT = to ? Date.parse(`${to}T23:59:59.999`) : Infinity;
     const lim = Math.min(100, Math.max(1, Number(limit) || 30));
@@ -1023,6 +1026,7 @@ export function createLongMemory({ stateDir, redact = (s) => s, log = () => {}, 
     const total = rows.length;
 
     const speakerOk = (r) => !sp
+      || (channel && r.personKey === speakerText)
       || String(r.name ?? '').toLowerCase().includes(sp)
       || String(r.userId ?? '').includes(sp)
       || (sp === '我' && r.dir === 'out');
@@ -1086,6 +1090,24 @@ export function createLongMemory({ stateDir, redact = (s) => s, log = () => {}, 
       mode: 'scored',
       ...(debug ? { hits: rendered.kept.map(hitView) } : {})
     };
+  }
+
+  // The caller supplies the authorized source key separately from user-controlled search options.
+  async function searchChannelHistory(sourceKey, options = {}, { rag } = {}) {
+    try { channelArchiveDirectory(sourceKey); } catch { return null; }
+    const { from, to } = normalizeDateRange(options);
+    const query = String(options.query ?? '').trim();
+    const keywords = normalizeKeywords(options.keywords);
+    const { speaker, limit, context, maxChars, debug, mode } = options;
+    if (rag && mode !== 'keyword' && (query || keywords.length)) {
+      try {
+        const result = await rag.search({ key: sourceKey, query, keywords, from, to, speaker, k: limit, expand: context, debug });
+        if (result && result.semantic !== 'unavailable') return { via: 'rag', result };
+      } catch {
+        log('[ltm] 渠道记忆索引查询失败，改用本地关键词');
+      }
+    }
+    return { via: 'keyword', result: search(sourceKey, { query, keywords, from, to, speaker, limit, context, maxChars, debug }) };
   }
 
   function archiveStats(key) {
@@ -1300,7 +1322,7 @@ export function createLongMemory({ stateDir, redact = (s) => s, log = () => {}, 
   return {
     CATEGORIES,
     touch, remember, update, forget, personView, listPeople, renderFor,
-    archive, channelArchive, hasArchive, search, archiveStats, archiveKeys,
+    archive, channelArchive, hasArchive, search, searchChannelHistory, archiveStats, archiveKeys,
     // RAG_PATCH（P2）：控制台的存档浏览 / 删除，以及给状态页看的遗忘请求队列
     listArchiveRows, deleteArchiveRows, pendingForgetKeys,
     // LIFE_LOOP_PATCH：生活回路要用的查询（visibleTo 是 visible 的公开别名）

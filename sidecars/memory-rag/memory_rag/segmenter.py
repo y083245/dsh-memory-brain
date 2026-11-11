@@ -9,12 +9,11 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field
-from datetime import datetime
 from typing import Sequence
 
 import numpy as np
 
-from .archive import NameBook, Row, fmt_line
+from .archive import NameBook, Row, fmt_line, timestamp_day
 from .embeddings import Embedder
 
 MAX_LINE_CHARS = 1000  # 块里单条消息最多保留这么多字；原文全文仍在存档里
@@ -43,7 +42,7 @@ class Chunk:
             "key": self.key,
             "t_start": int(self.t_start),
             "t_end": int(self.t_end),
-            "day": datetime.fromtimestamp(self.t_start / 1000.0).strftime("%Y-%m-%d"),
+            "day": timestamp_day(self.t_start),
             "speakers": ",".join(self.speakers),
             "speaker_names": ",".join(self.speaker_names),
             "title": "",
@@ -59,7 +58,10 @@ class Chunk:
 
 def chunk_id(key: str, rows: Sequence[Row]) -> str:
     """确定性 ID：同一批消息永远得到同一个 ID，重复写入即覆盖（upsert）。"""
-    raw = f"{key}|{int(rows[0].t)}|{int(rows[-1].t)}|{rows[0].text}"
+    if rows[0].record_id:
+        raw = f"{key}|{rows[0].record_id}|{rows[-1].record_id}"
+    else:
+        raw = f"{key}|{int(rows[0].t)}|{int(rows[-1].t)}|{rows[0].text}"
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
 
@@ -244,10 +246,11 @@ class Segmenter:
         c.id = chunk_id(key, rows)
         seen_ids, seen_names = [], []
         for r in rows:
-            if r.is_self or not r.user_id:
+            speaker = r.person_key or r.user_id
+            if r.is_self or not speaker:
                 continue
-            if r.user_id not in seen_ids:
-                seen_ids.append(r.user_id)
+            if speaker not in seen_ids:
+                seen_ids.append(speaker)
                 seen_names.append(self.names.name(r))
         c.speakers, c.speaker_names = seen_ids, seen_names
         return c

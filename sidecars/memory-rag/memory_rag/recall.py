@@ -20,7 +20,8 @@ from typing import Sequence
 
 from .embeddings import EmbeddingUnavailable
 from .fts import query_tokens
-from .l2 import hubs_for_key, normalize_name
+from .archive import is_channel_key, is_channel_person_key
+from .l2 import normalize_name, scoped_entity
 
 # 与 config.yml 的 recall.stopwords 缺省值一致；配置里给了就完全用配置的
 DEFAULT_STOPWORDS = ("在吗", "嗯", "嗯嗯", "哈哈", "哈哈哈", "晚安", "早", "早安", "好的", "好", "收到", "ok", "行")
@@ -124,7 +125,7 @@ def recall(svc, key: str, texts: Sequence[str], k: int = 2, now_ms: int | None =
             vec_hits = []  # 三路里少一路，照样按「至少两路」算
     bm_hits = l2.bm25_summaries(key, query_tokens(query), ROUTE_TOP, t_end_lte=cutoff)
     graph: dict[str, float] = {}
-    seeds = set(l2.entities_in_text(key, query, min_len=2)) - hubs_for_key(key)
+    seeds = set(l2.entities_in_text(key, query, min_len=2)) - l2.hubs_for_key(key)
     if seeds:
         graph = score_linked(l2, key, l2.linked_summaries(key, sorted(seeds), t_end_lte=cutoff))
 
@@ -171,11 +172,15 @@ def associate(svc, key: str, text: str = "", t: int | None = None, people: Seque
     text = str(text or "")[:500]
 
     seeds = set(l2.entities_in_text(key, text, min_len=2))
-    seeds |= {f"qq:{p}" for p in people or () if str(p).strip()}
+    if is_channel_key(key):
+        seeds |= {scoped_entity(key, f"person:{p}") for p in people or () if is_channel_person_key(key, p)}
+    else:
+        seeds |= {f"qq:{p}" for p in people or () if str(p).strip()}
     covering = l2.summary_covering(key, int(t)) if t is not None else None
     if covering:
         seeds |= {e for ents in l2.entities_of(key, [covering["summary_id"]]).values() for e in ents}
-    seeds -= hubs_for_key(key)
+    hubs = l2.hubs_for_key(key)
+    seeds -= hubs
 
     skip = [str(s) for s in exclude or ()]
     if covering:
@@ -192,7 +197,6 @@ def associate(svc, key: str, text: str = "", t: int | None = None, people: Seque
         # RAG_PATCH（P3）：两道过滤——(a) 候选要带出种子之外的新实体，(b) 不能是种子那件事的复述。
         # 端到端验收加：种子来自账本 / 日记时没有 t，排除不了覆盖那一刻的块，
         # 只按共享实体返回的话，带出来的往往就是讲同一件事的那条摘要。
-        hubs = hubs_for_key(key)
         seed_bigrams = _bigrams(text)
         need_overlap_check = len(seed_bigrams) >= 4  # 种子太短时不判 (b)
         cand_ents = l2.entities_of(key, [sid for _, _, sid in ranked])

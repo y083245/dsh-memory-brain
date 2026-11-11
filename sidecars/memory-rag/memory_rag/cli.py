@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 
+from .indexer import ChannelIndexUnavailable
 from .service import Service
 
 
@@ -41,7 +42,12 @@ def main():
     elif a.cmd == "index":
         print(json.dumps(svc.indexer.run(), ensure_ascii=False, indent=1))
     elif a.cmd == "search":
-        res = svc.searcher.search(a.key, a.query, a.keywords, a.date_from, a.date_to, debug=a.debug)
+        try:
+            svc.check_channel_forget(a.key)
+            res = svc.searcher.search(a.key, a.query, a.keywords, a.date_from, a.date_to, debug=a.debug)
+            svc.check_channel_forget(a.key)
+        except ChannelIndexUnavailable:
+            raise SystemExit("该会话的索引尚未就绪，稍后再试") from None
         for it in res["items"]:
             print(f"【{it['day']} · {'+'.join(it['sources'])} · {it['score']}】")
             print(it["text"])

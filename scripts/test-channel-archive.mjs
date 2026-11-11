@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -8,6 +9,7 @@ import test from 'node:test';
 import { openChannelInbox } from '../src/core/inbox-store.mjs';
 import { createDailyReport } from '../src/daily-report.js';
 import { createLongMemory } from '../src/long-memory.js';
+import { createMemoryRagClient } from '../src/memory-rag-client.js';
 
 const feishu = { platform: 'feishu', accountId: 'cli_fixture', tenantId: 'tenant_a' };
 const telegram = { platform: 'telegram', accountId: '41' };
@@ -62,6 +64,60 @@ function project({ inbox, messageKey }) {
   assert.equal(projected.status, 'projected');
   return { token, recordId: projected.recordId };
 }
+
+test('trusted channel history uses exact-scope RAG and falls back to live local evidence', async (t) => {
+  const { memory, enqueue } = fixture(t);
+  const source = enqueue(feishu, { text: '共同主题，本话题原文' });
+  const other = enqueue(feishu, { id: 2, threadId: '8', text: '共同主题，另一话题原文' });
+  const { recordId } = project(source);
+  project(other);
+  const file = `${path.basename(path.dirname(source.file))}/2026-11.jsonl`;
+  let state = 'compatible';
+  const bodies = [];
+  const server = createServer(async (req, res) => {
+    let raw = '';
+    for await (const chunk of req) raw += chunk;
+    res.setHeader('content-type', 'application/json');
+    if (req.method === 'GET') {
+      return res.end(JSON.stringify({ ok: true, archive_protocol: { identity: 1, archive: state === 'old' ? 0 : 1, index: 1 } }));
+    }
+    const body = JSON.parse(raw);
+    bodies.push(body);
+    if (state === 'stale') res.statusCode = 503;
+    res.end(JSON.stringify({ key: body.key, semantic: state === 'unavailable' ? 'unavailable' : 'ok',
+      items: [{ day: '2026-11-01', title: '', sources: ['bm25'], text: '共同主题，RAG 证据',
+        file, file_end: file, line_start: 1, line_end: 1 }] }));
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const url = `http://127.0.0.1:${server.address().port}`;
+  const rag = createMemoryRagClient({ url });
+  const options = { key: other.key, query: '共同主题', context: 2, debug: true };
+  const indexed = await memory.searchChannelHistory(source.key, options, { rag });
+  assert.equal(indexed.via, 'rag');
+  assert.equal(indexed.result.items[0].text, '共同主题，RAG 证据');
+  assert.equal(memory.rowsAt(source.key, indexed.result.refs)[0].recordId, recordId);
+  assert.equal(bodies[0].key, source.key);
+  assert.equal(bodies[0].expand, 2);
+
+  for (state of ['old', 'unavailable', 'stale']) {
+    const keyword = await memory.searchChannelHistory(source.key, options, { rag });
+    assert.equal(keyword.via, 'keyword');
+    assert.equal(keyword.result.matched, 1);
+    assert.match(keyword.result.lines.join(''), /本话题原文/);
+    assert.doesNotMatch(keyword.result.lines.join(''), /另一话题原文/);
+    assert.equal(memory.rowsAt(source.key, keyword.result.hits)[0].recordId, recordId);
+  }
+  assert.equal(bodies.length, 3, 'an incompatible health response must not send the body');
+  const [{ personKey }] = memory.archiveRows(source.key);
+  const filtered = await memory.searchChannelHistory(source.key, { ...options, speaker: personKey }, { rag });
+  assert.equal(filtered.result.matched, 1);
+  assert.equal(await memory.searchChannelHistory('group:123', options, { rag }), null);
+  assert.equal(source.inbox.forgetRecord(source.key, recordId).status, 'forgotten');
+  assert.equal((await memory.searchChannelHistory(source.key, options, { rag })).result.matched, 0);
+  const disabled = createMemoryRagClient({ url, isEnabled: () => false });
+  assert.equal((await memory.searchChannelHistory(source.key, options, { rag: disabled })).via, 'keyword');
+});
 
 test('projected UTF-8 history is read at its published watermark and shares the QQ search ranking', async (t) => {
   const { dir, memory, enqueue } = fixture(t);

@@ -19,10 +19,11 @@ import time
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from .archive import valid_key
-from .indexer import IndexBusy
+from .archive import is_channel_key, is_channel_person_key, valid_key
+from .indexer import ChannelIndexUnavailable, IndexBusy
 from .l2 import L2
 from .migrations import SchemaTooNew
 from .recall import associate as run_associate, recall as run_recall, summaries as run_summaries
@@ -30,6 +31,11 @@ from .service import RebuildRunning, Service, request_at
 
 svc = Service()
 app = FastAPI(title="memory-rag", docs_url=None, redoc_url=None, openapi_url=None)
+
+
+@app.exception_handler(ChannelIndexUnavailable)
+async def channel_unavailable(_request, _exc):
+    return JSONResponse(status_code=503, content={"detail": "该会话的索引尚未就绪，稍后再试"})
 
 
 class SearchReq(BaseModel):
@@ -117,7 +123,7 @@ def _recall_ready(key: str) -> None:
     遗忘请求必须在查 L2 之前处理掉，否则可能把已删会话的摘要返回给桥接。
     """
     if not valid_key(key):
-        raise HTTPException(400, "key 必填，格式 group:<群号> 或 private:<QQ号>")
+        raise HTTPException(400, "key 必须是有效的会话键")
     _ready()
     if svc.l2 is None:
         raise HTTPException(503, f"{svc.mismatch or '向量库不可用'}")
@@ -136,13 +142,13 @@ def _brain_ready(keys: list[str] | None) -> L2:
     - 口径不一致时 indexer 不在、消费不了 → 只要涉及的会话有待处理请求就 503，宁可画不出也不返回已删内容。
     """
     if svc.indexer is None:
-        if any(keys is None or k in keys for _, k, _ in svc.forget_requests()):
+        if any((not is_channel_key(k) if keys is None else k in keys) for _, k, _ in svc.forget_requests()):
             raise HTTPException(503, "有待处理的遗忘请求，稍后再试")
         # 口径不一致时 svc.l2 是 None；L2 只是包一层同库同锁的连接，现造一个就能读
         return svc.l2 or L2(svc.db)
     try:
         if keys is None:
-            svc.process_forget_requests(blocking=False)
+            svc.process_forget_requests(blocking=False, legacy_only=True)
         else:
             for k in keys:
                 svc.process_forget_requests(only_key=k, blocking=False)
@@ -166,8 +172,8 @@ def _index_once(indexer) -> None:
 
 
 @app.get("/health")
-def health():
-    return svc.health()
+def health(protocol: str | None = None):
+    return svc.channel_health() if protocol == "channel" else svc.health()
 
 
 @app.post("/index/run")
@@ -182,7 +188,7 @@ def forget(req: ForgetReq):
     """RAG_PATCH（P2）：忘掉一个会话的向量记忆（桥接删完存档后调用）。"""
     _writable()  # UPGRADE_PATCH
     if not valid_key(req.key):
-        raise HTTPException(400, "key 必填，格式 group:<群号> 或 private:<QQ号>")
+        raise HTTPException(400, "key 必须是有效的会话键")
     if svc.indexer is None:
         raise HTTPException(503, f"{svc.mismatch or '向量库不可用'}")
     # 先记下请求文件与它的 at：处理完只有 at 没变才删（期间桥接可能又写了新请求）
@@ -218,7 +224,7 @@ def rebuild():
 def search(req: SearchReq):
     # key 必填：会话隔离的第二道闸（第一道在桥接，key 由会话令牌校验得出）
     if not valid_key(req.key):
-        raise HTTPException(400, "key 必填，格式 group:<群号> 或 private:<QQ号>")
+        raise HTTPException(400, "key 必须是有效的会话键")
     _ready()
     # RAG_PATCH（P2）：这个会话有待处理的遗忘请求时先清掉，免得把已删内容返回给桥接。
     # 拿不到索引锁就 503，桥接降级为关键词检索——宁可查不到，也不能返回已删除的内容。
@@ -227,8 +233,11 @@ def search(req: SearchReq):
     except IndexBusy:
         raise HTTPException(503, "该会话有待处理的遗忘请求，稍后再试") from None
     try:
-        return svc.searcher.search(req.key, req.query, req.keywords[:12], req.date_from, req.date_to,
-                                   req.speaker, req.k, req.expand, debug=bool(req.debug))  # BRAIN_PATCH
+        svc.check_channel_forget(req.key)
+        out = svc.searcher.search(req.key, req.query, req.keywords[:12], req.date_from, req.date_to,
+                                  req.speaker, req.k, req.expand, debug=bool(req.debug))
+        svc.check_channel_forget(req.key)
+        return out
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
 
@@ -241,24 +250,31 @@ def recall(req: RecallReq):
     """唤醒时自动想起：桥接把最近 1～3 条来信交过来，回候选摘要与要注入的编号（接口约定 C2）。"""
     _recall_ready(req.key)
     texts = [str(t or "")[:500] for t in (req.texts or [])[-3:]]  # 只看最近的来信，过长截断
-    return run_recall(svc, req.key, texts, k=_clamp(req.k, 1, 5, 2), now_ms=req.now)
+    with svc.channel_reads([req.key]):
+        return run_recall(svc, req.key, texts, k=_clamp(req.k, 1, 5, 2), now_ms=req.now)
 
 
 @app.post("/associate")
 def associate(req: AssociateReq):
     """联想链：按文字 / 指定的人 / 某个时刻的块找本会话里另一件相关的旧事。"""
     _recall_ready(req.key)
-    people = [str(p).strip() for p in (req.people or []) if str(p).strip().isdigit()][:5]
-    return run_associate(svc, req.key, text=str(req.text or "")[:500], t=req.t, people=people,
-                         exclude=[str(x) for x in (req.exclude or [])][:200],
-                         min_age_days=req.min_age_days, k=_clamp(req.k, 1, 5, 3), now_ms=req.now)
+    people = [p.strip() for p in req.people]
+    if is_channel_key(req.key):
+        people = [p for p in people if is_channel_person_key(req.key, p)][:5]
+    else:
+        people = [p for p in people if p.isdigit()][:5]
+    with svc.channel_reads([req.key]):
+        return run_associate(svc, req.key, text=str(req.text or "")[:500], t=req.t, people=people,
+                             exclude=[str(x) for x in (req.exclude or [])][:200],
+                             min_age_days=req.min_age_days, k=_clamp(req.k, 1, 5, 3), now_ms=req.now)
 
 
 @app.post("/summaries")
 def summaries(req: SummariesReq):
     """控制台按编号取摘要文字：不属于该 key 或已删除的 id 不返回（桥接显示「已删除」）。"""
     _recall_ready(req.key)
-    return run_summaries(svc, req.key, [str(i) for i in (req.ids or [])][:100])
+    with svc.channel_reads([req.key]):
+        return run_summaries(svc, req.key, [str(i) for i in (req.ids or [])][:100])
 
 
 @app.post("/notes")
@@ -271,7 +287,8 @@ def notes(req: NotesReq):
     _recall_ready(req.key)
     since = max(0, int(req.since_ms or 0))
     limit = _clamp(req.limit, 1, 200, 100)
-    return {"key": req.key, "items": svc.l2.notes(req.key, since, limit)}
+    with svc.channel_reads([req.key]):
+        return {"key": req.key, "items": svc.l2.notes(req.key, since, limit)}
 
 
 @app.post("/notes/backfill")
@@ -299,25 +316,27 @@ def graph(req: GraphReq):
         keys = []
         for k in req.keys:
             if not valid_key(k):
-                raise HTTPException(400, "keys 里每一项都必须是 group:<群号> 或 private:<QQ号>")
+                raise HTTPException(400, "keys 中每一项都必须是有效的会话键")
             if k not in keys:
                 keys.append(k)
     limit = _clamp(req.limit, 1, 2000, 2000)
     l2 = _brain_ready(keys)
-    chunks, chunks_cut = svc.db.graph_chunks(keys, limit)
-    g = l2.graph(keys, limit)
-    return {"ok": True, "chunks": chunks, "summaries": g["summaries"], "entities": g["entities"],
-            "summary_entities": g["summary_entities"], "relations": g["relations"], "notes": g["notes"],
-            "truncated": {"chunks": chunks_cut, **g["truncated"]}}
+    with svc.channel_reads(keys):
+        chunks, chunks_cut = svc.db.graph_chunks(keys, limit)
+        g = l2.graph(keys, limit)
+        return {"ok": True, "chunks": chunks, "summaries": g["summaries"], "entities": g["entities"],
+                "summary_entities": g["summary_entities"], "relations": g["relations"], "notes": g["notes"],
+                "truncated": {"chunks": chunks_cut, **g["truncated"]}}
 
 
 @app.post("/chunk")
 def chunk(req: ChunkReq):
     """单个话题块的原文。不存在与 key 不匹配回同一个 404，不让人试出「块在，但属于别的会话」。"""
     if not valid_key(req.key):
-        raise HTTPException(400, "key 必填，格式 group:<群号> 或 private:<QQ号>")
+        raise HTTPException(400, "key 必须是有效的会话键")
     _brain_ready([req.key])
-    row = svc.db.chunk_text(req.key, str(req.chunk_id or ""))
+    with svc.channel_reads([req.key]):
+        row = svc.db.chunk_text(req.key, str(req.chunk_id or ""))
     if row is None:
         raise HTTPException(404, "话题块不存在")
     return {"ok": True, **row}
