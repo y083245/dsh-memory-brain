@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// CI：用真实的 DSH 核对 QQ 预设能不能注册、会话能不能建起来。
+// CI：用真实的 DSH 核对 QQ 和新渠道预设的注册与会话创建。
 //
 //   node scripts/ci-dsh-compat.mjs             # PATH 里的 dsh，web profile
 //   node scripts/ci-dsh-compat.mjs --desktop   # 已安装的桌面版：按它 main 进程的方式无界面拉起 Host（Windows）
@@ -23,6 +23,9 @@ const { commandSpec, resolveElectronShim } = await import('../src/runtime/comman
 const { findDshCli } = await import('../src/runtime/paths.mjs');
 const { checkDshPresets, diagnosePresetProfile } = await import('../src/dsh-discovery.js');
 const { NodeApiClient, unwrap } = await import('../src/dsh-client.js');
+const { CHANNEL_DSH_PRESET, confirmChannelPreset } = await import('../src/core/channel-dsh-preset.mjs');
+const { createChannelSessionId } = await import('../src/core/channel-turn-runner.mjs');
+const { encodeConversationKey } = await import('../src/core/identity.mjs');
 
 const cli = findDshCli({ env: process.env });
 if (!cli) { console.error('找不到 dsh'); process.exit(1); }
@@ -121,6 +124,16 @@ try {
       }
     }
     console.log(`session/create qq-chat-v2: ${created.sessionId ?? JSON.stringify(created).slice(0, 80)}`);
+    if (!await confirmChannelPreset(api)) throw new Error('新渠道安全预设或守卫不可用');
+    const sessionId = createChannelSessionId(encodeConversationKey({
+      platform: 'telegram', accountId: '101', chatType: 'group', chatId: '-1001',
+    }));
+    const channel = unwrap(await api.sessions.create({
+      cwd: home, sessionId, agentPreset: CHANNEL_DSH_PRESET,
+    }), 'session.create');
+    if (channel.sessionId !== sessionId || channel.agentPreset !== CHANNEL_DSH_PRESET
+        || !await confirmChannelPreset(api, { sessionId })) throw new Error('新渠道安全会话校验失败');
+    console.log('session/create channel-chat-v2: 已确认安全预设和指定会话');
   }
 } catch (error) {
   failed = true;

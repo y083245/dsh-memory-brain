@@ -62,6 +62,7 @@ const tests = [
   'test-snowluma-conn.mjs', 'test-qq-channel.mjs', 'test-channel-identity.mjs',
   'test-channel-inbox.mjs', 'test-channel-archive.mjs',
   'test-channel-turn-journal.mjs', 'test-channel-dsh-transport.mjs', 'test-channel-turn-runner.mjs',
+  'test-channel-dsh-preset.mjs', 'test-channel-turn-host.mjs', 'test-channel-turn-prompt.mjs',
   // 启动器与编码（乱码根因：.cmd 里的非 ASCII 会被 cmd 按 ANSI 解码）
   'test-encoding.mjs',
   // 控制台乱码机制（UTF-8 字节被按 GBK 解码）+ chcp 修复

@@ -16,15 +16,23 @@ export function createChannelSessionId(conversationKey) {
   return sessionPrefix(conversationKey) + randomBytes(16).toString('hex');
 }
 
+export function isChannelSessionId(conversationKey, sessionId) {
+  if (typeof sessionId !== 'string') return false;
+  try {
+    const prefix = sessionPrefix(conversationKey);
+    return sessionId.length === prefix.length + 32 && sessionId.startsWith(prefix) &&
+      /^[0-9a-f]{32}$/.test(sessionId.slice(prefix.length));
+  } catch {
+    return false;
+  }
+}
+
 function prepareSnapshot(prepared, conversationKey, bindingRevision) {
   if (!prepared) return null;
   const { sessionId, generation, mode, text } = prepared;
   if (prepared.conversationKey !== conversationKey || prepared.bindingRevision !== bindingRevision || mode !== MODE ||
       !Number.isSafeInteger(generation) || generation < 0 || typeof text !== 'string' || !text.trim() ||
-      typeof sessionId !== 'string') return null;
-  const prefix = sessionPrefix(conversationKey);
-  if (sessionId.length !== prefix.length + 32 || !sessionId.startsWith(prefix) ||
-      !/^[0-9a-f]{32}$/.test(sessionId.slice(prefix.length))) return null;
+      !isChannelSessionId(conversationKey, sessionId)) return null;
   return { snapshot: Object.freeze({ conversationKey, bindingRevision, sessionId, generation, mode }), text };
 }
 
@@ -100,8 +108,8 @@ async function transportResult(work) {
 
 /** A trusted host supplies a guarded DSH session and keeps its generation current. */
 export function createChannelTurnRunner({ api, longMemory, rag, prepareTurn, isCurrentSession, invalidateSession,
-  maxConcurrent = 4, now = Date.now, transport = createChannelDshTransport(api) } = {}) {
-  if (![prepareTurn, isCurrentSession, invalidateSession, now, longMemory?.searchChannelHistory,
+  isSilent = () => false, maxConcurrent = 4, now = Date.now, transport = createChannelDshTransport(api) } = {}) {
+  if (![prepareTurn, isCurrentSession, invalidateSession, isSilent, now, longMemory?.searchChannelHistory,
     transport?.submit, transport?.reconcile, transport?.retire].every((callback) => typeof callback === 'function')) {
     throw new TypeError('Invalid channel turn runner callbacks');
   }
@@ -162,9 +170,10 @@ export function createChannelTurnRunner({ api, longMemory, rag, prepareTurn, isC
       return result;
     }
 
+    let value;
     let prepared;
     try {
-      const value = await prepareTurn({ task, recordId, searchHistory, signal: lease.signal });
+      value = await prepareTurn({ task, recordId, searchHistory, signal: lease.signal });
       prepared = prepareSnapshot(value, conversationKey, bindingRevision);
     } catch {
       const latest = lease.check();
@@ -173,12 +182,25 @@ export function createChannelTurnRunner({ api, longMemory, rag, prepareTurn, isC
 
     const latest = lease.check();
     if (latest.status !== 'ready') return latest;
+    const finishSilent = () => {
+      const result = binding.finish(messageKey, token);
+      return result.status === 'completed' ? { status: 'silent' } : result;
+    };
+    if (value?.status === 'silent') return finishSilent();
     if (!prepared) return { status: 'session_unavailable' };
     const { snapshot, text } = prepared;
     const blocks = [{ type: 'text', text: PROMPT_PREFIX + text }];
     // beginTurn rechecks authorization and the archive atomically. Dispatch in
     // the same synchronous segment as the host guard and journal commit.
     if (!currentSession(isCurrentSession, snapshot)) return { status: 'stale_session' };
+    try {
+      const silent = isSilent();
+      if (silent instanceof Promise) void silent.catch(() => {});
+      if (silent === true) return finishSilent();
+      if (silent !== false) return { status: 'preparation_failed' };
+    } catch {
+      return { status: 'preparation_failed' };
+    }
     const started = binding.beginTurn(messageKey, token, {
       sessionId: snapshot.sessionId, generation: snapshot.generation, requestId: taskId, maxActiveTurns: maxConcurrent,
     });
