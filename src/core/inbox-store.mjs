@@ -11,8 +11,12 @@ const DELIVERY_RETENTION = 72 * HOUR_MS;
 const MAX_TELEGRAM_BATCH = 100;
 const DELIVERY_PRUNE_LIMIT = 1000;
 const LEASE_MS = 60_000;
+const DEFAULT_ACTIVE_TURNS = 4;
+const UNRESOLVED_TURNS = "state IN ('submitting', 'accepted', 'uncertain', 'retiring')";
+const TURN_IDENTIFIER = /^[A-Za-z0-9_.:-]{1,128}$/;
 
 const retry = (reason) => ({ status: 'retryableFailure', reason });
+const validTurnIdentifier = (id) => typeof id === 'string' && TURN_IDENTIFIER.test(id);
 const scopeOf = (ref) => {
   const { platform, accountId, tenantId } = readAccountRef(ref);
   return JSON.stringify([platform, accountId, tenantId]);
@@ -62,6 +66,25 @@ const SCHEMA = `
   CREATE TABLE IF NOT EXISTS inbox_archive_mode (
     enabled INTEGER PRIMARY KEY CHECK (enabled = 1)
   );
+  CREATE TABLE IF NOT EXISTS inbox_turn_journal (
+    seq INTEGER PRIMARY KEY,
+    scope TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    conversation_key TEXT NOT NULL,
+    dialogue_id TEXT NOT NULL,
+    binding_revision TEXT,
+    session_id TEXT NOT NULL,
+    generation INTEGER NOT NULL CHECK (generation >= 0),
+    request_id TEXT NOT NULL UNIQUE,
+    turn_id TEXT,
+    state TEXT NOT NULL CHECK (${UNRESOLVED_TURNS} OR state IN ('completed', 'retired'))
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS inbox_turn_active_source
+    ON inbox_turn_journal (conversation_key) WHERE ${UNRESOLVED_TURNS};
+  CREATE UNIQUE INDEX IF NOT EXISTS inbox_turn_active_dialogue
+    ON inbox_turn_journal (dialogue_id) WHERE ${UNRESOLVED_TURNS};
+  CREATE INDEX IF NOT EXISTS inbox_turn_active_scope
+    ON inbox_turn_journal (scope, seq) WHERE ${UNRESOLVED_TURNS};
 `;
 
 function checkpointOf(state, now) {
@@ -92,6 +115,20 @@ function readTask({ decision, event: stored }) {
   // Those rows were admitted in their original scope even if now bound.
   const task = Object.hasOwn(payload, 'event') ? payload : taskPayload(payload, isolatedMapping(payload));
   return { ...task, decision };
+}
+
+function turnMetadata(row) {
+  return {
+    taskId: row.task_id,
+    conversationKey: row.conversation_key,
+    dialogueId: row.dialogue_id,
+    bindingRevision: row.binding_revision,
+    sessionId: row.session_id,
+    generation: row.generation,
+    requestId: row.request_id,
+    turnId: row.turn_id,
+    state: row.state,
+  };
 }
 
 // The caller provides a trusted file path in its private state directory (with
@@ -175,6 +212,35 @@ export function openChannelInbox(file, { capacity = 1000, now = Date.now, leaseM
   const saveCheckpoint = db.prepare(
     'UPDATE telegram_poll_state SET revision = ?, next_offset = ?, saved_at = ? WHERE scope = ?',
   );
+  const findTurn = db.prepare('SELECT * FROM inbox_turn_journal WHERE seq = ?');
+  const requestExists = db.prepare('SELECT 1 FROM inbox_turn_journal WHERE request_id = ?');
+  const unresolvedBySource = db.prepare(
+    `SELECT * FROM inbox_turn_journal WHERE conversation_key = ? AND ${UNRESOLVED_TURNS}`,
+  );
+  const unresolvedByDialogue = db.prepare(
+    `SELECT * FROM inbox_turn_journal WHERE dialogue_id = ? AND ${UNRESOLVED_TURNS}`,
+  );
+  const activeTurnAt = db.prepare(`
+    SELECT 1 FROM inbox_turn_journal INDEXED BY inbox_turn_active_scope
+    WHERE ${UNRESOLVED_TURNS} LIMIT 1 OFFSET ?
+  `);
+  const saveTurn = db.prepare(`
+    INSERT INTO inbox_turn_journal (
+      seq, scope, task_id, conversation_key, dialogue_id, binding_revision, session_id, generation, request_id, state
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'submitting') RETURNING *
+  `);
+  const saveTurnState = db.prepare(`
+    UPDATE inbox_turn_journal SET state = ?, turn_id = ? WHERE seq = ? RETURNING *
+  `);
+  const removeTurn = db.prepare('DELETE FROM inbox_turn_journal WHERE seq = ?');
+  const listOrphanedTurns = db.prepare(`
+    SELECT journal.* FROM inbox_turn_journal AS journal JOIN inbox_messages AS message USING (seq)
+    WHERE journal.scope = ? AND message.event IS NULL AND ${UNRESOLVED_TURNS} ORDER BY journal.seq LIMIT ?
+  `);
+  const findOrphanedTurn = db.prepare(`
+    SELECT journal.* FROM inbox_turn_journal AS journal JOIN inbox_messages AS message USING (seq)
+    WHERE journal.scope = ? AND request_id = ? AND message.event IS NULL AND ${UNRESOLVED_TURNS}
+  `);
 
   function transact(work) {
     db.exec('BEGIN IMMEDIATE');
@@ -215,9 +281,28 @@ export function openChannelInbox(file, { capacity = 1000, now = Date.now, leaseM
   }
 
   function completeTask(seq) {
+    // Cancellation clears the body and lease while the journal still tracks remote work.
     removeLease.run(seq);
     removeIntent.run(seq);
     clearPayload.run(seq);
+  }
+
+  function blockingTurn({ dialogueId, event: { conversationKey } }) {
+    return unresolvedBySource.get(conversationKey) ?? unresolvedByDialogue.get(dialogueId);
+  }
+
+  function recordTurnEvidence(row, { state, turnId }) {
+    // Remote retirement can outlive a lease. Hold its blockers until retirement
+    // is confirmed, even when a concurrent reader has exact completion evidence.
+    if ((row.state === 'retiring' && state !== 'retiring' && state !== 'retired') ||
+        (state === 'retired' && row.state !== 'retiring')) return { status: 'turn_conflict' };
+    if (turnId != null && !validTurnIdentifier(turnId)) return { status: 'invalid_turn' };
+    if (turnId != null && row.turn_id !== null && row.turn_id !== turnId) return { status: 'turn_conflict' };
+    const exactTurnId = turnId ?? row.turn_id;
+    if (state === 'completed' && exactTurnId === null) return { status: 'turn_conflict' };
+    const unchanged = row.state === state && row.turn_id === exactTurnId;
+    const turn = turnMetadata(unchanged ? row : saveTurnState.get(state, exactTurnId, row.seq));
+    return { status: state === 'completed' || state === 'retired' ? state : 'updated', turn };
   }
 
   function bind(account, getPolicy) {
@@ -352,22 +437,133 @@ export function openChannelInbox(file, { capacity = 1000, now = Date.now, leaseM
       return result.status === 'reserved' ? withLease(messageKey, token, reserveOrProject) : result;
     }
 
-    function recheckLease(messageKey, token) {
-      return withLease(messageKey, token, (row, lease) => {
-        const checked = checkOrCancel(messageKey, readPolicy(), row);
-        if (checked.status !== 'ready') return checked;
-        if (lease.expires_at <= now()) return { status: 'stale_lease' };
-        if (!lease.projected) return { status: 'not_projected' };
-        return archiveWrite(() => {
-          const projected = archive.recordAt(checked.task.event, lease.projected - 1);
-          if (!projected.deleted) {
-            if (lease.expires_at <= now()) return { status: 'stale_lease' };
-            return { ...checked, recordId: projected.recordId, expiresAt: lease.expires_at };
-          }
-          completeTask(row.seq);
-          return { status: 'forgotten' };
-        });
+    function checkProjectedTask(messageKey, row, lease) {
+      const checked = checkOrCancel(messageKey, readPolicy(), row);
+      if (checked.status !== 'ready') return checked;
+      if (lease.expires_at <= now()) return { status: 'stale_lease' };
+      if (!lease.projected) return { status: 'not_projected' };
+      return archiveWrite(() => {
+        const projected = archive.recordAt(checked.task.event, lease.projected - 1);
+        if (!projected.deleted) {
+          if (lease.expires_at <= now()) return { status: 'stale_lease' };
+          return { ...checked, recordId: projected.recordId, expiresAt: lease.expires_at };
+        }
+        completeTask(row.seq);
+        return { status: 'forgotten' };
       });
+    }
+
+    function recheckLease(messageKey, token) {
+      return withLease(messageKey, token, (row, lease) => checkProjectedTask(messageKey, row, lease));
+    }
+
+    function readTurn(messageKey, token) {
+      return withLease(messageKey, token, (row) => {
+        const turn = findTurn.get(row.seq);
+        if (turn) return { status: 'turn', turn: turnMetadata(turn) };
+        if (row.decision === 'directed' && blockingTurn(readTask(row))) return { status: 'blocked_turn' };
+        return { status: 'no_turn' };
+      });
+    }
+
+    function beginTurn(messageKey, token, intent) {
+      return withLease(messageKey, token, (row, lease) => {
+        const checked = checkProjectedTask(messageKey, row, lease);
+        if (checked.status !== 'ready') return checked;
+        const { task } = checked;
+        if (task.decision !== 'directed') return { status: 'not_directed' };
+        const existing = findTurn.get(row.seq);
+        if (existing) return { status: 'turn', turn: turnMetadata(existing) };
+        const { sessionId, generation, requestId, maxActiveTurns = DEFAULT_ACTIVE_TURNS } = intent ?? {};
+        if (!validTurnIdentifier(sessionId) || !validTurnIdentifier(requestId) ||
+            !Number.isSafeInteger(generation) || generation < 0 ||
+            !Number.isSafeInteger(maxActiveTurns) || maxActiveTurns < 1) {
+          return { status: 'invalid_turn' };
+        }
+        const { taskId, dialogueId, bindingRevision, event: { conversationKey } } = task;
+        const blocked = blockingTurn(task);
+        if (blocked) return { status: 'blocked_turn', turn: turnMetadata(blocked) };
+        if (requestExists.get(requestId)) return { status: 'turn_conflict' };
+        if (activeTurnAt.get(maxActiveTurns - 1)) return { status: 'turn_capacity' };
+        if (lease.expires_at <= now()) return { status: 'stale_lease' };
+        const turn = saveTurn.get(row.seq, scope, taskId, conversationKey, dialogueId, bindingRevision,
+          sessionId, generation, requestId);
+        return { status: 'started', turn: turnMetadata(turn) };
+      });
+    }
+
+    // Evidence refers to an already journaled request. It can be recorded under
+    // the current lease even when a separate authorization check must cancel the body.
+    function withLeasedTurn(messageKey, token, requestId, work) {
+      return withLease(messageKey, token, ({ seq }) => {
+        const turn = findTurn.get(seq);
+        if (!turn) return { status: 'no_turn' };
+        if (turn.request_id !== requestId) return { status: 'turn_conflict' };
+        return work(turn);
+      });
+    }
+
+    function updateTurn(messageKey, token, requestId, evidence) {
+      return withLeasedTurn(messageKey, token, requestId, (turn) => {
+        const { state, turnId } = evidence ?? {};
+        if (state === 'retry') {
+          if (turn.state !== 'submitting' || turn.turn_id !== null || turnId != null) {
+            return { status: 'turn_conflict' };
+          }
+          removeTurn.run(turn.seq);
+          return { status: 'retry_ready' };
+        }
+        if (state !== 'accepted' && state !== 'uncertain' && state !== 'retiring') return { status: 'invalid_turn' };
+        return recordTurnEvidence(turn, { state, turnId });
+      });
+    }
+
+    function finishTurn(messageKey, token, requestId, evidence) {
+      const { state, turnId } = evidence ?? {};
+      if (state !== 'completed' && state !== 'retired') return { status: 'invalid_turn' };
+      return withLeasedTurn(messageKey, token, requestId, (turn) => {
+        const result = recordTurnEvidence(turn, { state, turnId });
+        if (result.status === state) completeTask(turn.seq);
+        return result;
+      });
+    }
+
+    function orphanedTurns(limit = 100) {
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) throw new RangeError('Invalid inbox limit');
+      return listOrphanedTurns.all(scope, limit).map(turnMetadata);
+    }
+
+    function readOrphanedTurn(requestId) {
+      if (!validTurnIdentifier(requestId)) return { status: 'invalid_turn' };
+      const turn = findOrphanedTurn.get(scope, requestId);
+      return turn ? { status: 'turn', turn: turnMetadata(turn) } : { status: 'no_turn' };
+    }
+
+    function withOrphanedTurn(requestId, work) {
+      if (!validTurnIdentifier(requestId)) return { status: 'invalid_turn' };
+      return write(() => {
+        const turn = findOrphanedTurn.get(scope, requestId);
+        return turn ? work(turn) : { status: 'no_turn' };
+      });
+    }
+
+    function updateOrphanedTurn(requestId, evidence) {
+      const { state, turnId } = evidence ?? {};
+      if (state !== 'accepted' || !validTurnIdentifier(turnId)) return { status: 'invalid_turn' };
+      return withOrphanedTurn(requestId, (turn) => recordTurnEvidence(turn, { state, turnId }));
+    }
+
+    function beginOrphanedRetirement(requestId) {
+      return withOrphanedTurn(requestId, (turn) => {
+        const result = recordTurnEvidence(turn, { state: 'retiring' });
+        return result.status === 'updated' ? { status: 'turn', turn: result.turn } : result;
+      });
+    }
+
+    function finishOrphanedTurn(requestId, evidence) {
+      const { state, turnId } = evidence ?? {};
+      if (state !== 'completed' && state !== 'retired') return { status: 'invalid_turn' };
+      return withOrphanedTurn(requestId, (turn) => recordTurnEvidence(turn, { state, turnId }));
     }
 
     // Management callers supply an already authorized original conversation.
@@ -453,6 +649,15 @@ export function openChannelInbox(file, { capacity = 1000, now = Date.now, leaseM
       claim,
       project,
       recheckLease,
+      readTurn,
+      beginTurn,
+      updateTurn,
+      finishTurn,
+      orphanedTurns,
+      readOrphanedTurn,
+      updateOrphanedTurn,
+      beginOrphanedRetirement,
+      finishOrphanedTurn,
       forgetRecord,
       renew: (messageKey, token) => withLease(messageKey, token, (row, lease) => {
         const checked = checkOrCancel(messageKey, readPolicy(), row);
@@ -468,6 +673,7 @@ export function openChannelInbox(file, { capacity = 1000, now = Date.now, leaseM
         return { status: 'released' };
       }),
       finish: (messageKey, token) => withLease(messageKey, token, (row, lease) => {
+        if (findTurn.get(row.seq)) return { status: 'unresolved_turn' };
         if (!lease.projected) return { status: 'not_projected' };
         completeTask(row.seq);
         return { status: 'completed' };
