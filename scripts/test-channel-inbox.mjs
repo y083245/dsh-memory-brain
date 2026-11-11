@@ -221,6 +221,59 @@ test('task recheck respects current allowlists and refuses stale private binding
   assert.deepEqual(fsInbox.recheckTask(group.event.messageKey), { status: 'not_pending' });
 });
 
+test('execution leases enforce cross-account dialogue order and fence expired workers after reopening', (t) => {
+  const f = fixture(t);
+  const firstEndpoint = privateEndpoint(feishu);
+  const nextEndpoint = privateEndpoint(telegram);
+  assert.equal(f.bindings.link(withRevision(f.bindings, firstEndpoint, nextEndpoint)).status, 'linked');
+  const first = f.bind(feishu);
+  const next = f.bind(telegram);
+  assert.equal(first.accept(message(feishu, 'evt_first', { messageId: 'om_first', endpoint: firstEndpoint })).status,
+    'durableAccepted');
+  const poll = next.startPolling();
+  assert.equal(poll.acceptBatch([message(telegram, '1', { endpoint: nextEndpoint }), message(telegram, '2')],
+    poll.readCheckpoint()).status, 'committed');
+  const [{ event: a }] = first.pending();
+  const [{ event: b }, { event: unrelated }] = next.pending();
+  assert.equal(next.claim(b.messageKey).status, 'out_of_order');
+  const claimed = first.claim(a.messageKey);
+  assert.equal(claimed.status, 'claimed');
+  assert.equal(first.complete(a.messageKey), false);
+  assert.equal(next.claim(unrelated.messageKey).status, 'claimed');
+  f.reopen();
+  const resumed = f.bind(feishu);
+  assert.equal(resumed.claim(a.messageKey).status, 'busy');
+  f.advance(claimed.expiresAt - a.occurredAt);
+  const replacement = resumed.claim(a.messageKey);
+  assert.equal(replacement.status, 'claimed');
+  assert.notEqual(replacement.token, claimed.token);
+  assert.equal(resumed.release(a.messageKey, claimed.token).status, 'stale_lease');
+  assert.equal(resumed.finish(a.messageKey, claimed.token).status, 'stale_lease');
+  assert.equal(resumed.renew(a.messageKey, replacement.token).status, 'renewed');
+  assert.equal(resumed.release(a.messageKey, replacement.token).status, 'released');
+  assert.equal(resumed.claim(a.messageKey).status, 'claimed');
+});
+
+test('claim discards stale bindings and revoked payloads while a missing policy is retryable', (t) => {
+  const f = fixture(t);
+  const endpoint = privateEndpoint(feishu);
+  assert.equal(f.bindings.link(withRevision(f.bindings, endpoint, privateEndpoint(telegram))).status, 'linked');
+  let current = policy(feishu);
+  const inbox = f.bind(feishu, () => current);
+  inbox.accept(message(feishu, 'evt_first', { messageId: 'om_first', endpoint }));
+  inbox.accept(message(feishu, 'evt_second', { messageId: 'om_second' }));
+  const [{ event: first }, { event: second }] = inbox.pending();
+  current = null;
+  assert.equal(inbox.claim(second.messageKey).status, 'policy_unavailable');
+  assert.equal(inbox.pending().length, 2);
+  current = { ...policy(feishu), allow: { private: [endpoint.actor.userId] } };
+  assert.equal(inbox.claim(second.messageKey).status, 'unauthorized');
+  const [confirmed] = withRevision(f.bindings, endpoint);
+  assert.equal(f.bindings.unlink(confirmed).status, 'unlinked');
+  assert.equal(inbox.claim(first.messageKey).status, 'binding_changed');
+  assert.deepEqual(inbox.pending(), []);
+});
+
 test('pending rows from the previous queue format do not inherit later private bindings', (t) => {
   const f = fixture(t);
   const endpoint = privateEndpoint(feishu);
@@ -244,6 +297,26 @@ test('pending rows from the previous queue format do not inherit later private b
   assert.equal(f.bindings.link(withRevision(f.bindings, endpoint, privateEndpoint(qq))).status, 'linked');
   assert.deepEqual(resumed.pending(), [legacy]);
   assert.deepEqual(resumed.recheckTask(normalized.messageKey), { status: 'binding_changed' });
+});
+
+test('migration assigns FIFO order to tasks persisted before execution leases existed', (t) => {
+  const f = fixture(t);
+  const inbox = f.bind(feishu);
+  inbox.accept(message(feishu, 'evt_legacy', { messageId: 'om_legacy' }));
+  inbox.accept(message(feishu, 'evt_current', { messageId: 'om_current' }));
+  const [{ event: first }, { event: next }] = inbox.pending();
+  const db = new DatabaseSync(f.file);
+  try {
+    db.prepare('UPDATE inbox_messages SET event = ? WHERE message_key = ?').run(JSON.stringify(first), first.messageKey);
+    db.exec('DROP INDEX inbox_dialogue_order; ALTER TABLE inbox_messages DROP COLUMN dialogue_id; DROP TABLE inbox_execution;');
+  } finally { db.close(); }
+  f.reopen();
+  const resumed = f.bind(feishu);
+  assert.equal(resumed.claim(next.messageKey).status, 'out_of_order');
+  const { status, token } = resumed.claim(first.messageKey);
+  assert.equal(status, 'claimed');
+  assert.equal(resumed.finish(first.messageKey, token).status, 'not_projected');
+  assert.equal(resumed.release(first.messageKey, token).status, 'released');
 });
 
 test('Feishu retries recover one normalized task after reopening the database', (t) => {

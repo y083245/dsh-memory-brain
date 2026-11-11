@@ -18,6 +18,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { channelArchiveDirectory, createChannelArchive } from './core/channel-archive.mjs';
 
 export const CATEGORIES = Object.freeze({
   trait: '性格/习惯/喜好',
@@ -308,6 +309,13 @@ function keyDir(key) {
   if (!m) throw new Error(`会话 key 不合法：${key}`);
   return `${m[1]}_${m[2]}`;
 }
+const isChannelKey = (key) => typeof key === 'string' && key.startsWith('c1_');
+
+function archiveSource(row) {
+  if (!row.recordId) return {};
+  const { recordId, conversationKey, personKey, messageKey, replyToMessageKey } = row;
+  return { recordId, conversationKey, personKey, messageKey, replyToMessageKey };
+}
 function writeFileAtomic(file, data) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.tmp-${process.pid}-${Date.now()}`;
@@ -366,9 +374,14 @@ function lineMetas(buf) {
 export function createLongMemory({ stateDir, redact = (s) => s, log = () => {}, onPromiseClosed = null, decayOf = null }) {
   const PEOPLE_FILE = path.join(stateDir, 'people.json');
   const ARCHIVE_DIR = path.join(stateDir, 'archive');
+  // Existing reports and older releases scan the QQ archive directly.
+  const CHANNEL_ARCHIVE_DIR = path.join(stateDir, 'channel-archive');
   // RAG_PATCH（P2）：遗忘请求文件（memory-rag 起来后自己消费）。
   const FORGET_DIR = path.join(stateDir, 'forget-requests');
   fs.mkdirSync(ARCHIVE_DIR, { recursive: true });
+  const channelArchive = createChannelArchive(CHANNEL_ARCHIVE_DIR, redact);
+  const archiveRelative = (key, file) => path.relative(isChannelKey(key) ? CHANNEL_ARCHIVE_DIR : ARCHIVE_DIR, file)
+    .split(path.sep).join('/');
   // DECAY_PATCH：只在真的传了函数时才启用按牢固度排序，避免把 null / 别的类型当回调。
   const decayFn = typeof decayOf === 'function' ? decayOf : null;
 
@@ -830,7 +843,7 @@ export function createLongMemory({ stateDir, redact = (s) => s, log = () => {}, 
     const rows = [];
     for (const f of archiveFiles(key)) {
       let lines = [];
-      try { lines = fs.readFileSync(f, 'utf8').split('\n'); } catch { continue; }
+      try { lines = readArchiveLines(key, f); } catch { continue; }
       for (const line of lines) {
         if (!line) continue;
         let row;
@@ -849,6 +862,7 @@ export function createLongMemory({ stateDir, redact = (s) => s, log = () => {}, 
           name: String(row.name ?? ''),
           text: String(row.text ?? ''),
           msgId: row.msgId == null ? null : String(row.msgId),
+          ...(isChannelKey(key) ? archiveSource(row) : {}),
           _t: t
         });
       }
@@ -871,18 +885,17 @@ export function createLongMemory({ stateDir, redact = (s) => s, log = () => {}, 
   function rowsAt(key, refs) {
     const out = [];
     try {
-      if (!/^(group|private):\d+$/.test(String(key ?? ''))) return out;
+      if (!isChannelKey(key) && !/^(group|private):\d+$/.test(String(key ?? ''))) return out;
       if (!Array.isArray(refs) || !refs.length) return out;
-      const kd = keyDir(key);
-      const monthRe = /^\d{4}-\d{2}\.jsonl$/;
+      const kd = isChannelKey(key) ? channelArchiveDirectory(key) : keyDir(key);
       const ordered = archiveFiles(key); // 月份升序
-      const relOf = new Map(ordered.map((f) => [path.relative(ARCHIVE_DIR, f).split(path.sep).join('/'), f]));
+      const relOf = new Map(ordered.map((f) => [archiveRelative(key, f), f]));
       const cache = new Map(); // 同一文件本次调用只读一次
       const readLines = (rel) => {
         if (!cache.has(rel)) {
           const file = relOf.get(rel);
           let lines = [];
-          try { if (file) lines = fs.readFileSync(file, 'utf8').split('\n'); } catch { lines = []; }
+          try { if (file) lines = readArchiveLines(key, file); } catch { lines = []; }
           cache.set(rel, lines);
         }
         return cache.get(rel);
@@ -900,7 +913,7 @@ export function createLongMemory({ stateDir, redact = (s) => s, log = () => {}, 
         // 路径必须是「这个会话目录 + YYYY-MM.jsonl」，且文件真的存在
         const okRel = (rel) => {
           const parts = rel.split('/');
-          return parts.length === 2 && parts[0] === kd && monthRe.test(parts[1]) && relOf.has(rel);
+          return parts.length === 2 && parts[0] === kd && relOf.has(rel);
         };
         if (!okRel(relStart) || !okRel(relEnd)) continue;
         if (!Number.isInteger(lineStart) || !Number.isInteger(lineEnd) || lineStart < 1 || lineEnd < 1) continue;
@@ -909,7 +922,7 @@ export function createLongMemory({ stateDir, redact = (s) => s, log = () => {}, 
         if (iStart < 0 || iEnd < 0 || iStart > iEnd) continue;
         if (iStart === iEnd && lineStart > lineEnd) continue;
         for (let fi = iStart; fi <= iEnd && out.length < MAX_ROWS; fi += 1) {
-          const rel = path.relative(ARCHIVE_DIR, ordered[fi]).split(path.sep).join('/');
+          const rel = archiveRelative(key, ordered[fi]);
           const lines = readLines(rel);
           const from = fi === iStart ? lineStart : 1;
           const to = fi === iEnd ? lineEnd : lines.length;
@@ -929,6 +942,7 @@ export function createLongMemory({ stateDir, redact = (s) => s, log = () => {}, 
               name: String(row.name ?? ''),
               text: String(row.text ?? ''),
               msgId: row.msgId == null ? null : String(row.msgId),
+              ...(isChannelKey(key) ? archiveSource(row) : {}),
               file: rel,
               line: ln
             });
@@ -957,10 +971,15 @@ export function createLongMemory({ stateDir, redact = (s) => s, log = () => {}, 
   }
 
   function archiveFiles(key) {
+    if (isChannelKey(key)) return channelArchive.files(key);
     const dir = path.join(ARCHIVE_DIR, keyDir(key));
     let names = [];
     try { names = fs.readdirSync(dir).filter((n) => /^\d{4}-\d{2}\.jsonl$/.test(n)).sort(); } catch {}
     return names.map((n) => path.join(dir, n));
+  }
+
+  function readArchiveLines(key, file) {
+    return isChannelKey(key) ? channelArchive.readLines(key, file) : fs.readFileSync(file, 'utf8').split('\n');
   }
 
   function hasArchive(key) { return archiveFiles(key).length > 0; }
@@ -986,8 +1005,8 @@ export function createLongMemory({ stateDir, redact = (s) => s, log = () => {}, 
     for (const f of archiveFiles(key)) {
       // debug.hits / memory-rag / rowsAt 的引用口径统一是 POSIX 风格的相对路径；
       // Windows 的 path.relative 会给反斜杠，不归一的话 reviewHistoryHits 永远找不到行。
-      const rel = path.relative(ARCHIVE_DIR, f).split(path.sep).join('/');
-      const lines = fs.readFileSync(f, 'utf8').split('\n');
+      const rel = archiveRelative(key, f);
+      const lines = readArchiveLines(key, f);
       for (let n = 0; n < lines.length; n += 1) {
         if (!lines[n]) continue;
         try {
@@ -1075,7 +1094,7 @@ export function createLongMemory({ stateDir, redact = (s) => s, log = () => {}, 
     let first = null;
     for (const f of files) {
       let lines = [];
-      try { lines = fs.readFileSync(f, 'utf8').split('\n'); } catch { continue; }
+      try { lines = readArchiveLines(key, f); } catch { continue; }
       for (const line of lines) {
         if (!line) continue;
         let row;
@@ -1105,9 +1124,9 @@ export function createLongMemory({ stateDir, redact = (s) => s, log = () => {}, 
 
     const rows = [];
     for (const f of archiveFiles(key)) {
-      const rel = path.relative(ARCHIVE_DIR, f).split(path.sep).join('/');
+      const rel = archiveRelative(key, f);
       let lines = [];
-      try { lines = fs.readFileSync(f, 'utf8').split('\n'); } catch { continue; }
+      try { lines = readArchiveLines(key, f); } catch { continue; }
       for (let i = 0; i < lines.length; i += 1) {
         if (!lines[i]) continue;
         let row;
@@ -1124,7 +1143,8 @@ export function createLongMemory({ stateDir, redact = (s) => s, log = () => {}, 
           dir: row.dir,
           userId: row.userId == null ? null : String(row.userId),
           name: String(row.name ?? ''),
-          text: clipMessageText(row.text)
+          text: clipMessageText(row.text),
+          ...(isChannelKey(key) ? archiveSource(row) : {}),
         });
       }
     }
@@ -1148,7 +1168,8 @@ export function createLongMemory({ stateDir, redact = (s) => s, log = () => {}, 
    * 返回 { matched, deleted, skipped }；dryRun 只报 matched 不写任何东西。
    */
   function deleteArchiveRows(key, { rows = null, from = '', to = '', dryRun = false } = {}) {
-    const files = archiveFiles(key); // key 不合法时这里就会抛
+    keyDir(key); // QQ compatibility. Channel deletion coordinates with the inbox by record ID.
+    const files = archiveFiles(key);
     if (!files.length) throw new Error(`这个会话还没有存档：${key}`);
     const byRows = Array.isArray(rows) && rows.length > 0;
     const fromD = parseDayArg(from, 'from');
@@ -1279,7 +1300,7 @@ export function createLongMemory({ stateDir, redact = (s) => s, log = () => {}, 
   return {
     CATEGORIES,
     touch, remember, update, forget, personView, listPeople, renderFor,
-    archive, hasArchive, search, archiveStats, archiveKeys,
+    archive, channelArchive, hasArchive, search, archiveStats, archiveKeys,
     // RAG_PATCH（P2）：控制台的存档浏览 / 删除，以及给状态页看的遗忘请求队列
     listArchiveRows, deleteArchiveRows, pendingForgetKeys,
     // LIFE_LOOP_PATCH：生活回路要用的查询（visibleTo 是 visible 的公开别名）
