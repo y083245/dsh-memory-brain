@@ -44,6 +44,11 @@ function fixture({ roster = [{ id: CHANNEL_DSH_PRESET }], rows = plugins, select
 test('channel preset and global guard are installed together in the bundle', () => {
   assert.ok(manifest.dsh.bundle.patch.includes('./presets/channel-chat-v2.patch.yml'));
   assert.ok(patch[0].insert.some(row => row.name === 'qq-agent-presets/channel-tool-guard-global.mjs'));
+  assert.deepEqual(plugins.find(row => row.id === 'tool-presentation'), {
+    id: 'tool-presentation',
+    name: '@deepseek-ai/dsh-agent-tool-presentation',
+    config: { mode: 'native' },
+  });
 });
 
 test('accepts an active exact preset and confirms the selected preset of the session', async () => {
@@ -60,6 +65,7 @@ test('rejects unavailable, broken, modified, or reselected presets', async () =>
     { roster: [{ id: CHANNEL_DSH_PRESET }, { id: CHANNEL_DSH_PRESET }] },
     { rows: plugins.filter(row => row !== guard) },
     { rows: plugins.map(row => row === guard ? { ...row, disabled: true } : row) },
+    { rows: plugins.filter(row => row.id !== 'tool-presentation') },
     { rows: [...plugins, { id: 'untrusted', name: 'unknown-tool-plugin' }] },
     { selected: 'qq-chat-v2' },
   ];
@@ -93,13 +99,12 @@ test('scoped guard suppresses inherited schemas and denies even tool calls witho
   const calls = [];
   let check;
   const tools = {
-    presentAs(value) { calls.push(value); },
     restrict(value) { calls.push(value); },
     guard(callback) { check = callback; return () => {}; },
   };
   assert.throws(() => applyScoped({ tools }), /global channel tool guard/);
   applyScoped({ tools, channelToolGuard: {} });
-  assert.deepEqual(calls, ['native', { allow: [] }]);
+  assert.deepEqual(calls, [{ allow: [] }]);
   assert.equal(typeof check({ name: 'channel_send_message' }), 'string');
   assert.equal(typeof check({ agent: { id: 'ordinary-session' }, name: 'read' }), 'string');
 });

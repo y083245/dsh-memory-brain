@@ -9,6 +9,10 @@
         description: 供桥接创建的受限仿真会话使用，模型输出只供内部处理。
         order: 12
         plugins:
+          - id: tool-presentation
+            name: '@deepseek-ai/dsh-agent-tool-presentation'
+            config:
+              mode: native
           - id: channel-tool-guard
             name: qq-agent-presets/channel-tool-guard.mjs
           - id: persona
