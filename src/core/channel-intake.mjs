@@ -1,11 +1,7 @@
 import {
   encodeConversationKey, encodeMessageKey, encodePersonKey,
-  readAccountRef, readConversationRef, readMessageRef, readPersonRef,
+  readAccountRef, readConversationRef, readMessageRef, readPersonRef, sameAccount,
 } from './identity.mjs';
-
-function sameAccount(a, b) {
-  return a.platform === b.platform && a.accountId === b.accountId && a.tenantId === b.tenantId;
-}
 
 function readIds(ids = [], validate) {
   if (!Array.isArray(ids)) throw new TypeError('Invalid channel access list');
@@ -33,7 +29,7 @@ function readPolicy(channel) {
   };
   return {
     account, enabled, groupPolicy, observationVerified,
-    allow: readLists(allow, ['private', 'groups']),
+    allow: readLists(allow, ['private', 'groups', 'senders']),
     deny: readLists(deny, ['private', 'groups', 'senders']),
     admins: readIds(admins, validatePerson),
   };
@@ -45,7 +41,8 @@ function isAuthorized({ account, enabled, allow, deny }, conversation, actor) {
   if (actor && (!sameAccount(account, actor) || deny.senders.has(actor.userId))) return false;
   if (account.platform === 'telegram' && actor?.userId === account.accountId) return false;
   if (conversation.chatType === 'group') {
-    return !deny.groups.has(conversation.chatId) && allow.groups.has(conversation.chatId);
+    return !deny.groups.has(conversation.chatId) && allow.groups.has(conversation.chatId) &&
+      (!actor || allow.senders.has(actor.userId));
   }
   if (!actor || (account.platform === 'telegram' && actor.userId !== conversation.chatId)) return false;
   return !deny.private.has(actor.userId) && allow.private.has(actor.userId);

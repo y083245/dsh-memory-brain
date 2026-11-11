@@ -15,7 +15,7 @@ const event = {
   actor, conversation: group, message, text: 'fixture', occurredAt: 1794268800000,
   deliveryRef: '0', trigger: 'directed', kind: 'message', senderType: 'human',
 };
-const channel = { ...telegram, enabled: true, allow: { groups: ['-100123'], private: ['42'] } };
+const channel = { ...telegram, enabled: true, allow: { groups: ['-100123'], private: ['42'], senders: ['42'] } };
 
 test('versioned identity keys match the shared protocol vectors', () => {
   const vectors = JSON.parse(readFileSync(new URL('./fixtures/channel-identity-vectors.json', import.meta.url), 'utf8'));
@@ -105,6 +105,20 @@ test('malformed channel settings cannot bypass deny rules or authorize a send', 
     assert.deepEqual(intake.routeChannelMessage(invalidChannel, event), { decision: 'drop', reason: 'invalid_policy' });
     assert.equal(intake.resolveTextTarget(invalidChannel, group), null);
   }
+});
+
+test('group admission and source-bound sends require both the group and sender allowlists', () => {
+  for (const allow of [{ groups: [group.chatId] }, { groups: [group.chatId], senders: [] },
+    { groups: [group.chatId], senders: ['43'] }, { groups: [], senders: ['42'] }]) {
+    const revoked = { ...channel, allow, admins: ['42'], groupPolicy: 'observe', observationVerified: true };
+    assert.deepEqual(intake.routeChannelMessage(revoked, event), { decision: 'drop', reason: 'unauthorized' });
+    assert.deepEqual(intake.routeChannelMessage(revoked, { ...event, trigger: 'ambient' }),
+      { decision: 'drop', reason: 'unauthorized' });
+    assert.equal(intake.resolveTextTarget(revoked, group, { source: event, replyTo: message }), null);
+  }
+  assert.deepEqual(intake.routeChannelMessage({ ...channel, allow: { ...channel.allow, senders: [42] } }, event),
+    { decision: 'drop', reason: 'invalid_policy' });
+  assert.ok(intake.resolveTextTarget(channel, group));
 });
 
 test('group observation requires verified permission and a nickname cannot grant admin access', () => {

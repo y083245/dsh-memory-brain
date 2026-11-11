@@ -9,22 +9,37 @@ import { openChannelInbox } from '../src/core/inbox-store.mjs';
 
 const telegram = { platform: 'telegram', accountId: '41' };
 const feishu = { platform: 'feishu', accountId: 'cli_fixture', tenantId: 'tenant_a' };
+const qq = { platform: 'qq', accountId: '41' };
 const day = 24 * 60 * 60 * 1000;
 
 function policy(account) {
   const chatId = account.platform === 'feishu' ? 'oc_fixture' : '-100123';
-  return { ...account, enabled: true, allow: { groups: [chatId] } };
+  const userId = account.platform === 'feishu' ? 'ou_fixture' : '42';
+  return { ...account, enabled: true, allow: { groups: [chatId], senders: [userId], private: [userId] } };
 }
 
-function message(account, deliveryRef, { messageId = deliveryRef, threadId = null, text = 'fixture text' } = {}) {
+function message(account, deliveryRef, { messageId = deliveryRef, threadId = null, text = 'fixture text',
+  endpoint } = {}) {
   const isFeishu = account.platform === 'feishu';
   const chatId = isFeishu ? 'oc_fixture' : '-100123';
-  const conversation = { ...account, chatType: 'group', chatId, threadId };
+  const conversation = endpoint?.conversation ?? { ...account, chatType: 'group', chatId, threadId };
   return {
     kind: 'message', senderType: 'human', trigger: 'directed', deliveryRef, occurredAt: 1794268800000,
-    actor: { ...account, userId: isFeishu ? 'ou_fixture' : '42' },
-    conversation, message: { conversation, platformChatId: chatId, messageId }, text,
+    actor: endpoint?.actor ?? { ...account, userId: isFeishu ? 'ou_fixture' : '42' },
+    conversation, message: { conversation, platformChatId: conversation.chatId, messageId }, text,
   };
+}
+
+function privateEndpoint(account) {
+  const isFeishu = account.platform === 'feishu';
+  return {
+    actor: { ...account, userId: isFeishu ? 'ou_fixture' : '42' },
+    conversation: { ...account, chatType: 'private', chatId: isFeishu ? 'oc_direct' : '42' },
+  };
+}
+
+function withRevision(bindings, ...endpoints) {
+  return endpoints.map((endpoint) => ({ ...endpoint, bindingRevision: bindings.resolve(endpoint).bindingRevision }));
 }
 
 function fixture(t, capacity = 4) {
@@ -45,9 +60,191 @@ function fixture(t, capacity = 4) {
   return {
     file, reopen,
     bind: (account, getPolicy = () => policy(account)) => store.bind(account, getPolicy),
+    get bindings() { return store.privateBindings; },
     advance: (elapsed) => { time += elapsed; },
   };
 }
+
+test('confirmed private endpoints share a durable identity and dialogue across QQ, Feishu and Telegram', (t) => {
+  const f = fixture(t);
+  const endpoints = [qq, feishu, telegram].map(privateEndpoint);
+  const [qqLocal, feishuLocal, telegramLocal] = endpoints.map((endpoint) => f.bindings.resolve(endpoint));
+  assert.notEqual(qqLocal.principalId, telegramLocal.principalId);
+  assert.notEqual(qqLocal.dialogueId, telegramLocal.dialogueId);
+  assert.notEqual(feishuLocal.principalId, telegramLocal.principalId);
+
+  assert.equal(f.bindings.link(withRevision(f.bindings, ...endpoints)).status, 'linked');
+  const shared = f.bindings.resolve(endpoints[0]);
+  assert.notEqual(shared.bindingRevision, null);
+  assert.notEqual(shared.principalId, qqLocal.principalId);
+  f.reopen();
+  for (const endpoint of endpoints) assert.deepEqual(f.bindings.resolve(endpoint), shared);
+  for (const account of [{ ...feishu, tenantId: 'tenant_b' }, { ...feishu, accountId: 'cli_other' },
+    { ...telegram, accountId: '43' }]) {
+    const isolated = f.bindings.resolve(privateEndpoint(account));
+    assert.equal(isolated.bindingRevision, null);
+    assert.notEqual(isolated.principalId, shared.principalId);
+    assert.notEqual(isolated.dialogueId, shared.dialogueId);
+  }
+});
+
+test('adding or unlinking an endpoint changes every affected revision and rejects stale management requests', (t) => {
+  const { bindings } = fixture(t);
+  const [first, second, third] = [qq, feishu, telegram].map(privateEndpoint);
+  const original = withRevision(bindings, first, second);
+  assert.equal(bindings.link(original).status, 'linked');
+  const shared = bindings.resolve(first);
+  const [oldFirst] = withRevision(bindings, first);
+  assert.equal(bindings.link(withRevision(bindings, second, third)).status, 'linked');
+  const expanded = bindings.resolve(first);
+  assert.equal(expanded.principalId, shared.principalId);
+  assert.equal(expanded.dialogueId, shared.dialogueId);
+  assert.notEqual(expanded.bindingRevision, shared.bindingRevision);
+  assert.equal(bindings.unlink(oldFirst).status, 'stale_binding');
+  const [confirmedFirst] = withRevision(bindings, first);
+  assert.equal(bindings.unlink(confirmedFirst).status, 'unlinked');
+  assert.notEqual(bindings.resolve(first).principalId, shared.principalId);
+  assert.notEqual(bindings.resolve(first).bindingRevision, null);
+  assert.notEqual(bindings.resolve(second).bindingRevision, expanded.bindingRevision);
+  assert.equal(bindings.resolve(third).principalId, shared.principalId);
+  assert.equal(bindings.link(original).status, 'stale_binding');
+});
+
+test('binding rejects conflicting person, private address and existing group assignments', (t) => {
+  const { bindings } = fixture(t);
+  const [first, second, third] = [qq, feishu, telegram].map(privateEndpoint);
+  const fourth = privateEndpoint({ ...feishu, tenantId: 'tenant_b' });
+  assert.equal(bindings.link(withRevision(bindings, first, second)).status, 'linked');
+  assert.equal(bindings.link(withRevision(bindings, third, fourth)).status, 'linked');
+  const firstBinding = bindings.resolve(first);
+  const thirdBinding = bindings.resolve(third);
+  assert.equal(bindings.link(withRevision(bindings, first, third)).status, 'binding_conflict');
+
+  const otherActor = { ...second, actor: { ...second.actor, userId: 'ou_other' } };
+  const otherAddress = { ...second, conversation: { ...second.conversation, chatId: 'oc_other' } };
+  for (const endpoint of [otherActor, otherAddress]) {
+    assert.equal(bindings.link(withRevision(bindings, first, endpoint)).status, 'binding_conflict');
+    assert.notEqual(bindings.resolve(endpoint).principalId, firstBinding.principalId);
+  }
+  assert.deepEqual(bindings.resolve(first), firstBinding);
+  assert.deepEqual(bindings.resolve(third), thirdBinding);
+  assert.throws(() => bindings.resolve({ ...third, conversation: { ...third.conversation, chatId: '43' } }), TypeError);
+  assert.throws(() => bindings.resolve(message(telegram, '1')), TypeError);
+  assert.throws(() => bindings.resolve({ ...second, actor: { ...second.actor, tenantId: 'tenant_b' } }), TypeError);
+});
+
+test('a failed binding expansion preserves the existing group revision and endpoint mappings', (t) => {
+  const f = fixture(t);
+  const [first, second, third] = [qq, feishu, telegram].map(privateEndpoint);
+  assert.equal(f.bindings.link(withRevision(f.bindings, first, second)).status, 'linked');
+  const shared = f.bindings.resolve(first);
+  const isolated = f.bindings.resolve(third);
+  const db = new DatabaseSync(f.file);
+  try {
+    db.exec(`
+      CREATE TRIGGER abort_binding_expansion BEFORE INSERT ON channel_private_bindings
+      WHEN NOT EXISTS (SELECT 1 FROM channel_private_bindings WHERE conversation_key = NEW.conversation_key)
+      BEGIN SELECT RAISE(ABORT, 'injected failure'); END;
+    `);
+    const confirmed = withRevision(f.bindings, second, third);
+    assert.throws(() => f.bindings.link(confirmed), /injected failure/);
+    assert.deepEqual(f.bindings.resolve(first), shared);
+    assert.deepEqual(f.bindings.resolve(second), shared);
+    assert.deepEqual(f.bindings.resolve(third), isolated);
+    db.exec('DROP TRIGGER abort_binding_expansion');
+    assert.equal(f.bindings.link(confirmed).status, 'linked');
+  } finally {
+    db.close();
+  }
+});
+
+test('linked private tasks keep distinct IDs and original targets across restart and redelivery', (t) => {
+  const f = fixture(t);
+  const fsEndpoint = privateEndpoint(feishu);
+  const tgEndpoint = privateEndpoint(telegram);
+  assert.equal(f.bindings.link(withRevision(f.bindings, privateEndpoint(qq), fsEndpoint, tgEndpoint)).status, 'linked');
+  const shared = f.bindings.resolve(privateEndpoint(qq));
+  const fsEvent = message(feishu, 'evt_linked', { messageId: 'om_linked', endpoint: fsEndpoint });
+  const tgEvent = message(telegram, '1', { endpoint: tgEndpoint });
+  const fsInbox = f.bind(feishu);
+  const poller = f.bind(telegram).startPolling();
+  assert.equal(fsInbox.accept(fsEvent).status, 'durableAccepted');
+  assert.equal(poller.acceptBatch([tgEvent], poller.readCheckpoint()).results[0].status, 'durableAccepted');
+  const [fsTask] = fsInbox.pending();
+  const [tgTask] = f.bind(telegram).pending();
+  for (const task of [fsTask, tgTask]) {
+    assert.equal(task.principalId, shared.principalId);
+    assert.equal(task.dialogueId, shared.dialogueId);
+    assert.equal(task.bindingRevision, shared.bindingRevision);
+    assert.equal(typeof task.taskId, 'string');
+    assert.ok(task.taskId.length > 0);
+  }
+  assert.notEqual(fsTask.taskId, tgTask.taskId);
+  assert.equal(fsTask.event.conversation.chatId, 'oc_direct');
+  assert.equal(tgTask.event.conversation.chatId, '42');
+
+  f.reopen();
+  const reopened = f.bind(feishu);
+  assert.equal(reopened.accept({ ...fsEvent, deliveryRef: 'evt_linked_retry' }).status, 'duplicate');
+  assert.deepEqual(reopened.pending(), [fsTask]);
+  assert.deepEqual(f.bind(telegram).pending(), [tgTask]);
+  assert.equal(reopened.recheckTask(fsTask.event.messageKey).task.taskId, fsTask.taskId);
+  assert.deepEqual(f.bind(telegram).recheckTask(fsTask.event.messageKey), { status: 'not_pending' });
+});
+
+test('task recheck respects current allowlists and refuses stale private binding snapshots', (t) => {
+  const f = fixture(t);
+  const fsEndpoint = privateEndpoint(feishu);
+  const tgEndpoint = privateEndpoint(telegram);
+  assert.equal(f.bindings.link(withRevision(f.bindings, fsEndpoint, tgEndpoint)).status, 'linked');
+  let current = policy(feishu);
+  const fsInbox = f.bind(feishu, () => current);
+  const privateEvent = message(feishu, 'evt_private', { messageId: 'om_private', endpoint: fsEndpoint });
+  const groupEvent = message(feishu, 'evt_group', { messageId: 'om_group' });
+  assert.equal(fsInbox.accept(privateEvent).status, 'durableAccepted');
+  assert.equal(fsInbox.accept(groupEvent).status, 'durableAccepted');
+  const [direct, group] = fsInbox.pending();
+  assert.notEqual(group.principalId, direct.principalId);
+  assert.notEqual(group.dialogueId, direct.dialogueId);
+  assert.equal(fsInbox.recheckTask(direct.event.messageKey).status, 'ready');
+  current = { ...current, allow: { ...current.allow, senders: [], private: [] } };
+  assert.deepEqual(fsInbox.recheckTask(group.event.messageKey), { status: 'unauthorized' });
+  assert.deepEqual(fsInbox.recheckTask(direct.event.messageKey), { status: 'unauthorized' });
+  assert.equal(fsInbox.complete(group.event.messageKey), true);
+  assert.equal(fsInbox.accept(message(feishu, 'evt_revoked', {
+    messageId: 'om_revoked', endpoint: fsEndpoint,
+  })).status, 'durableFiltered');
+  current = policy(feishu);
+  const [confirmed] = withRevision(f.bindings, tgEndpoint);
+  assert.equal(f.bindings.unlink(confirmed).status, 'unlinked');
+  assert.deepEqual(fsInbox.recheckTask(direct.event.messageKey), { status: 'binding_changed' });
+  assert.deepEqual(fsInbox.recheckTask(group.event.messageKey), { status: 'not_pending' });
+});
+
+test('pending rows from the previous queue format do not inherit later private bindings', (t) => {
+  const f = fixture(t);
+  const endpoint = privateEndpoint(feishu);
+  const event = message(feishu, 'evt_legacy', { messageId: 'om_legacy', endpoint });
+  const inbox = f.bind(feishu);
+  assert.equal(inbox.accept(event).status, 'durableAccepted');
+  const [{ event: normalized }] = inbox.pending();
+  const db = new DatabaseSync(f.file);
+  try {
+    db.prepare('UPDATE inbox_messages SET event = ? WHERE message_key = ?')
+      .run(JSON.stringify(normalized), normalized.messageKey);
+  } finally {
+    db.close();
+  }
+  f.reopen();
+  const resumed = f.bind(feishu);
+  const [legacy] = resumed.pending();
+  assert.ok(legacy.taskId);
+  assert.equal(legacy.bindingRevision, null);
+  assert.equal(resumed.recheckTask(normalized.messageKey).status, 'ready');
+  assert.equal(f.bindings.link(withRevision(f.bindings, endpoint, privateEndpoint(qq))).status, 'linked');
+  assert.deepEqual(resumed.pending(), [legacy]);
+  assert.deepEqual(resumed.recheckTask(normalized.messageKey), { status: 'binding_changed' });
+});
 
 test('Feishu retries recover one normalized task after reopening the database', (t) => {
   const f = fixture(t);
@@ -85,7 +282,10 @@ test('identical delivery and message IDs are isolated by account, tenant and Tel
       message(account, '3', { messageId: '9', threadId: '7' }),
     ], poller.readCheckpoint());
     assert.deepEqual(result.results.map(({ status }) => status), ['durableAccepted', 'durableAccepted', 'duplicate']);
-    assert.deepEqual(inbox.pending().map(({ event }) => event.conversation.threadId), ['7', '8']);
+    const [first, second] = inbox.pending();
+    assert.deepEqual([first.event.conversation.threadId, second.event.conversation.threadId], ['7', '8']);
+    assert.notEqual(first.dialogueId, second.dialogueId);
+    assert.notEqual(first.taskId, second.taskId);
   }
 });
 
@@ -93,7 +293,7 @@ test('filtered deliveries are durable and never persist their bodies', (t) => {
   const f = fixture(t);
   const blockedText = 'blocked-body-fixture-6a3';
   const event = message(feishu, 'evt_filtered', { messageId: 'om_filtered', text: blockedText });
-  const blocked = f.bind(feishu, () => ({ ...policy(feishu), allow: {} }));
+  const blocked = f.bind(feishu, () => ({ ...policy(feishu), allow: { groups: ['oc_fixture'] } }));
   assert.deepEqual(blocked.accept(event), { status: 'durableFiltered', reason: 'unauthorized' });
   assert.deepEqual(blocked.pending(), []);
   assert.equal(readFileSync(f.file).includes(blockedText), false);

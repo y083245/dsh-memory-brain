@@ -31,6 +31,10 @@ export function readAccountRef({ platform, accountId, tenantId = null } = {}) {
   return { platform, accountId, tenantId };
 }
 
+export function sameAccount(a, b) {
+  return a.platform === b.platform && a.accountId === b.accountId && a.tenantId === b.tenantId;
+}
+
 function requireChatId({ platform, chatType }, chatId, field) {
   if (platform === 'feishu') return requireId(chatId, /^oc_[A-Za-z0-9_-]{1,125}$/, field);
   if (platform === 'qq') return numericId(chatId, field);

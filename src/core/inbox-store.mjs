@@ -1,5 +1,7 @@
+import { createHash } from 'node:crypto';
 import { closeSync, openSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
+import { createPrivateBindings, isolatedMapping, PRIVATE_BINDING_SCHEMA } from './channel-bindings.mjs';
 import { routeChannelMessage, validDeliveryRef } from './channel-intake.mjs';
 import { readAccountRef } from './identity.mjs';
 
@@ -64,6 +66,19 @@ function orderedTelegramBatch(events, offset) {
   return true;
 }
 
+function taskPayload(event, mapping) {
+  const taskId = `task_${createHash('sha256').update(event.messageKey).digest('hex')}`;
+  return { taskId, ...mapping, event };
+}
+
+function readTask({ decision, event: stored }) {
+  const payload = JSON.parse(stored);
+  // Before mapping was introduced, the payload was the normalized event alone.
+  // Those rows were admitted in their original scope even if now bound.
+  const task = Object.hasOwn(payload, 'event') ? payload : taskPayload(payload, isolatedMapping(payload));
+  return { ...task, decision };
+}
+
 // The caller provides a trusted file path in its private state directory (with
 // restricted ACLs on Windows). Neither transports nor user input choose the path.
 export function openChannelInbox(file, { capacity = 1000, now = Date.now } = {}) {
@@ -79,6 +94,7 @@ export function openChannelInbox(file, { capacity = 1000, now = Date.now } = {})
   try {
     db.exec('PRAGMA journal_mode = DELETE; PRAGMA synchronous = EXTRA; PRAGMA secure_delete = ON;');
     db.exec(SCHEMA);
+    db.exec(PRIVATE_BINDING_SCHEMA);
   } catch (error) {
     db.close();
     throw error;
@@ -104,6 +120,9 @@ export function openChannelInbox(file, { capacity = 1000, now = Date.now } = {})
   );
   const listPending = db.prepare(
     'SELECT decision, event FROM inbox_messages WHERE scope = ? AND event IS NOT NULL ORDER BY seq LIMIT ?',
+  );
+  const findPending = db.prepare(
+    'SELECT decision, event FROM inbox_messages WHERE scope = ? AND message_key = ? AND event IS NOT NULL',
   );
   const clearPayload = db.prepare('UPDATE inbox_messages SET event = NULL WHERE scope = ? AND message_key = ? AND event IS NOT NULL');
   const advanceGeneration = db.prepare(`
@@ -135,6 +154,13 @@ export function openChannelInbox(file, { capacity = 1000, now = Date.now } = {})
       if (error.code !== 'ERR_SQLITE_ERROR') throw error;
       return retry('storage_unavailable');
     }
+  }
+
+  const privateBindings = createPrivateBindings(db, transact);
+
+  function mappingFor(event) {
+    const { chatType, threadId } = event.conversation;
+    return chatType === 'private' && threadId === null ? privateBindings.resolve(event) : isolatedMapping(event);
   }
 
   function bind(account, getPolicy) {
@@ -170,7 +196,8 @@ export function openChannelInbox(file, { capacity = 1000, now = Date.now } = {})
         return { status: 'duplicate' };
       }
       if (countPending.get(scope).count >= capacity) return retry('queue_full');
-      saveMessage.run(scope, businessKey, event.messageKey, decision, JSON.stringify(event));
+      const task = taskPayload(event, mappingFor(event));
+      saveMessage.run(scope, businessKey, event.messageKey, decision, JSON.stringify(task));
       saveDelivery.run(scope, deliveryRef, receivedAt, 'accepted');
       return { status: 'durableAccepted' };
     }
@@ -182,6 +209,23 @@ export function openChannelInbox(file, { capacity = 1000, now = Date.now } = {})
         expire.run(receivedAt - DELIVERY_RETENTION, DELIVERY_PRUNE_LIMIT);
         return record(event, policy, receivedAt);
       });
+    }
+
+    function recheckTask(messageKey) {
+      const policy = readPolicy();
+      const row = findPending.get(scope, messageKey);
+      if (!row) return { status: 'not_pending' };
+      if (!policy) return { status: 'policy_unavailable' };
+      const task = readTask(row);
+      const { decision, reason, event, isAdmin } = routeChannelMessage(policy, task.event);
+      if (reason === 'invalid_policy') return { status: 'policy_unavailable' };
+      if (decision === 'drop' || event.messageKey !== messageKey) return { status: 'unauthorized' };
+
+      const { principalId, dialogueId, bindingRevision } = mappingFor(event);
+      if (principalId !== task.principalId || dialogueId !== task.dialogueId || bindingRevision !== task.bindingRevision) {
+        return { status: 'binding_changed' };
+      }
+      return { status: 'ready', task: { ...task, decision, event, isAdmin } };
     }
 
     function startPolling() {
@@ -232,15 +276,16 @@ export function openChannelInbox(file, { capacity = 1000, now = Date.now } = {})
 
     return {
       ...(platform === 'feishu' ? { accept } : { startPolling }),
-      // Internal recovery view. The consumer must recheck authorization and
-      // acquire the execution lease before projecting or running a task.
+      // Internal recovery view. The consumer must recheck the task and acquire
+      // an execution lease before projecting or running it.
       pending: (limit = 100) => {
         if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) throw new RangeError('Invalid inbox limit');
-        return listPending.all(scope, limit).map(({ decision, event }) => ({ decision, event: JSON.parse(event) }));
+        return listPending.all(scope, limit).map(readTask);
       },
+      recheckTask,
       complete: (messageKey) => clearPayload.run(scope, messageKey).changes > 0,
     };
   }
 
-  return { bind, close: () => db.close() };
+  return { bind, privateBindings, close: () => db.close() };
 }
