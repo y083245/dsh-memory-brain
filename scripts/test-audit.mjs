@@ -60,7 +60,7 @@ const tests = [
   'test-voice-system.mjs',
   // SnowLuma 账号/token 自发现（换 QQ 账号后 token 会变，写死的工具会 401）
   'test-snowluma-conn.mjs', 'test-qq-channel.mjs', 'test-channel-identity.mjs',
-  'test-channel-inbox.mjs', 'test-channel-archive.mjs',
+  'test-channel-inbox.mjs', 'test-channel-archive.mjs', 'test-channel-outbox.mjs', 'test-channel-text-sender.mjs',
   'test-channel-turn-journal.mjs', 'test-channel-dsh-transport.mjs', 'test-channel-turn-runner.mjs',
   'test-channel-dsh-preset.mjs', 'test-channel-turn-host.mjs', 'test-channel-turn-prompt.mjs',
   // 启动器与编码（乱码根因：.cmd 里的非 ASCII 会被 cmd 按 ANSI 解码）
