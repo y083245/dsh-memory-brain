@@ -133,17 +133,20 @@ test('forgetting a published reply clears pending projection text and preserves 
   });
   const claim = f.outbox.claim(feishu);
   f.outbox.settle(feishu, claim, { status: 'sent', platformMessageId: 'om_confirmed' });
-  const competingInbox = openChannelInbox(f.dbFile, { archive: f.memory.channelArchive, outbox: f.outbox });
-  t.after(() => competingInbox.close());
   const db = new DatabaseSync(f.outboxFile);
-  db.exec(`CREATE TRIGGER retry_clear BEFORE UPDATE OF text ON outbox_confirmations WHEN NEW.text IS NULL
-    BEGIN SELECT RAISE(ABORT, 'fixture crash after publication'); END;`);
   try {
-    assert.equal(f.store.projectNextConfirmation(feishu).status, 'retryableFailure');
-    assert.equal(f.outbox.hasPendingConfirmation(feishu), true);
-    const [reply] = f.memory.archiveRows(source.key, { dir: 'out' });
-    assert.equal(reply.text, 'outbound text to forget');
-    assert.equal(competingInbox.bind(feishu, () => null).forgetRecord(source.key, reply.recordId).status, 'retryableFailure');
+    db.exec(`CREATE TRIGGER retry_clear BEFORE UPDATE OF text ON outbox_confirmations WHEN NEW.text IS NULL
+      BEGIN SELECT RAISE(ABORT, 'fixture crash after publication'); END;`);
+    const competingInbox = openChannelInbox(f.dbFile, { archive: f.memory.channelArchive, outbox: f.outbox });
+    try {
+      assert.equal(f.store.projectNextConfirmation(feishu).status, 'retryableFailure');
+      assert.equal(f.outbox.hasPendingConfirmation(feishu), true);
+      const [reply] = f.memory.archiveRows(source.key, { dir: 'out' });
+      assert.equal(reply.text, 'outbound text to forget');
+      assert.equal(competingInbox.bind(feishu, () => null).forgetRecord(source.key, reply.recordId).status, 'retryableFailure');
+    } finally {
+      competingInbox.close();
+    }
     assert.deepEqual(f.memory.archiveRows(source.key), []);
     const published = fs.readFileSync(source.file);
     assert.equal(JSON.parse(published).sendId, claim.sendId);

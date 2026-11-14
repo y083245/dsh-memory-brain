@@ -160,25 +160,28 @@ test('verified account replacement reconciles the retired account journal withou
   // Seed the existing durable queue directly so the test does not race the
   // current account's outbound interval before replacement.
   const outbox = openChannelOutbox(join(stateDir, 'outbox.sqlite'));
-  t.after(() => outbox.close());
-  const { conversation, actor } = makeEvent();
-  assert.equal(outbox.enqueue({
-    operationId: 'retired_send', authorizationId: 'revoked_grant', conversation,
-    source: { conversation, actor }, segments: ['old reply'],
-  }).status, 'queued');
-  const account = { ...FEISHU, accountId: 'cli_replacement' };
-  channels.feishu.appId = account.accountId;
-  const replacement = host.registerAccount(account);
-  assert.equal(feishu.accept(makeEvent(2)).status, 'retryableFailure');
-  assert.deepEqual(await signedTool(host.toolCredentials, original, 'replaced_account_call'), { status: 'denied' });
-  assert.equal(replacement.accept(makeEvent(1, account)).status, 'durableAccepted');
-  const next = await eventually(() => prompts[1]);
-  assert.notEqual(next.sessionId, original.sessionId);
-  completed.add(original.requestId);
-  await eventually(() => reconciled.has(original.requestId));
-  await eventually(() => outbox.get(FEISHU, 'retired_send').status, (status) => status === 'cancelled');
-  assert.equal(prompts.length, 2);
-  assert.deepEqual(sent, []);
+  try {
+    const { conversation, actor } = makeEvent();
+    assert.equal(outbox.enqueue({
+      operationId: 'retired_send', authorizationId: 'revoked_grant', conversation,
+      source: { conversation, actor }, segments: ['old reply'],
+    }).status, 'queued');
+    const account = { ...FEISHU, accountId: 'cli_replacement' };
+    channels.feishu.appId = account.accountId;
+    const replacement = host.registerAccount(account);
+    assert.equal(feishu.accept(makeEvent(2)).status, 'retryableFailure');
+    assert.deepEqual(await signedTool(host.toolCredentials, original, 'replaced_account_call'), { status: 'denied' });
+    assert.equal(replacement.accept(makeEvent(1, account)).status, 'durableAccepted');
+    const next = await eventually(() => prompts[1]);
+    assert.notEqual(next.sessionId, original.sessionId);
+    completed.add(original.requestId);
+    await eventually(() => reconciled.has(original.requestId));
+    await eventually(() => outbox.get(FEISHU, 'retired_send').status, (status) => status === 'cancelled');
+    assert.equal(prompts.length, 2);
+    assert.deepEqual(sent, []);
+  } finally {
+    outbox.close();
+  }
 });
 
 test('a busy dialogue leaves another platform and a later dialogue available', async (t) => {
@@ -246,11 +249,14 @@ test('a restarted worker recovers confirmations with no registered account and t
     api, workspacePath: dir, stateDir, longMemory, readConfig: () => ({}),
     canRunTurns: () => false, enableTextTools: false, intervalMs: 15,
   });
-  t.after(() => recovered.close());
-  assert.equal(recovered.toolCredentials, null);
-  const [row] = await eventually(() => longMemory.archiveRows(encodeConversationKey(conversation)), (rows) => rows.length === 1);
-  assert.equal(row.text, 'confirmed while authorized');
-  assert.equal(row.msgId, 'om_already_sent');
+  try {
+    assert.equal(recovered.toolCredentials, null);
+    const [row] = await eventually(() => longMemory.archiveRows(encodeConversationKey(conversation)), (rows) => rows.length === 1);
+    assert.equal(row.text, 'confirmed while authorized');
+    assert.equal(row.msgId, 'om_already_sent');
+  } finally {
+    await recovered.close();
+  }
 });
 
 test('production common tools isolate topics and reject a fabricated read cursor', async (t) => {
