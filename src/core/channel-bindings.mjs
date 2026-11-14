@@ -113,6 +113,7 @@ export function createPrivateBindings(db, transact) {
 
   return {
     resolve: (endpoint) => resolveKeys(endpointKeys(endpoint)),
+    revisionForConversation: (conversationKey) => find.get(conversationKey)?.binding_revision ?? null,
     link,
     unlink,
   };

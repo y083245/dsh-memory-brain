@@ -160,11 +160,60 @@ test('restart converts expired sends to unknown and keeps earlier confirmations 
   ]);
   assert.deepEqual(reopened.enqueue(original), { status: 'existing', operation: recovered });
   assert.equal(reopened.enqueue({ ...original, segments: ['different'] }).status, 'conflict');
+  assert.deepEqual(reopened.getDeliveryStatus(feishu, original.operationId), {
+    status: 'unknown', confirmedCount: 1, lastSentAt: 1000, complete: false,
+  });
   f.close(reopened);
   const stored = readFileSync(f.file);
-  for (const value of [...original.segments, original.authorizationId, original.source.actor.userId, original.replyTo.messageId]) {
+  assert.equal(stored.includes(original.segments[0]), true);
+  for (const value of [...original.segments.slice(1), original.authorizationId, original.source.actor.userId]) {
     assert.equal(stored.includes(value), false);
   }
+});
+
+test('confirmed counts and latest timestamps are scoped while full delivery requires all segments', (t) => {
+  const f = fixture(t);
+  const secondConnection = f.open();
+  const first = plan('multisegment', { threadId: '7', segments: ['first', 'second'] });
+  const other = plan('other', { threadId: '8' });
+  f.store.enqueue(first);
+  f.store.enqueue(other);
+  const inFlight = f.store.claim(telegram);
+  const otherFlight = f.store.claim(telegram);
+  f.advance(10);
+  f.store.settle(telegram, inFlight, { status: 'sent', platformMessageId: '92' });
+  assert.deepEqual(secondConnection.getDeliveryStatus(telegram, first.operationId), {
+    status: 'pending', confirmedCount: 1, lastSentAt: 1010, complete: false,
+  });
+  assert.deepEqual(secondConnection.getConversationDeliveryStats(other.conversation), { confirmedCount: 0, lastSentAt: null });
+  const last = f.store.claim(telegram);
+  f.advance(20);
+  f.store.settle(telegram, last, { status: 'sent', platformMessageId: '93' });
+  f.advance(10);
+  f.store.settle(telegram, otherFlight, { status: 'sent', platformMessageId: '94' });
+  assert.deepEqual(secondConnection.getDeliveryStatus(telegram, first.operationId), {
+    status: 'sent', confirmedCount: 2, lastSentAt: 1030, complete: true,
+  });
+  assert.deepEqual(secondConnection.getConversationDeliveryStats(first.conversation), { confirmedCount: 2, lastSentAt: 1030 });
+  assert.deepEqual(secondConnection.getConversationDeliveryStats(other.conversation), { confirmedCount: 1, lastSentAt: 1040 });
+  assert.equal(secondConnection.getDeliveryStatus({ ...telegram, accountId: '51' }, first.operationId), null);
+});
+
+test('legacy sent rows open without fabricating a timestamp or projection payload', (t) => {
+  const f = fixture(t);
+  const original = plan('legacy');
+  f.store.enqueue(original);
+  f.store.settle(telegram, f.store.claim(telegram), { status: 'sent', platformMessageId: '92' });
+  f.close(f.store);
+  const legacyDb = new DatabaseSync(f.file);
+  legacyDb.exec('DROP TABLE IF EXISTS outbox_confirmations');
+  legacyDb.close();
+  const reopened = f.open();
+  assert.deepEqual(reopened.getDeliveryStatus(telegram, original.operationId), {
+    status: 'sent', confirmedCount: 1, lastSentAt: null, complete: true,
+  });
+  assert.equal(reopened.get(telegram, original.operationId).segments[0].platformMessageId, '92');
+  assert.equal(reopened.hasPendingConfirmation(telegram), false);
 });
 
 test('late settlement alone records unknown and unblocks the next operation', (t) => {
@@ -243,9 +292,22 @@ test('invalid storage input errors omit text and a malformed receipt cannot crea
   store.enqueue(original);
   const claim = store.claim(feishu);
   assert.throws(() => store.settle(feishu, claim, { status: 'sent', platformMessageId: marker }), TypeError);
+  assert.throws(() => store.settle(feishu, claim, { status: 'sent', platformMessageId: 'om_valid\n' }), TypeError);
   assert.throws(() => store.settle(feishu, claim, { status: 'retry', delayMs: -1 }), TypeError);
   assert.equal(store.get(feishu, original.operationId).status, 'sending');
   assert.equal(store.settle(feishu, claim, { status: 'cancelled' }).status, 'cancelled');
+});
+
+test('a repeated platform address cannot confirm a different segment', (t) => {
+  const { store } = fixture(t);
+  const original = plan('duplicate_receipt', { segments: ['confirmed', 'uncertain', 'unsent'] });
+  store.enqueue(original);
+  store.settle(telegram, store.claim(telegram), { status: 'sent', platformMessageId: '92' });
+  const duplicate = store.settle(telegram, store.claim(telegram), { status: 'sent', platformMessageId: '92' });
+  assert.deepEqual(duplicate.segments.map(({ status, platformMessageId }) => [status, platformMessageId]), [
+    ['sent', '92'], ['unknown', null], ['cancelled', null],
+  ]);
+  assert.equal(store.getDeliveryStatus(telegram, original.operationId).confirmedCount, 1);
 });
 
 test('a failed segment insert rolls back the entire enqueue transaction', (t) => {

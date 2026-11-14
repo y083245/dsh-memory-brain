@@ -2,16 +2,18 @@ import { createHash, randomUUID } from 'node:crypto';
 import { closeSync, openSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import {
-  decodeIdentityKey, encodeConversationKey, readAccountRef, readConversationRef, readMessageRef, readPersonRef, sameAccount,
+  decodeIdentityKey, encodeConversationKey, encodeMessageKey, readAccountRef, readConversationRef, readMessageRef, readPersonRef, sameAccount,
 } from './identity.mjs';
 
 const HOUR_MS = 60 * 60 * 1000;
 const MAX_RETRY_MS = 24 * HOUR_MS;
+const MAX_DATE_MS = 8_640_000_000_000_000;
 const MAX_SEGMENTS = 256;
 const MAX_TEXT_BYTES = 1024 * 1024;
 const IDENTIFIER = /^[A-Za-z0-9_.:-]{1,128}$/;
 const ACTIVE = "status IN ('pending', 'sending')";
 const STATES = "('pending', 'sending', 'sent', 'failed', 'unknown', 'cancelled')";
+const CONFIRMED = "s.status = 'sent' AND s.platform_message_id IS NOT NULL";
 
 const SCHEMA = `
   CREATE TABLE IF NOT EXISTS outbox_operations (
@@ -44,6 +46,18 @@ const SCHEMA = `
     platform_message_id TEXT,
     PRIMARY KEY (operation_seq, position)
   ) WITHOUT ROWID;
+  CREATE TABLE IF NOT EXISTS outbox_confirmations (
+    send_id TEXT PRIMARY KEY,
+    operation_seq INTEGER NOT NULL REFERENCES outbox_operations(seq),
+    scope TEXT NOT NULL,
+    message_key TEXT NOT NULL UNIQUE,
+    confirmed_at INTEGER NOT NULL,
+    reply_to TEXT,
+    text TEXT,
+    start_offset INTEGER
+  ) WITHOUT ROWID;
+  CREATE INDEX IF NOT EXISTS outbox_unprojected
+    ON outbox_confirmations (scope, operation_seq, send_id) WHERE text IS NOT NULL;
 `;
 
 export function isChannelOutboxId(value) {
@@ -105,6 +119,14 @@ function hash(parts) {
   return createHash('sha256').update(JSON.stringify(parts)).digest('hex');
 }
 
+export function readChannelSendReceipt(conversation, result) {
+  if ((result.platformChatId !== undefined && result.platformChatId !== conversation.chatId) ||
+      (result.threadId !== undefined && result.threadId !== conversation.threadId)) {
+    throw new TypeError('Invalid channel send receipt scope');
+  }
+  return readMessageRef({ conversation, platformChatId: conversation.chatId, messageId: result.platformMessageId });
+}
+
 // The caller supplies a trusted path inside its private state directory.
 export function openChannelOutbox(file, { now = Date.now, capacity = 1000, leaseMs = 60_000 } = {}) {
   if (typeof now !== 'function') throw new TypeError('Invalid outbox clock');
@@ -136,6 +158,26 @@ export function openChannelOutbox(file, { now = Date.now, capacity = 1000, lease
   `);
   const getHash = db.prepare('SELECT plan_hash FROM outbox_operations WHERE scope = ? AND operation_id = ?');
   const activeCount = db.prepare(`SELECT count(*) AS count FROM outbox_operations WHERE scope = ? AND ${ACTIVE}`);
+  const terminalProjectionCount = db.prepare(`
+    SELECT count(DISTINCT c.operation_seq) AS count
+    FROM outbox_confirmations c JOIN outbox_operations o ON o.seq = c.operation_seq
+    WHERE c.scope = ? AND c.text IS NOT NULL AND NOT (o.${ACTIVE})
+  `);
+  const activeScopes = db.prepare(`SELECT DISTINCT scope FROM outbox_operations WHERE ${ACTIVE}`);
+  const confirmationScopes = db.prepare('SELECT DISTINCT scope FROM outbox_confirmations WHERE text IS NOT NULL');
+  const deliveryStatus = db.prepare(`
+    SELECT o.status, count(*) AS segmentCount, count(*) FILTER (WHERE ${CONFIRMED}) AS confirmedCount,
+      max(c.confirmed_at) AS lastSentAt
+    FROM outbox_operations o JOIN outbox_segments s ON s.operation_seq = o.seq
+      LEFT JOIN outbox_confirmations c ON c.send_id = s.send_id
+    WHERE o.scope = ? AND o.operation_id = ? GROUP BY o.seq
+  `);
+  const conversationStats = db.prepare(`
+    SELECT count(*) AS confirmedCount, max(c.confirmed_at) AS lastSentAt
+    FROM outbox_operations o JOIN outbox_segments s ON s.operation_seq = o.seq
+      LEFT JOIN outbox_confirmations c ON c.send_id = s.send_id
+    WHERE o.scope = ? AND o.conversation_key = ? AND ${CONFIRMED}
+  `);
   const saveOperation = db.prepare(`
     INSERT INTO outbox_operations (scope, operation_id, conversation_key, plan_hash, source, reply_to,
       authorization_id, status, next_position)
@@ -162,7 +204,7 @@ export function openChannelOutbox(file, { now = Date.now, capacity = 1000, lease
     WHERE o.scope = ? AND o.${ACTIVE} AND o.status = 'sending' AND s.expires_at <= ?
   `);
   const findClaim = db.prepare(`
-    SELECT o.seq, o.conversation_key, s.position, s.expires_at
+    SELECT o.seq, o.conversation_key, o.reply_to, s.position, s.expires_at, s.text
     FROM outbox_operations o JOIN outbox_segments s ON s.operation_seq = o.seq AND s.position = o.next_position
     WHERE o.scope = ? AND o.operation_id = ? AND o.status = 'sending' AND s.send_id = ? AND s.token = ?
   `);
@@ -187,6 +229,24 @@ export function openChannelOutbox(file, { now = Date.now, capacity = 1000, lease
     UPDATE outbox_operations SET status = ?, next_position = NULL, source = NULL, reply_to = NULL, authorization_id = NULL
     WHERE seq = ?
   `);
+  const saveConfirmation = db.prepare(`
+    INSERT INTO outbox_confirmations (send_id, operation_seq, scope, message_key, confirmed_at, reply_to, text)
+    VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (message_key) DO NOTHING
+  `);
+  const hasConfirmation = db.prepare('SELECT 1 FROM outbox_confirmations WHERE scope = ? AND text IS NOT NULL LIMIT 1');
+  const findConfirmation = db.prepare(`
+    SELECT c.send_id, c.message_key, c.confirmed_at, c.reply_to, c.text, c.start_offset, o.conversation_key
+    FROM outbox_confirmations c JOIN outbox_operations o ON o.seq = c.operation_seq
+    JOIN outbox_segments s ON s.operation_seq = o.seq AND s.send_id = c.send_id
+    WHERE c.scope = ? AND c.text IS NOT NULL ORDER BY o.seq, s.position LIMIT 1
+  `);
+  const reserveConfirmationOffset = db.prepare(`
+    UPDATE outbox_confirmations SET start_offset = ? WHERE scope = ? AND send_id = ? AND start_offset IS NULL AND text IS NOT NULL
+  `);
+  const clearConfirmationPayload = db.prepare(`
+    UPDATE outbox_confirmations SET text = NULL, reply_to = NULL, start_offset = NULL
+    WHERE scope = ? AND message_key = ? AND text IS NOT NULL
+  `);
 
   function transact(work) {
     db.exec('BEGIN IMMEDIATE');
@@ -203,7 +263,7 @@ export function openChannelOutbox(file, { now = Date.now, capacity = 1000, lease
 
   function readTime() {
     const timestamp = now();
-    if (!Number.isSafeInteger(timestamp) || timestamp < 0 || timestamp > Number.MAX_SAFE_INTEGER - MAX_RETRY_MS) {
+    if (!Number.isSafeInteger(timestamp) || timestamp < 0 || timestamp > MAX_DATE_MS) {
       throw new RangeError('Invalid outbox clock');
     }
     return timestamp;
@@ -232,7 +292,42 @@ export function openChannelOutbox(file, { now = Date.now, capacity = 1000, lease
     markTerminal.run(status, seq);
   }
 
+  function readAccounts(rows) {
+    return rows.map(({ scope }) => {
+      const [platform, accountId, tenantId] = JSON.parse(scope);
+      return readAccountRef({ platform, accountId, tenantId });
+    });
+  }
+
   return {
+    recoveryAccounts() {
+      return readAccounts(activeScopes.all());
+    },
+    hasActive(account) {
+      return activeCount.get(scopeOf(account)).count > 0;
+    },
+    confirmationAccounts() {
+      return readAccounts(confirmationScopes.all());
+    },
+    hasPendingConfirmation(account) {
+      return !!hasConfirmation.get(scopeOf(account));
+    },
+    // The trusted inbox calls these under its archive write lock. Saving the
+    // offset commits before touching the file, including before a crash.
+    nextConfirmation(account) {
+      const row = findConfirmation.get(scopeOf(account));
+      if (!row) return null;
+      return {
+        sendId: row.send_id, conversationKey: row.conversation_key, messageKey: row.message_key,
+        replyTo: JSON.parse(row.reply_to), occurredAt: row.confirmed_at, text: row.text, startOffset: row.start_offset,
+      };
+    },
+    reserveConfirmation(account, sendId, offset) {
+      return reserveConfirmationOffset.run(offset, scopeOf(account), sendId).changes === 1;
+    },
+    clearConfirmation(account, messageKey) {
+      clearConfirmationPayload.run(scopeOf(account), messageKey);
+    },
     enqueue({ operationId, conversation: input, source: sourceInput, replyTo: replyInput, authorizationId, segments }) {
       if (!isChannelOutboxId(operationId) || !isChannelOutboxId(authorizationId)) {
         throw new TypeError('Invalid outbox operation or authorization ID');
@@ -251,7 +346,8 @@ export function openChannelOutbox(file, { now = Date.now, capacity = 1000, lease
           if (existing.plan_hash !== planHash) return { status: 'conflict' };
           return { status: 'existing', operation: view(scope, operationId) };
         }
-        if (activeCount.get(scope).count >= capacity) return { status: 'full' };
+        // Confirmed bodies still occupy queue space until their archive write completes.
+        if (activeCount.get(scope).count + terminalProjectionCount.get(scope).count >= capacity) return { status: 'full' };
         const { lastInsertRowid: seq } = saveOperation.run(scope, operationId, conversationKey, planHash,
           source && JSON.stringify(source), replyTo && JSON.stringify(replyTo), authorizationId);
         for (const [position, text] of texts.entries()) {
@@ -263,6 +359,17 @@ export function openChannelOutbox(file, { now = Date.now, capacity = 1000, lease
     get(account, operationId) {
       if (!isChannelOutboxId(operationId)) throw new TypeError('Invalid outbox operation ID');
       return view(scopeOf(account), operationId);
+    },
+    getDeliveryStatus(account, operationId) {
+      if (!isChannelOutboxId(operationId)) throw new TypeError('Invalid outbox operation ID');
+      const result = deliveryStatus.get(scopeOf(account), operationId);
+      if (!result) return null;
+      const { status, confirmedCount, lastSentAt, segmentCount } = result;
+      return { status, confirmedCount, lastSentAt, complete: status === 'sent' && confirmedCount === segmentCount };
+    },
+    getConversationDeliveryStats(conversation) {
+      const { confirmedCount, lastSentAt } = conversationStats.get(scopeOf(conversation), encodeConversationKey(conversation));
+      return { confirmedCount, lastSentAt };
     },
     claim(account) {
       const scope = scopeOf(account);
@@ -313,10 +420,14 @@ export function openChannelOutbox(file, { now = Date.now, capacity = 1000, lease
         switch (status) {
           case 'sent': {
             const conversation = decodeIdentityKey(current.conversation_key);
-            const { messageId } = readMessageRef({
-              conversation, platformChatId: conversation.chatId, messageId: result.platformMessageId,
-            });
-            finishSegment.run('sent', messageId, seq, position);
+            const message = readChannelSendReceipt(conversation, result);
+            const saved = saveConfirmation.run(sendId, seq, scope, encodeMessageKey(message), timestamp, current.reply_to, current.text);
+            if (saved.changes !== 1) {
+              // A receipt already attributed to a different send is ambiguous.
+              stopOperation(current, 'unknown');
+              break;
+            }
+            finishSegment.run('sent', message.messageId, seq, position);
             if (nextSegmentExists.get(seq, position + 1)) markActive.run('pending', position + 1, seq);
             else markTerminal.run('sent', seq);
             break;

@@ -15,6 +15,8 @@ from pathlib import Path
 
 from .channel_identity import decode_identity_key, is_channel_key, is_channel_person_key
 
+_SEND_ID = re.compile(r"send_[a-f0-9]{64}")
+
 _DIR = re.compile(r"c1_[a-f0-9]{64}")
 _MONTH = re.compile(r"(?:[0-9]{4}|\+[0-9]{6})-[0-9]{2}\.jsonl")
 _ISO = re.compile(r"([0-9]{4}|\+[0-9]{6})-([0-9]{2})-([0-9]{2})T"
@@ -231,17 +233,25 @@ def _parse_row(raw: bytes, key: str, month: str) -> dict:
         message = decode_identity_key(message_key)
         if message["conversation"] != conversation or message["platformChatId"] != conversation["chatId"]:
             raise ChannelArchiveError()
+        has_send_id = "sendId" in row
+        send_id = row.get("sendId")
+        if has_send_id and (not isinstance(send_id, str) or not _SEND_ID.fullmatch(send_id)):
+            raise ChannelArchiveError()
         if row.get("deleted") is True:
-            if len(row) != 4:
+            if len(row) != 4 + has_send_id:
                 raise ChannelArchiveError()
             return row
         person_key = row["personKey"]
-        if not is_channel_person_key(key, person_key):
+        if row["msgId"] != message["messageId"] or not isinstance(row["text"], str):
             raise ChannelArchiveError()
-        person = decode_identity_key(person_key)
-        if (row["dir"] != "in" or row["msgId"] != message["messageId"] or row["userId"] != person["userId"]
-                or not isinstance(row["text"], str)):
-            raise ChannelArchiveError()
+        if row["dir"] == "out":
+            if person_key is not None or row["userId"] != conversation["accountId"] or not has_send_id:
+                raise ChannelArchiveError()
+        else:
+            if row["dir"] != "in" or has_send_id or not is_channel_person_key(key, person_key):
+                raise ChannelArchiveError()
+            if row["userId"] != decode_identity_key(person_key)["userId"]:
+                raise ChannelArchiveError()
         reply_key = row["replyToMessageKey"]
         if reply_key is not None:
             reply = decode_identity_key(reply_key)

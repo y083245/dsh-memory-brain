@@ -214,7 +214,8 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
   const getStickerEntries = () => stickerEntries;
   return {
     syncInstalledPreset, installedPresetYaml, ensureSession, ensureSlangLearnerSession, runSlangResearch, resolvePresetName, deliverPrompt, drainPromptQueue,
-    applyHealedTokens, reportTurnFailure, recordVoiceSentV2, rediscoverDshBase,
+    applyHealedTokens, reportTurnFailure, recordVoiceSentV2, rediscoverDshBase, checkDsh,
+    writeRoleState, shutdownBridge,
     getSlangEntries: () => slangEntries,
     completeLearnerTurn(sessionId, output) {
       const waiters = learnerWaiters.get(sessionId) ?? [];
@@ -288,6 +289,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     NodeApiClient: class { constructor() { return api; } },
     SnowLumaWebSocketClient: FakeBot,
     canonicalV2Key,
+    expectsChannelToolCredentials: () => false,
     createQQAdapter: (config) => createQQAdapter(config, {
       loadSdk: async () => ({ SnowLumaWebSocketClient: context.SnowLumaWebSocketClient, text: (s) => s }),
       fetch: (...args) => context.fetch(...args),
@@ -360,6 +362,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
   bridge.setReady(true);
   return { ...bridge, calls, temp, async close() {
     for (const timer of timers) clearTimeout(timer);
+    await bridge.shutdownBridge();
     // APIHUB_PATCH：还原测试进程里被临时改过的环境变量。
     if (prevDshHome === undefined) delete process.env.DSH_HOME;
     else process.env.DSH_HOME = prevDshHome;

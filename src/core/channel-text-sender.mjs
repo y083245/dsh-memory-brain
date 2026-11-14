@@ -1,7 +1,7 @@
 import { SENSITIVE_RE } from '../sensitive.js';
 import { resolveTextTarget } from './channel-intake.mjs';
 import { readAccountRef, readConversationRef, readMessageRef, readPersonRef } from './identity.mjs';
-import { isChannelOutboxId, isChannelOutboxText, validateChannelOutboxSegments } from './outbox-store.mjs';
+import { isChannelOutboxId, isChannelOutboxText, readChannelSendReceipt, validateChannelOutboxSegments } from './outbox-store.mjs';
 
 const UNKNOWN = Object.freeze({ status: 'unknown' });
 const MAX_RETRY_DELAY_MS = 24 * 60 * 60 * 1000;
@@ -32,9 +32,7 @@ function readContext({ operationId, authorizationId, source } = {}) {
 function readSendResult(result, conversation, attempt, maxAttempts) {
   switch (result?.status) {
     case 'sent': {
-      const { messageId } = readMessageRef({
-        conversation, platformChatId: conversation.chatId, messageId: result.platformMessageId,
-      });
+      const { messageId } = readChannelSendReceipt(conversation, result);
       return { status: 'sent', platformMessageId: messageId };
     }
     case 'rate_limited': {
@@ -91,9 +89,9 @@ export function createChannelTextSender({
     throw new RangeError('Invalid channel text sender limits');
   }
 
-  function authorizedTarget(context, conversation, replyTo) {
+  function authorizedTarget(context, conversation, replyTo, phase) {
     try {
-      const policy = synchronous(authorize(context, conversation));
+      const policy = synchronous(authorize(context, conversation, { phase, replyTo }));
       return policy && resolveTextTarget(policy, conversation, { source: context.source, replyTo });
     } catch {
       return null;
@@ -106,11 +104,11 @@ export function createChannelTextSender({
     try {
       context = readContext(input);
       conversation = Object.freeze(readConversationRef(target));
-      quoted = replyTo == null ? null : readMessageRef(replyTo);
+      quoted = replyTo == null ? null : Object.freeze(readMessageRef(replyTo));
     } catch {
       return { status: 'invalid' };
     }
-    const resolved = authorizedTarget(context, conversation, quoted);
+    const resolved = authorizedTarget(context, conversation, quoted, 'submit');
     if (!resolved) return { status: 'denied' };
     try {
       if (synchronous(isSensitive(text)) !== false || SENSITIVE_RE.test(text)) return { status: 'sensitive' };
@@ -126,6 +124,7 @@ export function createChannelTextSender({
     } catch {
       return { status: 'unavailable' };
     }
+    if (!authorizedTarget(context, conversation, quoted, 'submit')) return { status: 'denied' };
     return store.enqueue({ ...context, conversation: resolved.conversation, replyTo: quoted, segments });
   }
 
@@ -150,7 +149,7 @@ export function createChannelTextSender({
       // No adapter call has been made.
     }
     const context = readContext(claim);
-    const resolved = authorizedTarget(context, Object.freeze(claim.conversation), claim.replyTo);
+    const resolved = authorizedTarget(context, Object.freeze(claim.conversation), claim.replyTo, 'deliver');
     if (!resolved) return settle({ status: 'cancelled' });
     if (!sendText) return settle({ status: 'failed' });
     const request = { ...resolved, conversation: Object.freeze(resolved.conversation), sendId: claim.sendId, text: claim.text };

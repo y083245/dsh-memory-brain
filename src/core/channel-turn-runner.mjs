@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { createChannelDshTransport } from './channel-dsh-transport.mjs';
-import { decodeIdentityKey } from './identity.mjs';
+import { decodeIdentityKey, encodeConversationKey } from './identity.mjs';
 
 const MODE = 'reserved2';
 const PROMPT_PREFIX = 'Incoming channel message:\n';
@@ -51,7 +51,7 @@ function statusOnly({ status, reason }) {
   return status === 'retryableFailure' ? { status, reason } : { status };
 }
 
-function watchLease(binding, messageKey, token, now) {
+function watchLease(binding, messageKey, token, now, observeAuthorization) {
   const controller = new AbortController();
   let timer;
   let failed;
@@ -60,6 +60,7 @@ function watchLease(binding, messageKey, token, now) {
   function stop(result) {
     failed = result;
     clearTimeout(timer);
+    observeAuthorization(result);
     controller.abort();
     return result;
   }
@@ -107,10 +108,12 @@ async function transportResult(work) {
 }
 
 /** A trusted host supplies a guarded DSH session and keeps its generation current. */
-export function createChannelTurnRunner({ api, longMemory, rag, prepareTurn, isCurrentSession, invalidateSession,
-  isSilent = () => false, maxConcurrent = 4, now = Date.now, transport = createChannelDshTransport(api) } = {}) {
+export function createChannelTurnRunner({ api, longMemory, rag, prepareTurn, isCurrentSession, invalidateSession, invalidateSource,
+  isSilent = () => false, registerTextTurn, maxConcurrent = 4, now = Date.now, transport = createChannelDshTransport(api) } = {}) {
   if (![prepareTurn, isCurrentSession, invalidateSession, isSilent, now, longMemory?.searchChannelHistory,
-    transport?.submit, transport?.reconcile, transport?.retire].every((callback) => typeof callback === 'function')) {
+    transport?.submit, transport?.reconcile, transport?.retire].every((callback) => typeof callback === 'function') ||
+    (invalidateSource !== undefined && typeof invalidateSource !== 'function') ||
+    (registerTextTurn !== undefined && typeof registerTextTurn !== 'function')) {
     throw new TypeError('Invalid channel turn runner callbacks');
   }
   if (!Number.isSafeInteger(maxConcurrent) || maxConcurrent < 1) throw new RangeError('Invalid channel turn concurrency');
@@ -124,19 +127,27 @@ export function createChannelTurnRunner({ api, longMemory, rag, prepareTurn, isC
   }
 
   async function withProjectedTask(binding, messageKey, work) {
+    function observeAuthorization(result) {
+      if (!invalidateSource || (result.status !== 'unauthorized' && result.status !== 'binding_changed')) return result;
+      // A bound inbox returns these statuses only for a persisted task in its account.
+      const { conversation } = decodeIdentityKey(messageKey);
+      invalidateSource(encodeConversationKey(conversation));
+      return result;
+    }
+
     const claimed = binding.claim(messageKey);
-    if (claimed.status !== 'claimed') return claimed;
+    if (claimed.status !== 'claimed') return observeAuthorization(claimed);
     const { token } = claimed;
-    const lease = watchLease(binding, messageKey, token, now);
+    const lease = watchLease(binding, messageKey, token, now, observeAuthorization);
     try {
       const journal = binding.readTurn(messageKey, token);
       if (journal.status !== 'turn' && journal.status !== 'no_turn') return journal;
       const projected = binding.project(messageKey, token);
-      if (projected.status !== 'projected') return projected;
+      if (projected.status !== 'projected') return observeAuthorization(projected);
       const checked = lease.check();
       if (checked.status !== 'ready') return checked;
       lease.schedule(checked.expiresAt);
-      return await work({ token, lease, checked, turn: journal.turn && Object.freeze(journal.turn) });
+      return await work({ token, lease, checked, observeAuthorization, turn: journal.turn && Object.freeze(journal.turn) });
     } finally {
       lease.close();
     }
@@ -157,7 +168,7 @@ export function createChannelTurnRunner({ api, longMemory, rag, prepareTurn, isC
     return saved.status === 'updated' ? { status: confirmed ? status : 'uncertain' } : saved;
   }
 
-  async function submit(binding, messageKey, { token, lease, checked }) {
+  async function submit(binding, messageKey, { token, lease, checked, observeAuthorization }) {
     const { task, recordId } = checked;
     const { taskId, bindingRevision, event: { conversationKey } } = task;
     function requireLease() {
@@ -203,9 +214,11 @@ export function createChannelTurnRunner({ api, longMemory, rag, prepareTurn, isC
     }
     const started = binding.beginTurn(messageKey, token, {
       sessionId: snapshot.sessionId, generation: snapshot.generation, requestId: taskId, maxActiveTurns: maxConcurrent,
+      ...(registerTextTurn && { retainTextSource: true }),
     });
-    if (started.status !== 'started') return started;
+    if (started.status !== 'started') return observeAuthorization(started);
     const turn = Object.freeze(started.turn);
+    registerTextTurn?.({ binding, turn });
     const result = await transportResult(() => transport.submit(turn, blocks, { signal: lease.signal }));
     const stillReady = lease.check();
     if (stillReady.status !== 'ready') return stillReady;

@@ -126,6 +126,7 @@ export async function spawnDetached({
   env = process.env,
   windowsHide = true,
   windowsVerbatimArguments = false,
+  ipc = false,
   spawnImpl = spawn,
   fsImpl = fs
 } = {}) {
@@ -141,7 +142,7 @@ export async function spawnDetached({
       detached: true,
       windowsHide,
       windowsVerbatimArguments,
-      stdio: ['ignore', fd, fd]
+      stdio: ipc ? ['ignore', fd, fd, 'ipc'] : ['ignore', fd, fd]
     });
   } catch (error) {
     try { fsImpl.closeSync(fd); } catch { /* 已经关了 */ }

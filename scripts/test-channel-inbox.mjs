@@ -6,6 +6,8 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 import { openChannelInbox } from '../src/core/inbox-store.mjs';
+import { createChannelArchive } from '../src/core/channel-archive.mjs';
+import { encodeConversationKey } from '../src/core/identity.mjs';
 
 const telegram = { platform: 'telegram', accountId: '41' };
 const feishu = { platform: 'feishu', accountId: 'cli_fixture', tenantId: 'tenant_a' };
@@ -42,14 +44,15 @@ function withRevision(bindings, ...endpoints) {
   return endpoints.map((endpoint) => ({ ...endpoint, bindingRevision: bindings.resolve(endpoint).bindingRevision }));
 }
 
-function fixture(t, capacity = 4) {
+function fixture(t, capacity = 4, withArchive = false) {
   const dir = mkdtempSync(join(tmpdir(), 'channel-inbox-'));
   const file = join(dir, 'queue.sqlite');
+  const archive = withArchive ? createChannelArchive(join(dir, 'archive'), (s) => s.replace('fixture-secret', '[redacted]')) : null;
   let time = 1794268800000;
   let store;
   const reopen = () => {
     store?.close();
-    store = openChannelInbox(file, { capacity, now: () => time });
+    store = openChannelInbox(file, { capacity, now: () => time, archive });
     return store;
   };
   t.after(() => {
@@ -64,6 +67,130 @@ function fixture(t, capacity = 4) {
     advance: (elapsed) => { time += elapsed; },
   };
 }
+
+test('tool inbox pages within the original topic and persists read progress without completing tasks', (t) => {
+  const f = fixture(t);
+  const bind = () => f.bind(feishu);
+  let inbox = bind();
+  const original = message(feishu, 'om_1', { threadId: 'one', text: 'first' });
+  const scope = encodeConversationKey(original.conversation);
+  inbox.accept(original);
+  inbox.accept(message(feishu, 'om_2', { threadId: 'two', text: 'other topic' }));
+  inbox.accept(message(feishu, 'om_3', { threadId: 'one', text: 'second' }));
+  const page = inbox.readToolInbox(scope, undefined, 1);
+  assert.deepEqual(page.messages.map(({ seq, text }) => [seq, text]), [[1, 'first']]);
+  assert.equal(page.hasMore, true);
+  assert.equal(page.readThroughSeq, 0);
+  assert.equal(inbox.toolReadCursor(scope), 0);
+  assert.equal(inbox.markToolRead(scope, 1).status, 'ok');
+  assert.equal(inbox.pending().length, 3);
+  f.reopen();
+  inbox = bind();
+  assert.equal(inbox.toolReadCursor(scope), 1);
+  assert.deepEqual(inbox.readToolInbox(scope, 0, 4), {
+    messages: [{ seq: 3, text: 'second', occurredAt: original.occurredAt }], readThroughSeq: 1, hasMore: false,
+  });
+  assert.deepEqual(inbox.readToolInbox(scope, 3, 4), { messages: [], readThroughSeq: 1, hasMore: false });
+  assert.equal(inbox.markToolRead(scope, 0).readThroughSeq, 1);
+  assert.equal(f.bind({ ...feishu, tenantId: 'tenant_b' }).toolReadCursor(scope), null);
+});
+
+test('published observations remain in the tool inbox until read, forgotten or disallowed', (t) => {
+  const f = fixture(t, 4, true);
+  let allow = { ...policy(feishu), groupPolicy: 'observe', observationVerified: true };
+  const bind = () => f.bind(feishu, () => allow);
+  let inbox = bind();
+  const event = { ...message(feishu, 'om_1', { threadId: 'one', text: 'ambient fixture-secret' }), trigger: 'ambient' };
+  const scope = encodeConversationKey(event.conversation);
+  inbox.accept(event);
+  const [{ event: { messageKey } }] = inbox.pending();
+  const { token } = inbox.claim(messageKey);
+  const { recordId } = inbox.project(messageKey, token);
+  assert.equal(inbox.finish(messageKey, token).status, 'completed');
+  assert.deepEqual(inbox.pending(), []);
+  assert.equal(readFileSync(f.file).includes(event.text), false);
+  f.reopen();
+  inbox = bind();
+  assert.deepEqual(inbox.readToolInbox(scope, undefined, 1).messages.map(({ text }) => text), ['ambient [redacted]']);
+  allow = { ...allow, deny: { senders: ['ou_fixture'] } };
+  assert.deepEqual(inbox.readToolInbox(scope, undefined, 1).messages, []);
+  allow = { ...allow, deny: {} };
+  assert.equal(inbox.forgetRecord(scope, recordId).status, 'forgotten');
+  assert.deepEqual(inbox.readToolInbox(scope, undefined, 1).messages, []);
+});
+
+test('unread lookup honors published redaction and tombstones after an execution lease is released', (t) => {
+  const f = fixture(t, 4, true);
+  const inbox = f.bind(feishu);
+  const original = message(feishu, 'om_1', { text: 'incoming fixture-secret' });
+  const key = encodeConversationKey(original.conversation);
+  assert.equal(inbox.accept(original).status, 'durableAccepted');
+  const [{ event: { messageKey } }] = inbox.pending();
+  const { token } = inbox.claim(messageKey);
+  const { recordId } = inbox.project(messageKey, token);
+  assert.equal(inbox.release(messageKey, token).status, 'released');
+  assert.deepEqual(inbox.readToolInbox(key).messages.map(({ text }) => text), ['incoming [redacted]']);
+
+  const db = new DatabaseSync(f.file);
+  try {
+    db.exec(`CREATE TRIGGER reject_clear BEFORE UPDATE OF event ON inbox_messages WHEN NEW.event IS NULL
+      BEGIN SELECT RAISE(ABORT, 'fixture interrupted forget'); END;`);
+    assert.equal(inbox.forgetRecord(key, recordId).status, 'retryableFailure');
+    assert.equal(inbox.pending().length, 1);
+    assert.deepEqual(inbox.readToolInbox(key).messages, []);
+  } finally {
+    db.close();
+  }
+});
+
+test('a topic wake setting narrows globally verified observation and preserves directed dispatch', (t) => {
+  const f = fixture(t);
+  let allow = { ...policy(feishu), groupPolicy: 'observe', observationVerified: true };
+  const inbox = f.bind(feishu, () => allow);
+  const ambient = (id, threadId = 'one') => ({ ...message(feishu, id, { threadId }), trigger: 'ambient' });
+  const scope = encodeConversationKey(ambient('om_a').conversation);
+  assert.equal(inbox.accept(ambient('om_a')).status, 'durableAccepted');
+  assert.deepEqual(inbox.markToolRead(scope, 0, 'directed'), { status: 'ok', readThroughSeq: 0, groupPolicy: 'directed' });
+  assert.equal(inbox.claim(inbox.pending()[0].event.messageKey).status, 'unauthorized');
+  assert.equal(inbox.accept(ambient('om_b')).status, 'durableFiltered');
+  assert.equal(inbox.accept(ambient('om_c', 'two')).status, 'durableAccepted');
+  assert.equal(inbox.accept(message(feishu, 'om_d', { threadId: 'one' })).status, 'durableAccepted');
+  allow = { ...allow, observationVerified: false };
+  assert.equal(inbox.markToolRead(scope, 0, 'observe').status, 'denied');
+  allow = { ...allow, observationVerified: true };
+  assert.equal(inbox.markToolRead(scope, 0, 'observe').status, 'ok');
+  assert.equal(inbox.accept(ambient('om_e')).status, 'durableAccepted');
+});
+
+test('tool feedback is deduplicated per scope and cannot persist oversized input', (t) => {
+  const f = fixture(t);
+  const first = encodeConversationKey(message(feishu, 'om_1', { threadId: 'one' }).conversation);
+  const second = encodeConversationKey(message(feishu, 'om_2', { threadId: 'two' }).conversation);
+  const feedback = { requestId: 'request_fixture', callId: 'call_fixture', message: 'fixture feedback' };
+  assert.equal(f.bind(feishu).saveToolFeedback(first, feedback).status, 'ok');
+  f.reopen();
+  const inbox = f.bind(feishu);
+  assert.deepEqual(inbox.saveToolFeedback(first, { ...feedback, message: 'retry marker' }), { status: 'ok', duplicate: true });
+  assert.deepEqual(inbox.saveToolFeedback(second, feedback), { status: 'ok' });
+  assert.equal(inbox.saveToolFeedback(first, { ...feedback, callId: 'other', message: 'x'.repeat(5000) }).status, 'invalid');
+  assert.equal(readFileSync(f.file).includes('retry marker'), false);
+});
+
+test('pruning old feedback content preserves deduplication across reopening', (t) => {
+  const f = fixture(t);
+  const conversation = message(feishu, 'om_1').conversation;
+  const scope = encodeConversationKey(conversation);
+  const first = { requestId: 'fixture_request', callId: 'first_call', message: 'old fixture feedback content' };
+  const inbox = f.bind(feishu);
+  assert.equal(inbox.saveToolFeedback(scope, first).status, 'ok');
+  for (let index = 0; index < 100; index += 1) {
+    assert.equal(inbox.saveToolFeedback(scope, { ...first, callId: `call_${index}`, message: 'new fixture feedback' }).status, 'ok');
+  }
+  const reopened = f.reopen().bind(feishu, () => policy(feishu));
+  assert.equal(readFileSync(f.file).includes(first.message), false);
+  assert.deepEqual(reopened.saveToolFeedback(scope, first), { status: 'ok', duplicate: true });
+  assert.equal(readFileSync(f.file).includes(first.message), false);
+});
 
 test('confirmed private endpoints share a durable identity and dialogue across QQ, Feishu and Telegram', (t) => {
   const f = fixture(t);

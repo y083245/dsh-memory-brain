@@ -293,7 +293,9 @@ export function createMemoryRagClient({ url = DEFAULT_URL, timeoutMs = DEFAULT_T
 
   async function request(pathname, init, timeoutMs = timeout) {
     try {
-      return await fetch(`${baseUrl}${pathname}`, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+      const timeoutSignal = AbortSignal.timeout(timeoutMs);
+      const signal = init?.signal ? AbortSignal.any([init.signal, timeoutSignal]) : timeoutSignal;
+      return await fetch(`${baseUrl}${pathname}`, { ...init, signal });
     } catch {
       // 连接被拒 / 超时 / DNS：都当服务不可用，交给调用方降级。
       return null;
@@ -314,13 +316,15 @@ export function createMemoryRagClient({ url = DEFAULT_URL, timeoutMs = DEFAULT_T
     return { ok: response.ok, status: response.status, data };
   }
 
-  async function requestScoped(pathname, payload, timeoutMs = timeout) {
+  async function requestScoped(pathname, payload, timeoutMs = timeout, signal) {
+    if (signal?.aborted) return null;
     const channel = isChannelKey(payload.key) || payload.keys?.some(isChannelKey);
     if (channel) {
       const startedAt = performance.now();
-      const health = await callJson('/health?protocol=channel', { method: 'GET', redirect: 'error' }, timeoutMs);
+      const health = await callJson('/health?protocol=channel', { method: 'GET', redirect: 'error', signal }, timeoutMs);
+      if (signal?.aborted) return null;
       const protocol = health?.data?.archive_protocol;
-      if (!health?.ok || health.data?.ok !== true || protocol?.identity !== 1 || protocol.archive !== 1 || protocol.index !== 1) {
+      if (!health?.ok || health.data?.ok !== true || protocol?.identity !== 1 || protocol.archive !== 2 || protocol.index !== 1) {
         warnChannelUnavailable();
         return null;
       }
@@ -335,8 +339,10 @@ export function createMemoryRagClient({ url = DEFAULT_URL, timeoutMs = DEFAULT_T
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(payload),
+      signal,
       ...(channel ? { redirect: 'error' } : {})
     }, timeoutMs);
+    if (signal?.aborted) return null;
     if (channel && !response?.ok && response?.status !== 404) warnChannelUnavailable();
     return response;
   }
@@ -345,7 +351,7 @@ export function createMemoryRagClient({ url = DEFAULT_URL, timeoutMs = DEFAULT_T
    * POST /search。任何失败（网络、超时、4xx/5xx、坏 JSON、结构不对、key 不一致）都返回 null。
    * 返回结构只保留 { semantic, hint?, items: [{ day, title, sources, text }] }。
    */
-  async function search(params = {}) {
+  async function search(params = {}, { signal } = {}) {
     if (!enabled()) return null;
     const key = scopedKey(params.key);
     if (!key) {
@@ -372,7 +378,7 @@ export function createMemoryRagClient({ url = DEFAULT_URL, timeoutMs = DEFAULT_T
     if (wantDebug) payload.debug = true;
 
     const channel = isChannelKey(key);
-    const response = await requestScoped('/search', payload);
+    const response = await requestScoped('/search', payload, timeout, signal);
     if (!response) return null;
     if (!response.ok) {
       if (!channel && response.status === 503 && Date.now() - lastMismatchLogAt > 10 * 60 * 1000) {

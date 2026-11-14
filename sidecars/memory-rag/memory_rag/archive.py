@@ -58,6 +58,7 @@ class Row:
     person_key: str | None = None
     message_key: str | None = None
     reply_to_message_key: str | None = None
+    send_id: str | None = None
 
     @property
     def is_self(self) -> bool:
@@ -136,6 +137,7 @@ def _read_channel_rows(
                 dir=row["dir"], user_id=row["userId"], name=_safe_display(name) if isinstance(name, str) else "",
                 text=_safe_display(row["text"]), record_id=row["recordId"], person_key=row["personKey"],
                 message_key=row["messageKey"], reply_to_message_key=row["replyToMessageKey"],
+                send_id=row.get("sendId"),
             ))
         if cursor_line != expected_line:
             raise ChannelArchiveError()

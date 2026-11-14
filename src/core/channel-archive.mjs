@@ -5,6 +5,7 @@ import { decodeIdentityKey, encodeConversationKey, encodeMessageKey, sameAccount
 
 const CHANNEL_ARCHIVE_MONTH = /^(?:\d{4}|\+\d{6})-\d{2}\.jsonl$/;
 const RECORD_ID = /^record_[a-f0-9]{64}$/;
+const SEND_ID = /^send_[a-f0-9]{64}$/;
 const MAX_ROW_BYTES = 64 * 1024;
 const utf8 = new TextDecoder('utf-8', { fatal: true });
 const digest = (key) => createHash('sha256').update(key).digest('hex');
@@ -92,14 +93,24 @@ function readRecord(raw, key, month) {
       throw invalidArchive();
     }
     if (row.deleted === true) {
-      if (Object.keys(row).length !== 4) throw invalidArchive();
+      const hasSendId = Object.hasOwn(row, 'sendId');
+      if (Object.keys(row).length !== (hasSendId ? 5 : 4) || (hasSendId && !validSendId(row.sendId))) {
+        throw invalidArchive();
+      }
       return row;
     }
-    const person = decodeIdentityKey(row.personKey);
-    if (!row.personKey.startsWith('p1_') || !sameAccount(person, message.conversation) ||
-        row.dir !== 'in' || row.msgId !== message.messageId || row.userId !== person.userId ||
+    if (row.msgId !== message.messageId ||
         typeof row.text !== 'string' || new Date(row.t).toISOString() !== row.t || monthOf(row.t) !== month) {
       throw invalidArchive();
+    }
+    if (row.dir === 'out') {
+      if (row.personKey !== null || row.userId !== message.conversation.accountId || !validSendId(row.sendId)) {
+        throw invalidArchive();
+      }
+    } else {
+      const person = decodeIdentityKey(row.personKey);
+      if (row.dir !== 'in' || !row.personKey.startsWith('p1_') || !sameAccount(person, message.conversation) ||
+          row.userId !== person.userId || Object.hasOwn(row, 'sendId')) throw invalidArchive();
     }
     if (row.replyToMessageKey !== null) {
       const reply = decodeIdentityKey(row.replyToMessageKey);
@@ -108,6 +119,10 @@ function readRecord(raw, key, month) {
     }
     return row;
   } catch { throw invalidArchive(); }
+}
+
+function validSendId(value) {
+  return typeof value === 'string' && SEND_ID.test(value);
 }
 
 function* records(data, key, month) {
@@ -119,6 +134,21 @@ function* records(data, key, month) {
     yield { start, end, raw, row: readRecord(raw, key, month) };
     start = end + 1;
   }
+}
+
+function findPublishedRecord(fd, startOffset, bytes, key, month, event) {
+  checkBoundary(fd, bytes);
+  if (startOffset > bytes || (startOffset && startOffset !== bytes && readBytes(fd, startOffset - 1, 1)[0] !== 0x0a)) {
+    throw invalidArchive();
+  }
+  const recordId = recordIdFor(event.messageKey);
+  for (const { start, row } of records(readBytes(fd, startOffset, bytes - startOffset), key, month)) {
+    if (row.recordId === recordId || (event.sendId && row.sendId === event.sendId)) {
+      if (row.recordId !== recordId || row.sendId !== event.sendId) throw invalidArchive();
+      return { row, offset: startOffset + start };
+    }
+  }
+  return null;
 }
 
 // All mutations are called by the inbox under its SQLite write transaction.
@@ -194,24 +224,23 @@ export function createChannelArchive(root, redact) {
     if (!exists && bytes) throw invalidArchive();
     const fd = fs.openSync(file, exists ? 'r+' : 'wx+', 0o600);
     try {
-      checkBoundary(fd, bytes);
-      if (startOffset > bytes || (startOffset && startOffset !== bytes && readBytes(fd, startOffset - 1, 1)[0] !== 0x0a)) {
-        throw invalidArchive();
+      const found = findPublishedRecord(fd, startOffset, bytes, key, month, event);
+      if (found) {
+        syncDirectory(path.dirname(file));
+        return { recordId: found.row.recordId, offset: found.offset, deleted: found.row.deleted === true };
       }
       const recordId = recordIdFor(event.messageKey);
-      for (const { start, row } of records(readBytes(fd, startOffset, bytes - startOffset), key, month)) {
-        if (row.recordId === recordId) {
-          syncDirectory(path.dirname(file));
-          return { recordId, offset: startOffset + start, deleted: row.deleted === true };
-        }
-      }
+      const outbound = event.sendId !== undefined;
+      const message = outbound ? decodeIdentityKey(event.messageKey) : event.message;
       const row = {
-        recordId, conversationKey: key, personKey: event.personKey, messageKey: event.messageKey,
+        recordId, conversationKey: key, personKey: outbound ? null : event.personKey, messageKey: event.messageKey,
         replyToMessageKey: event.replyTo ? encodeMessageKey(event.replyTo) : null,
-        t, dir: 'in', userId: event.actor.userId, name: '',
-        text: redact(event.text).trim().slice(0, 4000), msgId: event.message.messageId,
+        t, dir: outbound ? 'out' : 'in', userId: outbound ? message.conversation.accountId : event.actor.userId,
+        name: '', text: redact(event.text).trim().slice(0, 4000), msgId: message.messageId,
+        ...(outbound ? { sendId: event.sendId } : {}),
       };
       const payload = Buffer.from(`${JSON.stringify(row)}\n`);
+      readRecord(payload.subarray(0, -1), key, month);
       const size = fs.fstatSync(fd).size;
       // Only the current authorized task may republish its tail. A torn or
       // unrelated tail is discarded so the owning task can replay independently.
@@ -227,6 +256,22 @@ export function createChannelArchive(root, redact) {
       fs.fsyncSync(fd);
       replaceFile(`${file}.watermark.json`, JSON.stringify({ bytes: bytes + payload.length }));
       return { recordId, offset: bytes, deleted: false };
+    } finally { fs.closeSync(fd); }
+  }
+
+  // The inbox can lose a projection's lease while retaining the durable
+  // intent. Consult only the published bytes after that intent's offset.
+  function findRecord(event, startOffset) {
+    const key = event.conversationKey;
+    const month = monthOf(new Date(event.occurredAt).toISOString());
+    const dir = directory(key);
+    const file = dir ? path.join(dir, month) : null;
+    const bytes = file ? readWatermark(file) : 0;
+    if (!bytes && !startOffset) return null;
+    if (!file || !stat(file)) throw invalidArchive();
+    const fd = fs.openSync(file, 'r');
+    try {
+      return findPublishedRecord(fd, startOffset, bytes, key, month, event)?.row ?? null;
     } finally { fs.closeSync(fd); }
   }
 
@@ -279,7 +324,10 @@ export function createChannelArchive(root, redact) {
       for (const { start, end, row } of records(data.subarray(0, bytes), key, path.basename(file))) {
         if (row.recordId !== recordId) continue;
         if (!row.deleted) {
-          const marker = Buffer.from(JSON.stringify({ deleted: true, recordId, conversationKey: key, messageKey: row.messageKey }));
+          const marker = Buffer.from(JSON.stringify({
+            deleted: true, recordId, conversationKey: key, messageKey: row.messageKey,
+            ...(row.sendId === undefined ? {} : { sendId: row.sendId }),
+          }));
           if (marker.length > end - start) throw invalidArchive();
           data.fill(0x20, start, end);
           marker.copy(data, start);
@@ -291,5 +339,5 @@ export function createChannelArchive(root, redact) {
     return null;
   }
 
-  return { files, readLines, position, project, recordAt, discardTail, forget };
+  return { files, readLines, position, project, recordAt, findRecord, discardTail, forget };
 }

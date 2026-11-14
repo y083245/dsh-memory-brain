@@ -32,7 +32,7 @@ class ChannelIndexUnavailable(RuntimeError):
     """The archive no longer proves that this channel's derived views are current."""
 
 
-ARCHIVE_PROTOCOL = {"identity": 1, "archive": 1, "index": 1}
+ARCHIVE_PROTOCOL = {"identity": 1, "archive": 2, "index": 1}
 CHANNEL_STATE_PREFIX = "channel:index:"
 FILE_NAME = re.compile(r"(?:[0-9]{4}|\+[0-9]{6})-(?:0[1-9]|1[0-2])\.jsonl")
 SHA256 = re.compile(r"[0-9a-f]{64}")

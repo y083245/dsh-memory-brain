@@ -68,6 +68,7 @@ jobs:
       - run: npm ci
       - run: npm install -g @deepseek-ai/dsh@${{ matrix.dsh }}
       - run: node scripts/ci-dsh-compat.mjs
+      - run: node scripts/ci-channel-text-tools.mjs
 
   # 官方 Windows 桌面版安装包：静默安装后按桌面版 main 进程的方式拉起 Host，看预设注册得上不。
   dsh-desktop-windows:

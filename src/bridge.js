@@ -18,6 +18,8 @@ import { GEN1_ROLE_LINE_RE, parseRoleSections, roleCharStats, roleSectionReport,
 import { fileURLToPath } from 'node:url';
 import { createQQAdapter } from './channels/qq.js';
 import { canonicalLegacyQQKey as canonicalV2Key } from './core/identity.mjs';
+import { startChannelHost } from './runtime/channel-host.mjs';
+import { channelTextToolsEnabled, expectsChannelToolCredentials, publishChannelToolCredentials } from './runtime/channel-tool-launch.mjs';
 import { NodeApiClient, unwrap, createTurnCollector, discoverDshLaunchToken } from './dsh-client.js';
 import { describeEndpoint, modelSetupHint, resolveDshEndpoint } from './dsh-discovery.js';
 import { discoverDshBaseUrl } from './dsh-endpoint.js';
@@ -111,6 +113,7 @@ const LOCAL_TEXT_WAKES = new Map([
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
+const CONFIG_FILE = path.join(ROOT, 'config.json');
 const STATE_DIR = path.join(ROOT, 'state');
 const STATE_FILE = path.join(STATE_DIR, 'sessions.json');
 const ROLE_STATE_FILE = path.join(STATE_DIR, 'current-role.json');
@@ -248,6 +251,7 @@ function atomicWriteJson(file, obj) {
     try { fs.unlinkSync(tmp); } catch {}
     throw error;
   }
+  if (file === CONFIG_FILE) channelHost?.reload();
 }
 
 // 原子写文本文件。
@@ -707,15 +711,20 @@ function normalizeReasoningEffort(value) {
 // 窗口数 = token.length - 11，token 本身是 32 位 hex，即每个 token 最多 21 个窗口。
 const TOKEN_FRAGMENT_WIDTH = 12;
 
+function includesTokenFragment(value, token) {
+  if (!token || token.length < TOKEN_FRAGMENT_WIDTH) return false;
+  for (let i = 0; i + TOKEN_FRAGMENT_WIDTH <= token.length; i += 1) {
+    if (value.includes(token.slice(i, i + TOKEN_FRAGMENT_WIDTH))) return true;
+  }
+  return false;
+}
+
 /** 文本里是否出现任一已知 token 的任意 12 字符窗口。 */
 function hasKnownTokenFragment(text) {
   const value = String(text ?? '');
   if (!value) return false;
   for (const token of KNOWN_AGENT_TOKENS) {
-    if (!token || token.length < TOKEN_FRAGMENT_WIDTH) continue;
-    for (let i = 0; i + TOKEN_FRAGMENT_WIDTH <= token.length; i += 1) {
-      if (value.includes(token.slice(i, i + TOKEN_FRAGMENT_WIDTH))) return true;
-    }
+    if (includesTokenFragment(value, token)) return true;
   }
   return false;
 }
@@ -758,6 +767,7 @@ function readRoleState() {
 }
 function writeRoleState(role, mode) {
   atomicWriteJson(ROLE_STATE_FILE, { role: role ?? null, mode: mode ?? 'active' });
+  if (mode === 'silent') channelHost?.invalidateAll();
 }
 function sanitizeRoleName(name) {
   return String(name ?? '').replace(/[^\w\u4e00-\u9fff-]/g, '');
@@ -1186,6 +1196,7 @@ let state = { sessions: {} };
 // saveState() 会把这份空映射原子写回磁盘 —— 一次截断/占用/写满就变成永久丢失。
 // 与表情库、黑话库一样走「只读不写」降级：保留原文件，等人来处理。
 let stateWritable = true;
+let stateLoaded = false;
 function loadState() {
   let raw;
   try {
@@ -1226,6 +1237,7 @@ function saveState() {
 // 锁文件存 PID；启动时若该 PID 仍存活则退出（exit 2 = 已有实例），
 // 否则接管。进程退出/崩溃后锁自动失效（PID 校验）。
 const LOCK_FILE = path.join(STATE_DIR, 'bridge.lock');
+let lockAcquired = false;
 
 /**
  * 控制台端口是否已被占用 —— 用来判断「是不是真的还有一个桥接在跑」。
@@ -1253,6 +1265,7 @@ async function acquireLock() {
   const tryCreate = () => {
     try {
       fs.writeFileSync(LOCK_FILE, String(process.pid), { flag: 'wx', mode: 0o600 });
+      lockAcquired = true;
       return true;
     } catch (error) {
       if (error?.code === 'EEXIST') return false;
@@ -1310,11 +1323,15 @@ async function acquireLock() {
   console.error(`[bridge] 已有实例在运行（锁文件 ${LOCK_FILE}）。若确认其已死，删除该文件后重试。`);
   process.exit(2);
 }
+function ownsBridgeLock() {
+  if (!lockAcquired) return false;
+  try { return Number(fs.readFileSync(LOCK_FILE, 'utf8').trim()) === process.pid; }
+  catch { return false; }
+}
+
 function releaseLock() {
   try {
-    if (fs.existsSync(LOCK_FILE) && Number(fs.readFileSync(LOCK_FILE, 'utf8').trim()) === process.pid) {
-      fs.unlinkSync(LOCK_FILE);
-    }
+    if (ownsBridgeLock()) fs.unlinkSync(LOCK_FILE);
   } catch {}
 }
 
@@ -1589,6 +1606,59 @@ const REJECT_WORDS = new Set(['拒绝', '不同意', '不允许', '驳回', 'no'
 // state/ 的 ACL 是否已收紧（hardenStateDirAcl 的结果；控制台「访问与安全」页会显示，
 // 未收紧时给出可复制的提权命令）。null = 还没跑/平台不适用。
 let stateDirHardened = null;
+let channelHost = null;
+let channelHostStarting = null;
+const channelStateWatches = [];
+let bridgeShutdown = null;
+const BRIDGE_SHUTDOWN_TIMEOUT_MS = 8_000;
+
+function watchChannelState(file, onChange) {
+  const name = path.basename(file).toLowerCase();
+  try {
+    const watcher = fs.watch(path.dirname(file), { persistent: false }, (_event, filename) => {
+      if (filename == null || String(filename).toLowerCase() === name) onChange();
+    });
+    watcher.on('error', () => log('[channels] 本地配置监听失败'));
+    channelStateWatches.push(watcher);
+  } catch {
+    log('[channels] 本地配置监听未启动');
+  }
+}
+
+function shutdownBridge() {
+  bridgeShutdown ??= (async () => {
+    const closeChannels = async () => {
+      for (const watcher of channelStateWatches.splice(0)) watcher.close();
+      if (!channelHost && channelHostStarting) await channelHostStarting;
+      await channelHost?.close();
+    };
+    let timer;
+    let closed = false;
+    try {
+      closed = await Promise.race([
+        closeChannels().then(() => true),
+        new Promise((resolve) => { timer = setTimeout(() => resolve(false), BRIDGE_SHUTDOWN_TIMEOUT_MS); }),
+      ]);
+      if (!closed) log('[channels] 关闭等待超时，未完成的任务将在重启后恢复');
+    } catch {
+      log('[channels] 关闭失败');
+    } finally {
+      clearTimeout(timer);
+      channelHost = null;
+      if (stateLoaded && ownsBridgeLock()) {
+        try { dailyReport?.flush(); } catch {}
+        try { saveState(); } catch { log('退出前保存会话映射失败'); }
+      }
+      // A worker that did not finish may still use SQLite. Keep the lock until exit.
+      if (closed) releaseLock();
+    }
+  })();
+  return bridgeShutdown;
+}
+
+function exitBridge(code) {
+  void shutdownBridge().finally(() => process.exit(code));
+}
 
 // ── 主流程 ──────────────────────────────────────────────────────────────────
 async function main() {
@@ -1597,6 +1667,7 @@ async function main() {
   hardenStateDirAcl();
   await acquireLock();
   loadState();
+  stateLoaded = true;
 
   // ── 群聊黑话/网络用语学习（slang） ──────────────────────────────────────
   let slangEntries = [];
@@ -3431,15 +3502,19 @@ async function main() {
   }
 
   // DSH 侧：先发现端点（dsh web 固定端口 / 桌面版随机端口），见 src/dsh-discovery.js。
+  const channelToolHandoff = expectsChannelToolCredentials();
   const dshTarget = String(process.env.QQ_BRIDGE_DSH_TARGET || cfg.dsh.target || 'auto').trim().toLowerCase();
   const dshWebUrl = String(cfg.dsh.baseUrl || 'http://127.0.0.1:3080');
-  let dshEndpoint = await resolveDshEndpoint({ baseUrl: dshWebUrl, target: dshTarget }).catch(() => null);
+  // The managed launcher starts DSH after receiving the listener credentials.
+  const managedDesktop = channelToolHandoff && dshTarget === 'desktop';
+  let dshEndpoint = channelToolHandoff ? null
+    : await resolveDshEndpoint({ baseUrl: dshWebUrl, target: dshTarget }).catch(() => null);
   if (dshEndpoint) {
     log(`DSH 端点：${describeEndpoint(dshEndpoint)}`);
     if (dshEndpoint.homeMismatch) {
       log(`⚠️ 桌面版用的 DSH 数据目录是 ${dshEndpoint.dshHome}，与本进程不同；鉴权可能失败，请让 DSH_HOME 指向同一目录`);
     }
-  } else {
+  } else if (!channelToolHandoff) {
     log(`暂未找到可用的 DSH（target=${dshTarget}）：请打开 DSH 桌面版或运行 dsh web；起来后会自动发现`);
   }
   const api = new NodeApiClient(dshEndpoint?.baseUrl ?? dshWebUrl, undefined, {
@@ -3923,6 +3998,7 @@ async function main() {
   // DSH 可用性探活 + 重启容错队列：
   // DSH 重启期间收到的 QQ 消息先入队（不丢），DSH 恢复后按序补投。
   let dshReady = false;
+  let channelDshReady = false;
   let dshCheckStarted = false;
   let snowlumaWatchStarted = false; // SnowLuma 上游健康探测只启动一次（见 startSnowlumaWatch）
   let currentMode = 'chat'; // chat | closed-agent | reserved（仿真模式，由 DSH settings / state/mode.json 驱动）
@@ -4273,16 +4349,19 @@ async function main() {
   // 那条路找不到时再退回只认「能用我们的 Cookie 通过 settings/describe」的端口枚举（src/dsh-endpoint.js）。
   let lastDshDiscoveryAt = 0;
   async function rediscoverDshBase() {
-    if (cfg.dsh?.autoDiscoverPort === false) return false;
+    if (cfg.dsh?.autoDiscoverPort === false && !managedDesktop) return false;
     if (Date.now() - lastDshDiscoveryAt < 10000) return false;
     lastDshDiscoveryAt = Date.now();
     const previous = api.resolveBase();
     let found = await resolveDshEndpoint({ baseUrl: dshWebUrl, target: dshTarget }).catch(() => null);
-    if ((!found || found.baseUrl === previous) && dshTarget !== 'web') {
+    if (!channelToolHandoff && (!found || found.baseUrl === previous) && dshTarget !== 'web') {
       const base = await discoverDshBaseUrl({ current: previous, log }).catch(() => null);
       if (base) found = { baseUrl: base, kind: 'desktop', profile: 'desktop' };
     }
-    if (!found || found.baseUrl === previous) return false;
+    if (!found || (managedDesktop && (found.kind !== 'desktop' || found.homeMismatch)) ||
+        (found.baseUrl === previous && (!managedDesktop || dshEndpoint))) return false;
+    channelDshReady = false;
+    channelHost?.invalidateAll();
     api.rebind(found.baseUrl);
     dshLive.url = found.baseUrl;
     dshEndpoint = found;
@@ -4295,10 +4374,16 @@ async function main() {
   }
   const checkDsh = async () => {
     let ok = false;
-    try {
-      await api.settings.describe({});
-      ok = true;
-    } catch {}
+    if (!managedDesktop || dshEndpoint) {
+      try {
+        await api.settings.describe({});
+        ok = true;
+      } catch {}
+    }
+    if (!ok && channelDshReady) {
+      channelDshReady = false;
+      channelHost?.invalidateAll();
+    }
     // 配置里的地址探不通时，先试着找出「真正在跑的那个 DSH」，再下不可用的结论。
     if (!ok && await rediscoverDshBase()) {
       try {
@@ -4307,6 +4392,7 @@ async function main() {
       } catch {}
     }
     if (ok) {
+      channelDshReady = true;
       await refreshMode();
       // DSH 起来后拉一次 preset 清单；DSH 重启（dshReady 由 false 变 true）时再拉一次。
       if (!dshReady || dshPresetIds.length === 0) {
@@ -9498,8 +9584,7 @@ async function main() {
             // 而重启这条路径以前直接 process.exit，500ms 窗口内改动的唤醒配置/计数器会丢。
             try { saveState(); } catch (error) { log('重启前保存会话映射失败:', error?.message ?? error); }
             try { saveSocialV2State(); } catch (error) { log('重启前保存二代会话状态失败:', error?.message ?? error); }
-            releaseLock();
-            process.exit(0);
+            exitBridge(0);
           }, 500);
           return;
         }
@@ -9517,9 +9602,10 @@ async function main() {
       log(`控制台服务错误: ${error?.message ?? error}`);
       if (error?.code === 'EADDRINUSE') {
         console.error(`[bridge] 控制台端口 ${port} 已被占用（可能已有实例在运行），退出。`);
-        process.exit(2);
+        exitBridge(2);
+        return;
       }
-      process.exit(1);
+      exitBridge(1);
     });
     return server;
   }
@@ -14590,6 +14676,10 @@ async function main() {
     let retryMs = 3000;
     let failureStreak = 0;
     for (;;) {
+      if (managedDesktop && !dshEndpoint) {
+        await sleep(retryMs);
+        continue;
+      }
       let framesThisStream = 0;
       try {
         log('连接 DSH 事件流…');
@@ -15070,12 +15160,73 @@ async function main() {
     }
   }
 
+  const readChannelConfig = () => readJsonSafe(CONFIG_FILE, null);
+  const initialChannelConfig = readChannelConfig();
+  const channelStateDir = path.join(STATE_DIR, 'channels');
+  const hasChannelOutbox = stateDirHardened === true && fs.existsSync(path.join(channelStateDir, 'outbox.sqlite'));
+  if (!bridgeShutdown && (channelToolHandoff || initialChannelConfig?.channels?.feishu?.enabled === true ||
+      initialChannelConfig?.channels?.telegram?.enabled === true || hasChannelOutbox)) {
+    channelHostStarting = (async () => {
+      const options = {
+        api, stateDir: channelStateDir, workspacePath: path.join(channelStateDir, 'workspace'), longMemory: ltm, rag,
+        readConfig: readChannelConfig, readRoleState,
+        readRoleCard(name) {
+          const safeName = sanitizeRoleName(name);
+          if (!safeName || safeName !== name) return '';
+          try { return roleStore.read(safeName); } catch { return ''; }
+        },
+        isSensitive(text) {
+          return hasKnownTokenFragment(text) || includesTokenFragment(text, channelHost?.toolCredentials?.secret);
+        },
+        canRunTurns: () => channelDshReady && !bridgeShutdown,
+        log,
+      };
+      async function openHost(enableTextTools) {
+        if (bridgeShutdown) return;
+        try { channelHost = await startChannelHost({ ...options, enableTextTools }); }
+        catch {
+          log('[channels] 新渠道宿主启动失败');
+        }
+      }
+      const enableTextTools = stateDirHardened === true && channelToolHandoff && channelTextToolsEnabled(initialChannelConfig);
+      if (stateDirHardened === true) await openHost(enableTextTools);
+      else log('[channels] 状态目录权限未收紧，新渠道宿主未启动');
+      if (bridgeShutdown) return;
+      if (channelToolHandoff) {
+        const credentials = channelHost?.toolCredentials ?? null;
+        const published = await publishChannelToolCredentials(credentials);
+        if (enableTextTools && (!credentials || !published) && !bridgeShutdown) {
+          try { await channelHost?.close(); }
+          catch {
+            log('[channels] 关闭未交接的文本工具监听失败');
+            return;
+          }
+          channelHost = null;
+          await openHost(false);
+        }
+      }
+      if (channelHost && !bridgeShutdown) {
+        // Directory watches see atomic replacements. A single event can cover a
+        // revoke-and-restore sequence, so drop grants before reading fresh policy.
+        watchChannelState(CONFIG_FILE, () => {
+          channelHost?.invalidateAll();
+          channelHost?.reload();
+        });
+        watchChannelState(ROLE_STATE_FILE, () => channelHost?.invalidateAll());
+      }
+    })();
+    await channelHostStarting;
+    channelHostStarting = null;
+  }
+  if (bridgeShutdown) return;
+
   const qq = await createQQAdapter(cfg.snowluma);
+  if (bridgeShutdown) return;
   const { bot } = qq;
   qq.bindIngress({
-    onMessage: (kind, id, event) => handleIncoming(kind, id, event, cfg),
-    onPoke: handlePokeNotice,
-    onRecall: handleRecallNotice,
+    onMessage: (kind, id, event) => !bridgeShutdown && handleIncoming(kind, id, event, cfg),
+    onPoke: (event) => !bridgeShutdown && handlePokeNotice(event),
+    onRecall: (event) => !bridgeShutdown && handleRecallNotice(event),
     log,
   });
 
@@ -15299,19 +15450,10 @@ async function main() {
 }
 
 process.on('SIGINT', () => {
-  // REPORT_PATCH：退出前尽量把报表计数与心跳写盘。
-  try { dailyReport?.flush(); } catch {}
   log('退出中…');
-  saveState();
-  releaseLock();
-  process.exit(0);
+  exitBridge(0);
 });
-process.on('SIGTERM', () => {
-  try { dailyReport?.flush(); } catch {}
-  saveState();
-  releaseLock();
-  process.exit(0);
-});
+process.on('SIGTERM', () => exitBridge(0));
 process.on('unhandledRejection', (error) => {
   // 打出 stack：只记 message 的话，「偶发一次」和「已经坏了六小时」看起来一模一样。
   log('未处理异常:', error?.stack ?? error?.message ?? error);
@@ -15327,9 +15469,7 @@ process.on('unhandledRejection', (error) => {
  */
 process.on('uncaughtException', (error) => {
   try { log('致命异常（进程即将退出）:', error?.stack ?? error?.message ?? error); } catch {}
-  try { saveState(); } catch {}
-  releaseLock();
-  process.exit(1);
+  exitBridge(1);
 });
 process.on('exit', () => releaseLock());
 
@@ -15337,8 +15477,9 @@ main().catch((error) => {
   // userFacing：可预期的使用错误（例如还没建 config.json），只打人话，不打堆栈。
   if (error?.userFacing) {
     console.error(`[bridge] 启动失败：${error.message}`);
-    process.exit(1);
+    exitBridge(1);
+    return;
   }
   console.error('[bridge] 启动失败:', error);
-  process.exit(1);
+  exitBridge(1);
 });

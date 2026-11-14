@@ -12,7 +12,7 @@ const OTHER = encodeConversationKey({ ...SOURCE, threadId: 'two' });
 const TELEGRAM = encodeConversationKey({ platform: 'telegram', accountId: '41', chatType: 'group', chatId: '-100123' });
 const QQ = 'group:123';
 const QUERY = '私密检索短语';
-const PROTOCOL = { ok: true, archive_protocol: { identity: 1, archive: 1, index: 1 } };
+const PROTOCOL = { ok: true, archive_protocol: { identity: 1, archive: 2, index: 1 } };
 const FILE = `c1_${createHash('sha256').update(KEY).digest('hex')}/2026-11.jsonl`;
 const RECORD_ID = `record_${'a'.repeat(64)}`;
 
@@ -64,9 +64,9 @@ test('missing, malformed, incompatible, or unavailable protocol never receives a
     { data: { ok: true } },
     { data: { ok: false, archive_protocol: PROTOCOL.archive_protocol } },
     { data: { ok: 'true', archive_protocol: PROTOCOL.archive_protocol } },
-    { data: { ok: true, archive_protocol: { identity: '1', archive: 1, index: 1 } } },
-    { data: { ok: true, archive_protocol: { identity: 1, archive: 2, index: 1 } } },
-    { data: { ok: true, archive_protocol: { identity: 1, archive: 1 } } },
+    { data: { ok: true, archive_protocol: { identity: '1', archive: 2, index: 1 } } },
+    { data: { ok: true, archive_protocol: { identity: 1, archive: 1, index: 1 } } },
+    { data: { ok: true, archive_protocol: { identity: 1, archive: 2 } } },
     { status: 503, data: { error: `${QUERY} ${KEY}` } },
   ]) assert.equal(await client.search({ key: KEY, query: QUERY }), null);
   assert.equal(server.requests.length, 7);

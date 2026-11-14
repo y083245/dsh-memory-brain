@@ -56,7 +56,7 @@ test('normalizes the source, exact topic and quoted message before queuing and s
   assert.equal(calls.length, 0);
   assert.equal((await deliverNext(telegram)).status, 'pending');
   assert.equal((await deliverNext(telegram)).status, 'sent');
-  assert.deepEqual(grants, [[context, topic], [context, topic], [context, topic]]);
+  assert.deepEqual(grants, Array.from({ length: 4 }, () => [context, topic]));
   assert.deepEqual(calls.map(({ conversation, replyToMessageId, text }) => ({ conversation, replyToMessageId, text })), [
     { conversation: topic, replyToMessageId: '19', text: '你好，' },
     { conversation: topic, replyToMessageId: '19', text: '世界' },
@@ -237,6 +237,8 @@ test('ambiguous failures stop remaining segments and preserve confirmed platform
   for (const [name, response] of [
     ['thrown error', () => { throw new Error('fixture error'); }],
     ['malformed success', () => ({ status: 'sent', platformMessageId: 'om_wrong_platform' })],
+    ['mismatched receipt chat', () => ({ status: 'sent', platformMessageId: '92', platformChatId: '-100456' })],
+    ['mismatched receipt topic', () => ({ status: 'sent', platformMessageId: '92', threadId: '42' })],
     ['unknown status', () => ({ status: 'unexpected' })],
     ['empty response', () => undefined],
   ]) {

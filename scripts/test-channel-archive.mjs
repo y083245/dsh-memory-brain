@@ -7,6 +7,8 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 import { openChannelInbox } from '../src/core/inbox-store.mjs';
+import { openChannelOutbox } from '../src/core/outbox-store.mjs';
+import { decodeIdentityKey, encodeConversationKey, encodeMessageKey } from '../src/core/identity.mjs';
 import { createDailyReport } from '../src/daily-report.js';
 import { createLongMemory } from '../src/long-memory.js';
 import { createMemoryRagClient } from '../src/memory-rag-client.js';
@@ -14,19 +16,24 @@ import { createMemoryRagClient } from '../src/memory-rag-client.js';
 const feishu = { platform: 'feishu', accountId: 'cli_fixture', tenantId: 'tenant_a' };
 const telegram = { platform: 'telegram', accountId: '41' };
 
-function fixture(t, { now = Date.now, leaseMs } = {}) {
+function fixture(t, { now = Date.now, leaseMs, withOutbox = false, outboxCapacity } = {}) {
   const dir = fs.mkdtempSync(path.join(tmpdir(), 'channel-archive-'));
   const dbFile = path.join(dir, 'queue.sqlite');
   const memoryDir = path.join(dir, 'long-memory');
   const root = path.join(memoryDir, 'channel-archive');
   const memory = createLongMemory({ stateDir: memoryDir, redact: (text) => text.replaceAll('fixture-secret', '[redacted]') });
+  const outboxFile = path.join(dir, 'outbox.sqlite');
   let store;
+  let outbox;
   function reopen() {
     store?.close();
-    store = openChannelInbox(dbFile, { archive: memory.channelArchive, now, leaseMs });
+    outbox?.close();
+    if (withOutbox) outbox = openChannelOutbox(outboxFile, { now, capacity: outboxCapacity });
+    store = openChannelInbox(dbFile, { archive: memory.channelArchive, outbox, now, leaseMs });
   }
   t.after(() => {
     store.close();
+    outbox?.close();
     fs.rmSync(dir, { recursive: true, force: true });
   });
   reopen();
@@ -53,7 +60,7 @@ function fixture(t, { now = Date.now, leaseMs } = {}) {
     const file = path.join(root, `c1_${digest}`, '2026-11.jsonl');
     return { bind, inbox, key, messageKey, policy, file, watermark: `${file}.watermark.json` };
   }
-  return { dbFile, dir, memory, enqueue, reopen };
+  return { dbFile, dir, memory, enqueue, reopen, outboxFile, get outbox() { return outbox; }, get store() { return store; } };
 }
 
 function project({ inbox, messageKey }) {
@@ -64,6 +71,94 @@ function project({ inbox, messageKey }) {
   assert.equal(projected.status, 'projected');
   return { token, recordId: projected.recordId };
 }
+
+test('projection backlog consumes queue capacity until the confirmed body is archived', (t) => {
+  const f = fixture(t, { now: () => Date.UTC(2026, 10, 2), withOutbox: true, outboxCapacity: 1 });
+  const source = f.enqueue();
+  const conversation = decodeIdentityKey(source.key);
+  const original = { operationId: 'one', authorizationId: 'fixture_grant', conversation, segments: ['confirmed text'] };
+  const next = { ...original, operationId: 'two' };
+  assert.equal(f.outbox.enqueue(original).status, 'queued');
+  f.outbox.settle(feishu, f.outbox.claim(feishu), { status: 'sent', platformMessageId: 'om_confirmed' });
+  assert.equal(f.outbox.hasActive(feishu), false);
+  assert.equal(f.outbox.enqueue(original).status, 'existing');
+  assert.equal(f.outbox.enqueue(next).status, 'full');
+  assert.equal(f.store.projectNextConfirmation(feishu).status, 'projected');
+  assert.equal(f.outbox.enqueue(next).status, 'queued');
+});
+
+test('a confirmed reply is projected under its real message address and original topic after reopening', (t) => {
+  const f = fixture(t, { now: () => Date.UTC(2026, 10, 2), withOutbox: true });
+  const source = f.enqueue();
+  project(source);
+  const conversation = decodeIdentityKey(source.key);
+  const replyTo = decodeIdentityKey(source.messageKey);
+  f.outbox.enqueue({
+    operationId: 'confirmed_reply', authorizationId: 'fixture_grant', conversation, replyTo,
+    source: { conversation, actor: { ...feishu, userId: 'ou_fixture' } },
+    segments: ['confirmed reply fixture-secret', 'revoked pending segment'],
+  });
+  const first = f.outbox.claim(feishu);
+  const messageKey = encodeMessageKey({ conversation, messageId: 'om_confirmed', platformChatId: conversation.chatId });
+  f.outbox.settle(feishu, first, { status: 'sent', platformMessageId: 'om_confirmed' });
+  f.outbox.settle(feishu, f.outbox.claim(feishu), { status: 'cancelled' });
+  f.reopen();
+  assert.deepEqual(f.store.projectNextConfirmation({ ...feishu, tenantId: 'other_tenant' }), { status: 'idle' });
+  assert.equal(f.store.projectNextConfirmation(feishu).status, 'projected');
+  assert.equal(f.store.projectNextConfirmation(feishu).status, 'idle');
+  const [reply] = f.memory.archiveRows(source.key, { dir: 'out' });
+  assert.equal(reply.messageKey, messageKey);
+  assert.equal(reply.recordId, 'record_' + createHash('sha256').update(messageKey).digest('hex'));
+  assert.equal(reply.sendId, first.sendId);
+  assert.equal(reply.personKey, null);
+  assert.equal(reply.userId, feishu.accountId);
+  assert.equal(reply.replyToMessageKey, source.messageKey);
+  assert.equal(reply.text, 'confirmed reply [redacted]');
+  assert.equal(f.memory.search(source.key, { query: 'confirmed reply', speaker: '我' }).matched, 1);
+  const otherKey = encodeConversationKey({ ...conversation, threadId: '8' });
+  assert.deepEqual(f.memory.archiveRows(otherKey), []);
+  const stored = fs.readFileSync(f.outboxFile);
+  assert.equal(stored.includes('confirmed reply fixture-secret'), false);
+  assert.equal(stored.includes('revoked pending segment'), false);
+  assert.equal(stored.includes('fixture_grant'), false);
+});
+
+test('forgetting a published reply clears pending projection text and preserves its retry identity', (t) => {
+  const f = fixture(t, { now: () => Date.UTC(2026, 10, 2), withOutbox: true });
+  const source = f.enqueue();
+  const conversation = decodeIdentityKey(source.key);
+  f.outbox.enqueue({
+    operationId: 'forget_reply', authorizationId: 'fixture_grant', conversation,
+    source: { conversation, actor: { ...feishu, userId: 'ou_fixture' } }, segments: ['outbound text to forget'],
+  });
+  const claim = f.outbox.claim(feishu);
+  f.outbox.settle(feishu, claim, { status: 'sent', platformMessageId: 'om_confirmed' });
+  const competingInbox = openChannelInbox(f.dbFile, { archive: f.memory.channelArchive, outbox: f.outbox });
+  t.after(() => competingInbox.close());
+  const db = new DatabaseSync(f.outboxFile);
+  db.exec(`CREATE TRIGGER retry_clear BEFORE UPDATE OF text ON outbox_confirmations WHEN NEW.text IS NULL
+    BEGIN SELECT RAISE(ABORT, 'fixture crash after publication'); END;`);
+  try {
+    assert.equal(f.store.projectNextConfirmation(feishu).status, 'retryableFailure');
+    assert.equal(f.outbox.hasPendingConfirmation(feishu), true);
+    const [reply] = f.memory.archiveRows(source.key, { dir: 'out' });
+    assert.equal(reply.text, 'outbound text to forget');
+    assert.equal(competingInbox.bind(feishu, () => null).forgetRecord(source.key, reply.recordId).status, 'retryableFailure');
+    assert.deepEqual(f.memory.archiveRows(source.key), []);
+    const published = fs.readFileSync(source.file);
+    assert.equal(JSON.parse(published).sendId, claim.sendId);
+    assert.equal(JSON.parse(published).deleted, true);
+    db.exec('DROP TRIGGER retry_clear');
+    f.reopen();
+    assert.equal(f.store.projectNextConfirmation(feishu).status, 'forgotten');
+    assert.equal(f.store.projectNextConfirmation(feishu).status, 'idle');
+    assert.deepEqual(fs.readFileSync(source.file), published);
+    assert.equal(f.memory.search(source.key, { query: 'outbound text' }).matched, 0);
+    assert.equal(fs.readFileSync(f.outboxFile).includes('outbound text to forget'), false);
+  } finally {
+    db.close();
+  }
+});
 
 test('trusted channel history uses exact-scope RAG and falls back to live local evidence', async (t) => {
   const { memory, enqueue } = fixture(t);
@@ -79,7 +174,7 @@ test('trusted channel history uses exact-scope RAG and falls back to live local 
     for await (const chunk of req) raw += chunk;
     res.setHeader('content-type', 'application/json');
     if (req.method === 'GET') {
-      return res.end(JSON.stringify({ ok: true, archive_protocol: { identity: 1, archive: state === 'old' ? 0 : 1, index: 1 } }));
+      return res.end(JSON.stringify({ ok: true, archive_protocol: { identity: 1, archive: state === 'old' ? 1 : 2, index: 1 } }));
     }
     const body = JSON.parse(raw);
     bodies.push(body);

@@ -1,6 +1,7 @@
 import { isAbsolute } from 'node:path';
 import { unwrap } from '../dsh-client.js';
-import { CHANNEL_DSH_PRESET, confirmChannelPreset } from './channel-dsh-preset.mjs';
+import { CHANNEL_DSH_PRESET, CHANNEL_DSH_TEXT_PRESET, confirmChannelPreset } from './channel-dsh-preset.mjs';
+import { createChannelCommonToolGrants, createChannelTextTools } from './channel-text-tools.mjs';
 import { createChannelSessionId, createChannelTurnRunner, isChannelSessionId } from './channel-turn-runner.mjs';
 import { createChannelTurnPrompt } from './channel-turn-prompt.mjs';
 import { decodeIdentityKey } from './identity.mjs';
@@ -27,16 +28,26 @@ function validOriginalSession(turn) {
  * authority for recovery and can retire an original session after a restart.
  */
 export function createChannelTurnHost({
-  api, workspacePath, confirmGuard = (_snapshot, options) => confirmChannelPreset(api, options), buildPrompt, isScopeCurrent,
+  api, workspacePath, preset = CHANNEL_DSH_PRESET,
+  confirmGuard = (_snapshot, options) => confirmChannelPreset(api, { ...options, preset }), buildPrompt, isScopeCurrent,
 } = {}) {
   if (typeof workspacePath !== 'string' || !isAbsolute(workspacePath) ||
+      ![CHANNEL_DSH_PRESET, CHANNEL_DSH_TEXT_PRESET].includes(preset) ||
       ![api?.workspace?.create, api?.sessions?.create, confirmGuard, buildPrompt, isScopeCurrent]
         .every((callback) => typeof callback === 'function')) {
     throw new TypeError('Invalid channel turn host configuration');
   }
 
   const sessions = new Map();
+  const textSessions = preset === CHANNEL_DSH_TEXT_PRESET ? new Map() : null;
   let generation = 0;
+
+  function invalidateSource(conversationKey) {
+    const entry = sessions.get(conversationKey);
+    if (!entry) return false;
+    textSessions?.delete(entry.snapshot.sessionId);
+    return sessions.delete(conversationKey);
+  }
 
   function scopeCurrent(scope) {
     const entry = sessions.get(scope.conversationKey);
@@ -48,7 +59,7 @@ export function createChannelTurnHost({
       // Unavailable policy cannot preserve a dispatch grant.
     }
     if (entry && entry.snapshot.bindingRevision === scope.bindingRevision &&
-        sessions.get(scope.conversationKey) === entry) sessions.delete(scope.conversationKey);
+        sessions.get(scope.conversationKey) === entry) invalidateSource(scope.conversationKey);
     return false;
   }
 
@@ -64,8 +75,13 @@ export function createChannelTurnHost({
     const entry = sessions.get(turn.conversationKey);
     if (entry?.snapshot.sessionId !== turn.sessionId) return true;
     if (entry.snapshot.generation !== turn.generation || entry.snapshot.bindingRevision !== turn.bindingRevision) return false;
-    sessions.delete(turn.conversationKey);
-    return true;
+    return invalidateSource(turn.conversationKey);
+  }
+
+  function findTextSession({ conversationKey, sessionId }) {
+    const entry = sessionId === undefined ? sessions.get(conversationKey) : textSessions?.get(sessionId);
+    if (entry && (conversationKey === undefined || entry.snapshot.conversationKey === conversationKey) &&
+        isCurrentSession(entry.snapshot)) return entry;
   }
 
   async function ensureSession(entry, signal) {
@@ -83,10 +99,10 @@ export function createChannelTurnHost({
       const workspaceId = ws?.workspace?.workspaceId;
       if (!stillCurrent() || typeof workspaceId !== 'string' || !workspaceId.trim()) return false;
       const created = unwrap(await api.sessions.create({
-        workspaceId, agentPreset: CHANNEL_DSH_PRESET, sessionId,
+        workspaceId, agentPreset: preset, sessionId,
       }, signal), 'session.create');
       knownCreated = created?.sessionId === sessionId;
-      if (!knownCreated || !stillCurrent() || created.agentPreset !== CHANNEL_DSH_PRESET) return false;
+      if (!knownCreated || !stillCurrent() || created.agentPreset !== preset) return false;
       if (await confirmGuard(snapshot, { signal, sessionId }) !== true || !stillCurrent()) return false;
       entry.ready = true;
       return true;
@@ -112,11 +128,13 @@ export function createChannelTurnHost({
     const { conversationKey, bindingRevision } = scope;
     let entry = sessions.get(conversationKey);
     if (!entry || entry.snapshot.bindingRevision !== bindingRevision) {
+      invalidateSource(conversationKey);
       const snapshot = Object.freeze({
         ...scope, sessionId: createChannelSessionId(conversationKey), generation: ++generation, mode: MODE,
       });
       entry = { snapshot, ready: false, checking: null };
       sessions.set(conversationKey, entry);
+      textSessions?.set(snapshot.sessionId, entry);
     }
     try {
       const text = await buildPrompt(context);
@@ -128,25 +146,25 @@ export function createChannelTurnHost({
         entry.checking = check.finally(() => { entry.checking = null; });
       }
       if (!await entry.checking) {
-        if (sessions.get(conversationKey) === entry) sessions.delete(conversationKey);
+        if (sessions.get(conversationKey) === entry) invalidateSource(conversationKey);
         return null;
       }
       if (signal?.aborted || !isCurrentSession(entry.snapshot)) return null;
       return { ...entry.snapshot, text };
     } finally {
-      if (!entry.ready && !entry.checking && sessions.get(conversationKey) === entry) sessions.delete(conversationKey);
+      if (!entry.ready && !entry.checking && sessions.get(conversationKey) === entry) invalidateSource(conversationKey);
     }
   }
 
   // Trusted lifecycle callers use this when policy changes between runs, so
   // disabling and re-enabling a source cannot restore its previous grant.
-  const invalidateSource = (conversationKey) => sessions.delete(conversationKey);
-  return { prepareTurn, isCurrentSession, invalidateSession, invalidateSource };
+  return { prepareTurn, isCurrentSession, invalidateSession, invalidateSource, ...(textSessions && { findTextSession }) };
 }
 
 /** Bridge composition for adapter bindings opened with a scoped archive. */
 export function createHostedChannelTurnRunner({
   api, workspacePath, longMemory, rag, isScopeCurrent, readRoleState = () => null, readRoleCard, maxConcurrent, now,
+  textTools, commonTools,
 } = {}) {
   function readSynchronousRoleState() {
     const state = readRoleState();
@@ -157,13 +175,24 @@ export function createHostedChannelTurnRunner({
     return state;
   }
 
+  const isSilent = () => readSynchronousRoleState()?.mode === 'silent';
   const host = createChannelTurnHost({
     api, workspacePath, isScopeCurrent,
+    preset: textTools === undefined && commonTools === undefined ? CHANNEL_DSH_PRESET : CHANNEL_DSH_TEXT_PRESET,
     buildPrompt: createChannelTurnPrompt({ readRoleState: readSynchronousRoleState, readRoleCard, now }),
   });
+  const tools = textTools === undefined ? null : createChannelTextTools({ ...textTools, isSilent, findTextSession: host.findTextSession });
+  const common = commonTools === undefined ? null : createChannelCommonToolGrants({ ...commonTools, findTextSession: host.findTextSession });
   const runner = createChannelTurnRunner({
-    api, longMemory, rag, maxConcurrent, now, ...host,
-    isSilent: () => readSynchronousRoleState()?.mode === 'silent',
+    api, longMemory, rag, maxConcurrent, now, ...host, isSilent,
+    registerTextTurn: tools || common ? (turn) => {
+      tools?.registerTurn(turn);
+      common?.registerTurn(turn);
+    } : undefined,
   });
-  return { ...runner, invalidateSource: host.invalidateSource };
+  return {
+    ...runner, invalidateSource: host.invalidateSource,
+    ...(tools && { invokeTextTool: tools.invokeTextTool, deliverNextText: tools.deliverNextText }),
+    ...(common && { invokeCommonTool: common.invokeCommonTool }),
+  };
 }

@@ -120,7 +120,7 @@ def test_channel_indexes_exact_scope_and_preserves_legacy_fts(state, service_api
     assert svc.db.bm25(LEGACY, ["火锅", "legacyone"]) == old_scores
     assert svc.db.doc_freq(["火锅", "legacyone"]) == old_freq
     assert svc.db.bm25(KEY, [SECRET]) and not svc.db.bm25(OTHER, [SECRET])
-    assert client.get("/health").json()["archive_protocol"] == {"identity": 1, "archive": 1, "index": 1}
+    assert client.get("/health").json()["archive_protocol"] == {"identity": 1, "archive": 2, "index": 1}
     assert client.get("/health?protocol=channel").json()["ok"] is True
     res = client.post("/search", json={"key": KEY, "query": "火锅", "debug": True}).json()
     assert res["key"] == KEY and len(res["items"]) == 1

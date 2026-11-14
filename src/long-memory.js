@@ -18,6 +18,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { withChannelLedger } from './core/channel-ledger.mjs';
 import { channelArchiveDirectory, createChannelArchive } from './core/channel-archive.mjs';
 import { normalizeDateRange, normalizeKeywords } from './memory-rag-client.js';
 
@@ -31,6 +32,9 @@ export const CATEGORIES = Object.freeze({
 
 const CAPS = { trait: 40, fact: 100, event: 200, pending: 40, note: 40 };
 const MAX_TEXT = 300;
+
+class LedgerInputError extends Error {}
+class LedgerAccessError extends Error {}
 
 // ── LIFE_LOOP_PATCH：账本前置（子项目 3「主动想起与生活回路」v1，规格 §3、§4）────
 // 超上限从「静默删最旧」改成「归档」：账本是长期记忆，删掉的再也找不回来；
@@ -63,7 +67,7 @@ function dateAt(y, m, d) {
 export function normalizeDueDate(input, now = new Date()) {
   const s = String(input ?? '').trim();
   if (!s) return null;
-  const fail = () => { throw new Error(`到期日看不懂：${[...s].slice(0, 20).join('')}；${DUE_HINT}`); };
+  const fail = () => { throw new LedgerInputError(`到期日看不懂：${[...s].slice(0, 20).join('')}；${DUE_HINT}`); };
   const today = localDay(now);
   const todayWd = today.getDay() === 0 ? 7 : today.getDay();
   // 结果必须落在 [today − 30 天, today + 366 天]；超出说明写错了年份。
@@ -119,7 +123,7 @@ export function normalizeDueDate(input, now = new Date()) {
 function normalizeBy(input) {
   const s = String(input ?? '').trim();
   if (!s) return null;
-  if (s !== 'me' && s !== 'them') throw new Error('谁答应的只能是 me（你答应的）或 them（对方答应的）');
+  if (s !== 'me' && s !== 'them') throw new LedgerInputError('谁答应的只能是 me（你答应的）或 them（对方答应的）');
   return s;
 }
 
@@ -314,8 +318,8 @@ const isChannelKey = (key) => typeof key === 'string' && key.startsWith('c1_');
 
 function archiveSource(row) {
   if (!row.recordId) return {};
-  const { recordId, conversationKey, personKey, messageKey, replyToMessageKey } = row;
-  return { recordId, conversationKey, personKey, messageKey, replyToMessageKey };
+  const { recordId, conversationKey, personKey, messageKey, replyToMessageKey, sendId } = row;
+  return { recordId, conversationKey, personKey, messageKey, replyToMessageKey, ...(sendId === undefined ? {} : { sendId }) };
 }
 function writeFileAtomic(file, data) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -372,37 +376,14 @@ function lineMetas(buf) {
 // （人格模块据此调情绪）。回调放在 createLongMemory 的依赖注入里，账本本身不认识人格模块。
 // DECAY_PATCH：新增可选 decayOf —— (item, userId) => { R, frozen } | null，renderFor 用它
 // 挑「先带哪几条」；没传时 renderFor 的行为与改动前逐字相同。
-export function createLongMemory({ stateDir, redact = (s) => s, log = () => {}, onPromiseClosed = null, decayOf = null }) {
-  const PEOPLE_FILE = path.join(stateDir, 'people.json');
-  const ARCHIVE_DIR = path.join(stateDir, 'archive');
-  // Existing reports and older releases scan the QQ archive directly.
-  const CHANNEL_ARCHIVE_DIR = path.join(stateDir, 'channel-archive');
-  // RAG_PATCH（P2）：遗忘请求文件（memory-rag 起来后自己消费）。
-  const FORGET_DIR = path.join(stateDir, 'forget-requests');
-  fs.mkdirSync(ARCHIVE_DIR, { recursive: true });
-  const channelArchive = createChannelArchive(CHANNEL_ARCHIVE_DIR, redact);
-  const archiveRelative = (key, file) => path.relative(isChannelKey(key) ? CHANNEL_ARCHIVE_DIR : ARCHIVE_DIR, file)
-    .split(path.sep).join('/');
+function createPeopleLedger({ people, saveNow, saveSoon, redact, log, onPromiseClosed, decayOf, validatePerson,
+  createItemId = () => crypto.randomBytes(4).toString('hex') }) {
   // DECAY_PATCH：只在真的传了函数时才启用按牢固度排序，避免把 null / 别的类型当回调。
   const decayFn = typeof decayOf === 'function' ? decayOf : null;
 
-  let people = {};
-  try { people = JSON.parse(fs.readFileSync(PEOPLE_FILE, 'utf8')).people ?? {}; } catch {}
-  let saveTimer = null;
-  function saveNow() {
-    clearTimeout(saveTimer);
-    saveTimer = null;
-    writeFileAtomic(PEOPLE_FILE, JSON.stringify({ version: 1, people }, null, 2) + '\n');
-  }
-  function saveSoon() {
-    if (saveTimer) return;
-    saveTimer = setTimeout(() => { try { saveNow(); } catch (e) { log(`[ltm] 账本写入失败：${e?.message ?? e}`); } }, 2000);
-    saveTimer.unref?.();
-  }
-
   function person(userId, name) {
     const id = String(userId ?? '').trim();
-    if (!/^\d+$/.test(id)) throw new Error(`QQ 号不合法：${userId}`);
+    validatePerson(id, userId);
     let p = people[id];
     if (!p) {
       p = people[id] = { name: '', names: [], items: [], firstSeenAt: nowIso(), lastSeenAt: nowIso(), messages: 0 };
@@ -433,7 +414,7 @@ export function createLongMemory({ stateDir, redact = (s) => s, log = () => {}, 
   }
 
   function assertCoreRoom(p, self = null) {
-    if (coreCount(p, self) >= CORE_MAX) throw new Error(`核心条目最多 ${CORE_MAX} 条，先用 qq_ltm_update 把一条的 core 设为 false`);
+    if (coreCount(p, self) >= CORE_MAX) throw new LedgerInputError(`核心条目最多 ${CORE_MAX} 条，先用 qq_ltm_update 把一条的 core 设为 false`);
   }
 
   /**
@@ -457,16 +438,16 @@ export function createLongMemory({ stateDir, redact = (s) => s, log = () => {}, 
   }
 
   function remember({ userId, name, cat, text, sourceKey, scope, due, by, core, replaces }) {
-    if (!Object.hasOwn(CATEGORIES, cat)) throw new Error(`类别只能是：${Object.keys(CATEGORIES).join(' / ')}`);
+    if (!Object.hasOwn(CATEGORIES, cat)) throw new LedgerInputError(`类别只能是：${Object.keys(CATEGORIES).join(' / ')}`);
     const t = redact(String(text ?? '').trim()).slice(0, MAX_TEXT);
-    if (!t) throw new Error('内容不能为空');
+    if (!t) throw new LedgerInputError('内容不能为空');
     const sk = String(sourceKey ?? '');
     const sc = scope === 'public' || scope === 'private' ? scope : (sk.startsWith('private:') ? 'private' : 'public');
     const p = person(userId, name);
     // LIFE_LOOP_PATCH：到期日 / 谁答应的只对约定有意义（到期日由 AI 在记的时候填，桥接只做换算）
     const dueIn = due == null ? '' : String(due).trim();
     const byIn = by == null ? '' : String(by).trim();
-    if ((dueIn || byIn) && cat !== 'pending') throw new Error('只有约定（pending）才能设到期日和谁答应的');
+    if ((dueIn || byIn) && cat !== 'pending') throw new LedgerInputError('只有约定（pending）才能设到期日和谁答应的');
     const dueDay = dueIn ? normalizeDueDate(dueIn) : null;
     const byWho = byIn ? normalizeBy(byIn) : null;
     const wantCore = core === true;
@@ -480,9 +461,9 @@ export function createLongMemory({ stateDir, redact = (s) => s, log = () => {}, 
     if (repIn) {
       old = p.items.find((x) => x.id === repIn) ?? null;
       if (!old || !visible(old, sk) || old.outdatedAt) {
-        throw new Error(`找不到要替换的旧条目：${repIn}（先用 qq_ltm_recall 查编号；已过时的不能再替换）`);
+        throw new LedgerAccessError(`找不到要替换的旧条目：${repIn}（先用 qq_ltm_recall 查编号；已过时的不能再替换）`);
       }
-      if (dup === old) throw new Error('新内容和旧条目一样，不用替换');
+      if (dup === old) throw new LedgerInputError('新内容和旧条目一样，不用替换');
     }
     // DECAY_PATCH：核心条目被替换时把核心「转移」给新条目 —— 这是转移不是新增，不占名额。
     const inheritCore = !!(old && old.core);
@@ -506,7 +487,7 @@ export function createLongMemory({ stateDir, redact = (s) => s, log = () => {}, 
       saveNow();
       return { item: dup, duplicate: true, replaced: old };
     }
-    const item = { id: crypto.randomBytes(4).toString('hex'), cat, text: t, at: nowIso(), sourceKey: sk, scope: sc };
+    const item = { id: createItemId(), cat, text: t, at: nowIso(), sourceKey: sk, scope: sc };
     // LIFE_LOOP_PATCH：约定默认「还没兑现」；到期日 / 谁答应的可选
     if (cat === 'pending') item.status = 'open';
     if (dueDay) item.due = dueDay;
@@ -529,16 +510,16 @@ export function createLongMemory({ stateDir, redact = (s) => s, log = () => {}, 
 
   function findItem(userId, itemId) {
     const p = people[String(userId ?? '').trim()];
-    if (!p) throw new Error('这个人还没有任何记忆');
+    if (!p) throw new LedgerAccessError('这个人还没有任何记忆');
     const idx = p.items.findIndex((x) => x.id === String(itemId ?? '').trim());
-    if (idx < 0) throw new Error(`找不到记忆条目：${itemId}`);
+    if (idx < 0) throw new LedgerAccessError(`找不到记忆条目：${itemId}`);
     return { p, idx };
   }
 
   function update({ userId, itemId, text, cat, scope, viewerKey, due, by, status, core, archived, outdated }) {
     const { p, idx } = findItem(userId, itemId);
     const it = p.items[idx];
-    if (!visible(it, viewerKey)) throw new Error('这条记忆不属于当前会话，不能修改');
+    if (!visible(it, viewerKey)) throw new LedgerAccessError('这条记忆不属于当前会话，不能修改');
 
     // LIFE_LOOP_PATCH：新参数（due / by / status / core / archived）先全部校验完再动条目，
     // 免得改了一半抛错、留下半截状态。旧参数（text / cat / scope）的行为保持不变。
@@ -546,9 +527,9 @@ export function createLongMemory({ stateDir, redact = (s) => s, log = () => {}, 
     let nextText;
     if (text !== undefined) {
       nextText = redact(String(text).trim()).slice(0, MAX_TEXT);
-      if (!nextText) throw new Error('内容不能为空');
+      if (!nextText) throw new LedgerInputError('内容不能为空');
     }
-    if (cat !== undefined && !Object.hasOwn(CATEGORIES, cat)) throw new Error('类别不合法');
+    if (cat !== undefined && !Object.hasOwn(CATEGORIES, cat)) throw new LedgerInputError('类别不合法');
     const nextCat = cat !== undefined ? cat : it.cat;
 
     const dueIn = due == null ? '' : String(due).trim(); // 空串 = 清除
@@ -556,28 +537,28 @@ export function createLongMemory({ stateDir, redact = (s) => s, log = () => {}, 
     const dueDay = (due !== undefined && dueIn) ? normalizeDueDate(dueIn) : null;
     const byWho = (by !== undefined && byIn) ? normalizeBy(byIn) : null;
     if (((due !== undefined && dueIn) || (by !== undefined && byIn)) && nextCat !== 'pending') {
-      throw new Error('只有约定（pending）才能设到期日和谁答应的');
+      throw new LedgerInputError('只有约定（pending）才能设到期日和谁答应的');
     }
     if (status !== undefined) {
-      if (!PROMISE_STATUSES.includes(status)) throw new Error('状态只能是：open / done / missed / cancelled');
-      if (nextCat !== 'pending') throw new Error('只有约定（pending）才有状态');
+      if (!PROMISE_STATUSES.includes(status)) throw new LedgerInputError('状态只能是：open / done / missed / cancelled');
+      if (nextCat !== 'pending') throw new LedgerInputError('只有约定（pending）才有状态');
     }
     // DECAY_PATCH（规格 M5）：outdated 只认布尔值；undefined 表示这次不改。
-    if (outdated !== undefined && typeof outdated !== 'boolean') throw new Error('outdated 只能是 true 或 false');
+    if (outdated !== undefined && typeof outdated !== 'boolean') throw new LedgerInputError('outdated 只能是 true 或 false');
     // 同一次调用里可能同时改核心与归档，所以按「改完之后」的取值判断冲突。
     const willBeCore = core === true ? true : (core === false ? false : !!it.core);
     const willBeArchived = archived === true ? true : (archived === false ? false : !!it.archivedAt);
     // DECAY_PATCH：同理，按「改完之后」是否过时判断冲突
     const willBeOutdated = outdated === true ? true : (outdated === false ? false : !!it.outdatedAt);
     if (core === true) {
-      if (willBeArchived) throw new Error('已归档的条目先恢复再设为核心');
+      if (willBeArchived) throw new LedgerInputError('已归档的条目先恢复再设为核心');
       // DECAY_PATCH：已过时的条目不能直接设为核心（同一次调用里 outdated: false 可以一起传）
-      if (willBeOutdated) throw new Error('已过时的条目先取消过时再设为核心');
-      if (coreCount(p, it) >= CORE_MAX) throw new Error(`核心条目最多 ${CORE_MAX} 条，先用 qq_ltm_update 把一条的 core 设为 false`);
+      if (willBeOutdated) throw new LedgerInputError('已过时的条目先取消过时再设为核心');
+      if (coreCount(p, it) >= CORE_MAX) throw new LedgerInputError(`核心条目最多 ${CORE_MAX} 条，先用 qq_ltm_update 把一条的 core 设为 false`);
     }
-    if (archived === true && willBeCore) throw new Error('核心条目不能归档，先取消核心');
+    if (archived === true && willBeCore) throw new LedgerInputError('核心条目不能归档，先取消核心');
     // DECAY_PATCH：核心条目不能标过时（同一次调用里 core: false 可以一起传）
-    if (outdated === true && willBeCore) throw new Error('核心条目不能标过时，先取消核心');
+    if (outdated === true && willBeCore) throw new LedgerInputError('核心条目不能标过时，先取消核心');
 
     if (nextText !== undefined) it.text = nextText;
     if (cat !== undefined && cat !== it.cat) {
@@ -651,7 +632,7 @@ export function createLongMemory({ stateDir, redact = (s) => s, log = () => {}, 
 
   function forget({ userId, itemId, viewerKey }) {
     const { p, idx } = findItem(userId, itemId);
-    if (!visible(p.items[idx], viewerKey)) throw new Error('这条记忆不属于当前会话，不能删除');
+    if (!visible(p.items[idx], viewerKey)) throw new LedgerAccessError('这条记忆不属于当前会话，不能删除');
     const [removed] = p.items.splice(idx, 1);
     saveNow();
     return removed;
@@ -836,6 +817,60 @@ export function createLongMemory({ stateDir, redact = (s) => s, log = () => {}, 
       if (items.length) out.push({ userId: id, name: p.name || id, items });
     }
     return out.sort((a, b) => String(a.userId).localeCompare(String(b.userId)));
+  }
+
+  return { touch, remember, update, forget, personView, listPeople, renderFor, visibleTo: visible,
+    duePromises, similarItems, matchItems };
+}
+
+export function createLongMemory({ stateDir, redact = (s) => s, log = () => {}, onPromiseClosed = null, decayOf = null }) {
+  const PEOPLE_FILE = path.join(stateDir, 'people.json');
+  const ARCHIVE_DIR = path.join(stateDir, 'archive');
+  // Existing reports and older releases scan the QQ archive directly.
+  const CHANNEL_ARCHIVE_DIR = path.join(stateDir, 'channel-archive');
+  const FORGET_DIR = path.join(stateDir, 'forget-requests');
+  fs.mkdirSync(ARCHIVE_DIR, { recursive: true });
+  const channelArchive = createChannelArchive(CHANNEL_ARCHIVE_DIR, redact);
+  const archiveRelative = (key, file) => path.relative(isChannelKey(key) ? CHANNEL_ARCHIVE_DIR : ARCHIVE_DIR, file)
+    .split(path.sep).join('/');
+
+  let people = {};
+  try { people = JSON.parse(fs.readFileSync(PEOPLE_FILE, 'utf8')).people ?? {}; } catch {}
+  let saveTimer = null;
+  function saveNow() {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+    writeFileAtomic(PEOPLE_FILE, JSON.stringify({ version: 1, people }, null, 2) + '\n');
+  }
+  function saveSoon() {
+    if (saveTimer) return;
+    saveTimer = setTimeout(() => { try { saveNow(); } catch (e) { log(`[ltm] 账本写入失败：${e?.message ?? e}`); } }, 2000);
+    saveTimer.unref?.();
+  }
+  const qqLedger = createPeopleLedger({ people, saveNow, saveSoon, redact, log, onPromiseClosed, decayOf,
+    validatePerson(id, original) { if (!/^\d+$/.test(id)) throw new Error(`QQ 号不合法：${original}`); },
+  });
+
+  function channelMemory(action, { conversationKey, source }, args) {
+    try {
+      const data = withChannelLedger(stateDir, { conversationKey, source }, action !== 'recall', ({ personKey, people, save }) => {
+        const ledger = createPeopleLedger({ people, saveNow: save, redact,
+          log: () => {}, validatePerson(id) { if (id !== personKey) throw new LedgerAccessError(); },
+          createItemId: () => crypto.randomBytes(16).toString('hex'),
+        });
+        if (action === 'recall') return { items: ledger.personView(personKey, conversationKey)?.items ?? [] };
+        if (action === 'remember') return ledger.remember({ ...args, userId: personKey, name: undefined, sourceKey: conversationKey, scope: 'private' });
+        const input = { ...args, userId: personKey, viewerKey: conversationKey, scope: undefined };
+        if (action === 'update') return { item: ledger.update(input) };
+        if (action === 'forget') return { item: ledger.forget(input) };
+        throw new LedgerInputError();
+      });
+      return { status: 'ok', data };
+    } catch (error) {
+      if (error instanceof LedgerInputError) return { status: 'invalid' };
+      if (error instanceof LedgerAccessError) return { status: 'denied' };
+      return { status: 'unavailable' };
+    }
   }
 
   /** 读一个会话的存档原始行（时间从旧到新），给「忽然想起」挑素材用。 */
@@ -1093,7 +1128,7 @@ export function createLongMemory({ stateDir, redact = (s) => s, log = () => {}, 
   }
 
   // The caller supplies the authorized source key separately from user-controlled search options.
-  async function searchChannelHistory(sourceKey, options = {}, { rag } = {}) {
+  async function searchChannelHistory(sourceKey, options = {}, { rag, modelView = false, isCurrent, signal } = {}) {
     try { channelArchiveDirectory(sourceKey); } catch { return null; }
     const { from, to } = normalizeDateRange(options);
     const query = String(options.query ?? '').trim();
@@ -1101,13 +1136,33 @@ export function createLongMemory({ stateDir, redact = (s) => s, log = () => {}, 
     const { speaker, limit, context, maxChars, debug, mode } = options;
     if (rag && mode !== 'keyword' && (query || keywords.length)) {
       try {
-        const result = await rag.search({ key: sourceKey, query, keywords, from, to, speaker, k: limit, expand: context, debug });
-        if (result && result.semantic !== 'unavailable') return { via: 'rag', result };
+        const result = await rag.search({ key: sourceKey, query, keywords, from, to, speaker, k: limit, expand: modelView ? 0 : context, debug }, { signal });
+        if (isCurrent && !isCurrent()) return null;
+        if (result && result.semantic !== 'unavailable') {
+          if (!modelView) return { via: 'rag', result };
+          // Resolve the index's ranges against the authorized archive. The
+          // index's formatted chunks can contain raw sender identifiers.
+          if (Array.isArray(result.refs) && result.refs.length === result.items?.length) {
+            const rows = rowsAt(sourceKey, result.refs);
+            if (rows.length || result.refs.length === 0) {
+              const { startMs, endMs } = dayRangeMs(parseDayArg(from, 'from'), parseDayArg(to, 'to'));
+              const bounded = rows.filter(({ t }) => {
+                const at = Date.parse(t);
+                return at >= startMs && at <= endMs;
+              });
+              return { via: 'rag', result: { rows: bounded, truncated: rows.length === 200 } };
+            }
+          }
+        }
       } catch {
         log('[ltm] 渠道记忆索引查询失败，改用本地关键词');
       }
     }
-    return { via: 'keyword', result: search(sourceKey, { query, keywords, from, to, speaker, limit, context, maxChars, debug }) };
+    if (isCurrent && !isCurrent()) return null;
+    const result = search(sourceKey, { query, keywords, from, to, speaker, limit, context, maxChars, debug: debug || modelView });
+    if (!modelView) return { via: 'keyword', result };
+    const rows = rowsAt(sourceKey, result.hits);
+    return { via: 'keyword', result: { rows, truncated: result.matched > rows.length } };
   }
 
   function archiveStats(key) {
@@ -1321,16 +1376,13 @@ export function createLongMemory({ stateDir, redact = (s) => s, log = () => {}, 
 
   return {
     CATEGORIES,
-    touch, remember, update, forget, personView, listPeople, renderFor,
+    ...qqLedger, channelMemory,
     archive, channelArchive, hasArchive, search, searchChannelHistory, archiveStats, archiveKeys,
     // RAG_PATCH（P2）：控制台的存档浏览 / 删除，以及给状态页看的遗忘请求队列
     listArchiveRows, deleteArchiveRows, pendingForgetKeys,
-    // LIFE_LOOP_PATCH：生活回路要用的查询（visibleTo 是 visible 的公开别名）
-    visibleTo: visible,
-    duePromises,
     archiveRows,
     // DECAY_PATCH：账本代谢（M2-a 按关键词查、M5 相似提示）+ 桥接按行取回消息
-    similarItems, matchItems, rowsAt,
+    rowsAt,
     flush: () => { if (saveTimer) saveNow(); }
   };
 }

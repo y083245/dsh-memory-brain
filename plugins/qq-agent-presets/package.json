@@ -9,7 +9,8 @@
       "patch": [
         "./presets/qq-chat.patch.yml",
         "./presets/qq-chat-v2.patch.yml",
-        "./presets/channel-chat-v2.patch.yml"
+        "./presets/channel-chat-v2.patch.yml",
+        "./presets/channel-chat-v2-text.patch.yml"
       ]
     }
   }

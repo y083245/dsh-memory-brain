@@ -63,6 +63,8 @@ const tests = [
   'test-channel-inbox.mjs', 'test-channel-archive.mjs', 'test-channel-outbox.mjs', 'test-channel-text-sender.mjs',
   'test-channel-turn-journal.mjs', 'test-channel-dsh-transport.mjs', 'test-channel-turn-runner.mjs',
   'test-channel-dsh-preset.mjs', 'test-channel-turn-host.mjs', 'test-channel-turn-prompt.mjs',
+  'test-channel-text-tools.mjs', 'test-channel-tool-server.mjs', 'test-channel-common-tools.mjs',
+  'test-channel-runtime.mjs', 'test-channel-tool-launch.mjs', 'test-channel-bridge.mjs',
   // 启动器与编码（乱码根因：.cmd 里的非 ASCII 会被 cmd 按 ANSI 解码）
   'test-encoding.mjs',
   // 控制台乱码机制（UTF-8 字节被按 GBK 解码）+ chcp 修复

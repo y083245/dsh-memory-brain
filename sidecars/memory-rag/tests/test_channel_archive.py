@@ -106,6 +106,27 @@ def test_node_rows_use_only_published_bytes_and_keep_exact_provenance(node_archi
             reader.read_rows(archive, key, start_file, offset, line)
 
 
+def test_confirmed_outbound_rows_identify_the_assistant_and_keep_send_provenance(node_archive):
+    archive, key, file, message_key, _ = node_archive()
+    first, second = file.read_bytes().splitlines(keepends=True)
+    row = json.loads(second)
+    row.update(dir="out", personKey=None, userId="41", sendId="send_" + "a" * 64)
+    publish(file, first + encoded_row(row))
+    human, assistant = reader.read_rows(archive, key)
+    assert not human.is_self
+    assert assistant.is_self
+    assert assistant.person_key is None
+    assert assistant.send_id == row["sendId"]
+    assert assistant.message_key == row["messageKey"]
+    assert assistant.reply_to_message_key == message_key
+    marker = {"deleted": True, **{k: row[k] for k in ("recordId", "conversationKey", "messageKey", "sendId")}}
+    publish(file, first + encoded_row(marker))
+    assert reader.read_rows(archive, key) == [human]
+    publish(file, first + encoded_row({**row, "userId": "42"}))
+    with pytest.raises(reader.ChannelArchiveError):
+        reader.read_rows(archive, key)
+
+
 def test_cache_and_snapshot_see_same_length_tombstone_with_restored_mtime(node_archive):
     archive, key, file, _, _ = node_archive()
     original = file.read_bytes()

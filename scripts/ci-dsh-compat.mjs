@@ -16,14 +16,15 @@ const home = fs.mkdtempSync(path.join(os.tmpdir(), 'qqb-dsh-compat-'));
 process.env.HOME = home;
 process.env.USERPROFILE = home;
 process.env.DSH_HOME = path.join(home, '.dsh');
-for (const key of ['DEEPSEEK_API_KEY', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY']) delete process.env[key];
+for (const key of ['DEEPSEEK_API_KEY', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY',
+  'DSH_CHANNEL_TOOL_PORT', 'DSH_CHANNEL_TOOL_SECRET']) delete process.env[key];
 const desktop = process.argv.includes('--desktop');
 
 const { commandSpec, resolveElectronShim } = await import('../src/runtime/commands.mjs');
 const { findDshCli } = await import('../src/runtime/paths.mjs');
 const { checkDshPresets, diagnosePresetProfile } = await import('../src/dsh-discovery.js');
 const { NodeApiClient, unwrap } = await import('../src/dsh-client.js');
-const { CHANNEL_DSH_PRESET, confirmChannelPreset } = await import('../src/core/channel-dsh-preset.mjs');
+const { CHANNEL_DSH_PRESET, CHANNEL_DSH_TEXT_PRESET, confirmChannelPreset } = await import('../src/core/channel-dsh-preset.mjs');
 const { createChannelSessionId } = await import('../src/core/channel-turn-runner.mjs');
 const { encodeConversationKey } = await import('../src/core/identity.mjs');
 
@@ -134,6 +135,12 @@ try {
     if (channel.sessionId !== sessionId || channel.agentPreset !== CHANNEL_DSH_PRESET
         || !await confirmChannelPreset(api, { sessionId })) throw new Error('新渠道安全会话校验失败');
     console.log('session/create channel-chat-v2: 已确认安全预设和指定会话');
+    const roster = unwrap(await api.callUnary('agentPresets/list', {}), 'agentPresets/list');
+    const textPreset = roster.presets.find(row => row.id === CHANNEL_DSH_TEXT_PRESET);
+    if (!Object.hasOwn(textPreset ?? {}, 'broken') || await confirmChannelPreset(api, { preset: CHANNEL_DSH_TEXT_PRESET })) {
+      throw new Error('新渠道文本预设应在未配置回环端点时停用');
+    }
+    console.log('agentPresets/list channel-chat-v2-text: 未配置回环端点时不可用');
   }
 } catch (error) {
   failed = true;
