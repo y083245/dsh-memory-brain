@@ -4,7 +4,7 @@ import { isChannelOutboxId } from './outbox-store.mjs';
 import {
   CHANNEL_TOOL_REQUEST_TIMEOUT_MS, CHANNEL_TOOL_WAIT_REQUEST_TIMEOUT_MS, channelCommonToolStatuses,
   channelTextToolNames, channelTextToolStatuses, validChannelToolArgs, validChannelToolResult,
-} from '../../plugins/qq-agent-presets/channel-tool-contract.mjs';
+} from '../../plugins/channel-agent-presets/channel-tool-contract.mjs';
 
 const HOST = '127.0.0.1';
 const ROUTE = '/channel/text-tool';

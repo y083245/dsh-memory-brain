@@ -19,21 +19,25 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { MIN_NODE_VERSION, checkNodeVersion, mirrorOutputToLog } from './lib/entry-guard.mjs';
 import { planStartNode } from '../src/runtime/node-select.mjs';
+import { readRuntimeConfig } from '../src/runtime/paths.mjs';
+import { isQqEnabled } from '../src/runtime/channel-config.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 function dependenciesInstalled() {
-  return ['js-yaml', '@snowluma/sdk', '@deepseek-ai/dsh-host-apiproxy']
+  return ['js-yaml', '@deepseek-ai/dsh-host-apiproxy']
     .every((name) => fs.existsSync(path.join(ROOT, 'node_modules', ...name.split('/'), 'package.json')));
 }
 
 function installDependencies() {
-  console.log('[start] 首次运行：安装依赖（npm ci，大约 10~60 秒）...');
+  const args = ['ci', '--no-audit', '--no-fund'];
+  if (!isQqEnabled(readRuntimeConfig(ROOT))) args.push('--omit=optional');
+  console.log(`[start] 首次运行：安装依赖（npm ${args.join(' ')}）...`);
   // npm 在 Windows 上是 npm.cmd；Node 18.20+/20.12+ 不允许不经 shell 直接 spawn .cmd，
   // 所以走 cmd.exe（命令行是固定字符串，不拼任何外部输入）。
   const r = process.platform === 'win32'
-    ? spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', 'npm ci --no-audit --no-fund'], { cwd: ROOT, stdio: 'inherit' })
-    : spawnSync('npm', ['ci', '--no-audit', '--no-fund'], { cwd: ROOT, stdio: 'inherit' });
+    ? spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `npm ${args.join(' ')}`], { cwd: ROOT, stdio: 'inherit' })
+    : spawnSync('npm', args, { cwd: ROOT, stdio: 'inherit' });
   if (r.status !== 0 || !dependenciesInstalled()) {
     console.error('[fail] npm ci 失败：请确认已安装 Node.js（自带 npm）且能联网，然后在本目录手动运行 npm ci');
     return false;

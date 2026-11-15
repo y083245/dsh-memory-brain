@@ -5,13 +5,13 @@ import { createServer } from 'node:http';
 import test from 'node:test';
 import yaml from 'js-yaml';
 import * as channelPresets from '../src/core/channel-dsh-preset.mjs';
-import { apply as applyGlobal } from '../plugins/qq-agent-presets/channel-tool-guard-global.mjs';
-import { apply as applyScoped } from '../plugins/qq-agent-presets/channel-tool-guard.mjs';
+import { apply as applyGlobal } from '../plugins/channel-agent-presets/channel-tool-guard-global.mjs';
+import { apply as applyScoped } from '../plugins/channel-agent-presets/channel-tool-guard.mjs';
 
 const { CHANNEL_DSH_PRESET, confirmChannelPreset } = channelPresets;
 const textPreset = 'channel-chat-v2-text';
-const patch = yaml.load(readFileSync(new URL('../plugins/qq-agent-presets/presets/channel-chat-v2.patch.yml', import.meta.url), 'utf8'));
-const manifest = JSON.parse(readFileSync(new URL('../plugins/qq-agent-presets/package.json', import.meta.url), 'utf8'));
+const patch = yaml.load(readFileSync(new URL('../plugins/channel-agent-presets/presets/channel-chat-v2.patch.yml', import.meta.url), 'utf8'));
+const manifest = JSON.parse(readFileSync(new URL('../plugins/channel-agent-presets/package.json', import.meta.url), 'utf8'));
 const sessionId = 'cb1-' + 'a'.repeat(32) + '-' + 'b'.repeat(32);
 const plugins = patch[0].insert.find(row => row.config?.id === CHANNEL_DSH_PRESET).config.plugins;
 
@@ -47,7 +47,7 @@ function fixture({ preset = CHANNEL_DSH_PRESET, roster = [{ id: preset }], rows 
 
 test('channel preset and global guard are installed together in the bundle', () => {
   assert.ok(manifest.dsh.bundle.patch.includes('./presets/channel-chat-v2.patch.yml'));
-  assert.ok(patch[0].insert.some(row => row.name === 'qq-agent-presets/channel-tool-guard-global.mjs'));
+  assert.ok(patch[0].insert.some(row => row.name === 'channel-agent-presets/channel-tool-guard-global.mjs'));
   assert.deepEqual(plugins.find(row => row.id === 'tool-presentation'), {
     id: 'tool-presentation',
     name: '@deepseek-ai/dsh-agent-tool-presentation',
@@ -118,10 +118,10 @@ test('text preset requires its own exact composition and live session selection'
   assert.equal(channelPresets.CHANNEL_DSH_TEXT_PRESET, textPreset);
   const patchPath = './presets/channel-chat-v2-text.patch.yml';
   assert.ok(manifest.dsh.bundle.patch.includes(patchPath));
-  const textPatch = yaml.load(readFileSync(new URL(patchPath, new URL('../plugins/qq-agent-presets/', import.meta.url)), 'utf8'));
+  const textPatch = yaml.load(readFileSync(new URL(patchPath, new URL('../plugins/channel-agent-presets/', import.meta.url)), 'utf8'));
   const rows = textPatch[0].insert.find(row => row.config?.id === textPreset).config.plugins;
   const scoped = rows.find(row => row.id === 'channel-native-text-tools');
-  assert.equal(scoped.name, 'qq-agent-presets/channel-native-text-tools.mjs');
+  assert.equal(scoped.name, 'channel-agent-presets/channel-native-text-tools.mjs');
   const live = fixture({ preset: textPreset, rows });
   assert.equal(await confirmChannelPreset(live.api, { preset: textPreset, sessionId, signal: live.signal }), true);
   for (const options of [
@@ -140,7 +140,7 @@ test('text preset requires its own exact composition and live session selection'
 });
 
 test('native channel tools require the exact preset and a live direct call and validate signed results', async t => {
-  const { apply: applyText } = await import('../plugins/qq-agent-presets/channel-native-text-tools.mjs');
+  const { apply: applyText } = await import('../plugins/channel-agent-presets/channel-native-text-tools.mjs');
   const calls = [];
   let response = { body: '{"status":"queued"}' };
   const endpoint = createServer(async (req, res) => {

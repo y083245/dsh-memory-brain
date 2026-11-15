@@ -5,7 +5,7 @@ import { encodeConversationKey, encodeMessageKey, encodePersonKey } from './iden
 import { isChannelOutboxId, isChannelOutboxText } from './outbox-store.mjs';
 import {
   channelCommonToolNames, validChannelToolArgs, validChannelToolResult,
-} from '../../plugins/qq-agent-presets/channel-tool-contract.mjs';
+} from '../../plugins/channel-agent-presets/channel-tool-contract.mjs';
 
 const SEND = 'channel_send_text';
 const REPLY = 'channel_reply_text';

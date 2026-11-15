@@ -182,8 +182,10 @@ function snowlumaRunning(ctx) {
   return false;
 }
 /** 要不要担心 start-all 替用户拉起 QQ / SnowLuma：只有 Linux 流程才会。 */
-export const hostRunning = (ctx) => !ctx.linuxFlow || (qqRunning(ctx) && snowlumaRunning(ctx));
+export const hostRunning = (ctx) => !ctx.linuxFlow ||
+  (!needsQqHost(ctx.repo) || (qqRunning(ctx) && snowlumaRunning(ctx)));
 export function hostMissing(ctx) {
+  if (!needsQqHost(ctx.repo)) return '';
   const missing = [];
   if (!qqRunning(ctx)) missing.push('QQ');
   if (!snowlumaRunning(ctx)) missing.push('SnowLuma');
@@ -215,8 +217,12 @@ export async function ask(ctx, question) {
 }
 
 export function readConfig(repo) {
-  try { return JSON.parse(fs.readFileSync(path.join(repo, 'config.json'), 'utf8')); } catch { return null; }
+  try { return JSON.parse(fs.readFileSync(path.join(repo, 'config.json'), 'utf8').replace(/^\uFEFF/, '')); } catch { return null; }
 }
+// Upgrade bootstraps into older checkouts that may not honor channels.qq.enabled.
+// Detect support on disk after checkout so rollback keeps the legacy process guard.
+export const needsQqHost = (repo) => readConfig(repo)?.channels?.qq?.enabled !== false ||
+  !fs.existsSync(path.join(repo, 'src', 'runtime', 'channel-config.mjs'));
 export const ragEnabled = (repo) => readConfig(repo)?.memoryRag?.enabled === true;
 export function consolePort(repo) {
   const p = Number(readConfig(repo)?.consolePort);

@@ -495,6 +495,8 @@ await test('MCP：replaces / outdated / query 出现在 schema 里并原样透�
   let client = null;
   try {
     fs.mkdirSync(path.join(tmp, 'src'));
+    fs.mkdirSync(path.join(tmp, 'src', 'runtime'));
+    fs.copyFileSync(path.join(ROOT, 'src/runtime/channel-config.mjs'), path.join(tmp, 'src/runtime/channel-config.mjs'));
     for (const file of ['mcp-snowluma-safe.js', 'sensitive.js', 'qq-model-view.js']) {
       fs.copyFileSync(path.join(ROOT, 'src', file), path.join(tmp, 'src', file));
     }

@@ -35,11 +35,11 @@ const version = commandSpec(cli, ['--version'], { env: process.env, nodeBin: pro
 const versionRun = spawnSync(version.command, version.args, { encoding: 'utf8', env: { ...process.env, ...version.env }, windowsVerbatimArguments: version.windowsVerbatimArguments });
 console.log(`dsh version: ${String(versionRun.stdout ?? '').trim()}`);
 
-const configFile = path.join(ROOT, 'config.json');
-if (!fs.existsSync(configFile)) fs.copyFileSync(path.join(ROOT, 'config.example.json'), configFile);
+const configFile = path.join(home, 'config.json');
+fs.writeFileSync(configFile, '{}');
 
 const profile = desktop ? 'desktop' : 'web';
-const setup = spawnSync(process.execPath, ['scripts/setup-dsh.mjs', profile], { cwd: ROOT, encoding: 'utf8', env: process.env });
+const setup = spawnSync(process.execPath, ['scripts/setup-dsh.mjs', `--config=${configFile}`, profile], { cwd: ROOT, encoding: 'utf8', env: process.env });
 console.log(setup.stdout.split(/\r?\n/).filter((l) => /RESULT|install|ERROR|失败/.test(l)).join('\n'));
 if (setup.status !== 0) { console.error(setup.stderr); process.exit(1); }
 

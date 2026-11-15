@@ -52,7 +52,7 @@ export async function createQQAdapter(config, {
       : bot.sendGroupMessage(Number(id), segment);
   }
 
-  async function sendStructuredText(kind, id, message, replyToMessageId, atUserId = null) {
+  async function sendStructuredText(kind, id, message, replyToMessageId, atUserId = null, { signal } = {}) {
     const segments = [];
     if (replyToMessageId !== undefined && replyToMessageId !== null && String(replyToMessageId).trim() !== '') {
       const rid = String(replyToMessageId).trim();
@@ -69,6 +69,7 @@ export async function createQQAdapter(config, {
     const action = kind === 'private' ? 'send_private_msg' : 'send_group_msg';
     const params = kind === 'private' ? { user_id: Number(id), message: segments } : { group_id: Number(id), message: segments };
     const httpUrl = String(config.httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '');
+    const deadline = AbortSignal.timeout(15000);
     const res = await fetch(`${httpUrl}/${action}`, {
       method: 'POST',
       headers: {
@@ -76,7 +77,7 @@ export async function createQQAdapter(config, {
         ...(config.accessToken ? { authorization: `Bearer ${config.accessToken}` } : {})
       },
       body: JSON.stringify(params),
-      signal: AbortSignal.timeout(15000)
+      signal: signal ? AbortSignal.any([signal, deadline]) : deadline
     });
     const body = await res.json().catch(() => ({}));
     if (!res.ok || body.status !== 'ok' || body.retcode !== 0) {

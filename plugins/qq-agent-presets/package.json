@@ -1,16 +1,14 @@
 {
   "name": "qq-agent-presets",
   "version": "0.5.1",
-  "description": "桥接的 DSH agent preset bundle，提供 QQ 和新渠道预设及对应工具守卫",
+  "description": "QQ 的 DSH agent preset bundle，提供 QQ 预设及对应工具守卫",
   "type": "module",
   "license": "PolyForm-Noncommercial-1.0.0",
   "dsh": {
     "bundle": {
       "patch": [
         "./presets/qq-chat.patch.yml",
-        "./presets/qq-chat-v2.patch.yml",
-        "./presets/channel-chat-v2.patch.yml",
-        "./presets/channel-chat-v2-text.patch.yml"
+        "./presets/qq-chat-v2.patch.yml"
       ]
     }
   }

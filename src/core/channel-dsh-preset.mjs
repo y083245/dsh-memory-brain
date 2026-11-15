@@ -21,7 +21,7 @@ export async function confirmChannelPreset(api, { preset = CHANNEL_DSH_PRESET, s
     const rows = roster.filter(row => row?.id === preset);
     if (rows.length !== 1 || Object.hasOwn(rows[0], 'broken')) return false;
 
-    const patchFile = new URL(`../../plugins/qq-agent-presets/presets/${preset}.patch.yml`, import.meta.url);
+    const patchFile = new URL(`../../plugins/channel-agent-presets/presets/${preset}.patch.yml`, import.meta.url);
     const patch = yaml.load(readFileSync(patchFile, 'utf8'));
     const expected = patch[0].insert.find(row => row.config?.id === preset).config.plugins;
     const document = successfulValue(await api.callUnary('agentPresets/read', { agentPreset: preset }, signal));

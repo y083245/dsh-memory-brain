@@ -11,6 +11,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { resolveOrchestratorPaths } from './paths.mjs';
+import { isQqEnabled } from './channel-config.mjs';
 
 // DSH 源码版的 engines 读不到时用的值。npm 全局版的 package.json 本来就不声明 engines。
 const DSH_NODE_FALLBACK = '24.9.0';
@@ -146,18 +147,19 @@ export function planStartNode({
   const paths = resolveOrchestratorPaths({ root, env, platform, home, fsImpl, execPath });
   if (paths.nodeBinExplicit) return null;
   const requirement = dshNodeRequirement(paths, { fsImpl });
+  const preferCap = isQqEnabled(paths.config);
   const picked = pickStartNode({
     current: { path: execPath, version },
     candidates: listNvmNodes({ env, home, fsImpl }),
     minVersion: requirement?.min ?? '',
     entryMin,
-    hasCap
+    hasCap: preferCap ? hasCap : () => false
   });
   if (!picked) return null;
   const reasons = [];
   if (requirement && !versionAtLeast(version, requirement.min)) reasons.push(`DSH 要 >= ${requirement.min}`);
   if (!versionAtLeast(version, entryMin)) reasons.push(`本项目至少要 ${entryMin}`);
-  if (!hasCap(execPath) && hasCap(picked.path)) reasons.push('它没有 cap_sys_ptrace');
+  if (preferCap && !hasCap(execPath) && hasCap(picked.path)) reasons.push('它没有 cap_sys_ptrace');
   return {
     ...picked,
     note: `当前 node 是 v${version}（${execPath}），${reasons.join('、')}，改用 nvm 里的 v${picked.version}（${picked.path}）`

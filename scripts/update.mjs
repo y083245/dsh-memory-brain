@@ -17,7 +17,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   DERIVED, Exit, RAG_EXCLUDES, ask, binOf, createContext, dshPids, ensureBackupDir, err, git, gitOk, gitOut,
-  healthWaitSeconds, hostMissing, hostRunning, info, ok, pgrepF, pruneBackups, ragEnabled, rollbackCommand, run, sdctl,
+  healthWaitSeconds, hostMissing, hostRunning, info, needsQqHost, ok, pgrepF, pruneBackups, ragEnabled, rollbackCommand, run, sdctl,
   sendSignal, startAll, startCommand, stepper, stopAll, tarCreate, timestamp, ujAppend, unitInstalled, updateCommand,
   waitGone, waitHealthy, warn
 } from './lib/upgrade-common.mjs';
@@ -266,7 +266,8 @@ async function main() {
       else {
         const npm = binOf(ctx, 'npm');
         if (!npm) { err('找不到命令 npm'); fail2('要 npm ci 但找不到 npm'); }
-        if (run(npm, ['ci'], { cwd: repo, orig: true }).code !== 0) fail2('npm ci 失败');
+        const npmArgs = needsQqHost(repo) ? ['ci'] : ['ci', '--omit=optional'];
+        if (run(npm, npmArgs, { cwd: repo, orig: true }).code !== 0) fail2('npm ci 失败');
         ok('npm ci');
       }
     }

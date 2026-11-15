@@ -140,8 +140,13 @@ await test('SnowLuma 目录：从 SnowLuma.exe / 绝对路径 index.mjs / launch
 
 // ── setup-dsh（真跑脚本，DSH_HOME 指向临时目录，不调用真实 dsh）──
 function runSetup(home, ...profiles) {
+  fs.mkdirSync(home, { recursive: true });
+  const configFile = path.join(home, 'config.json');
+  fs.writeFileSync(configFile, '{}');
   const env = { ...process.env, DSH_HOME: home, HOME: home, USERPROFILE: home, QQ_BRIDGE_SKIP_DSH_INSTALL: '1' };
-  const r = spawnSync(process.execPath, [path.join(ROOT, 'scripts', 'setup-dsh.mjs'), ...profiles], { env, encoding: 'utf8', timeout: 60000 });
+  const r = spawnSync(process.execPath, [path.join(ROOT, 'scripts', 'setup-dsh.mjs'), `--config=${configFile}`, ...profiles], {
+    env, encoding: 'utf8', timeout: 60000,
+  });
   if (r.status !== 0) throw new Error(`setup-dsh 退出码 ${r.status}：${r.stderr || r.stdout}`);
   return /RESULT changed=(\d)/.exec(r.stdout)?.[1];
 }
@@ -166,7 +171,8 @@ try {
     }));
     runSetup(home, 'web');
     const pkg = JSON.parse(fs.readFileSync(path.join(home, 'profiles', 'web', 'package.json'), 'utf8'));
-    assert.deepEqual(pkg.dsh.profile.bundles, ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', 'qq-mode-console', 'qq-agent-presets']);
+    assert.deepEqual(pkg.dsh.profile.bundles,
+      ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', 'qq-mode-console', 'qq-agent-presets', 'channel-agent-presets']);
   });
 
   await test('setup-dsh：DSH 在 cordis.patch.yml 末尾追加设置后，再跑判定无改动且不重写文件', () => {

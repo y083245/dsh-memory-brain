@@ -1,4 +1,5 @@
 import { createQQAdapter } from '../src/channels/qq.js';
+import { isExternalChannelEnabled, isQqEnabled, normalizeOwnerQQ, qqNeedsConfig } from '../src/runtime/channel-config.mjs';
 import { canonicalLegacyQQKey as canonicalV2Key } from '../src/core/identity.mjs';
 import { resolveInstalledPreset, synchronizePreset } from '../src/preset-sync.js';
 import { renderPatch } from './build-agent-preset-patches.mjs';
@@ -169,6 +170,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
   class FakeBot {
     async sendPrivateMessage(id, text) { calls.sent.push({ kind: 'private', id, text }); }
     async sendGroupMessage(id, text) { calls.sent.push({ kind: 'group', id, text }); }
+    close() {}
     async getImage({ file }) {
       calls.images.push(file);
       // Valid 1 × 1 PNG, supplied entirely in memory by the fixture gateway.
@@ -209,13 +211,13 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
   }, { out: [], droppingImport: false }).out.join('\n');
   source = source.replaceAll('import.meta.url', JSON.stringify(pathToFileURL(path.join(temp, 'src/bridge.js')).href));
   source = source.slice(0, source.indexOf("process.on('SIGINT'"));
-  source = source.replace('  qq.bindIngress({', `
+  source = source.replace('  try {\n    startQqTransport();', `
   const setStickerEntries = (next) => { stickerEntries = Array.isArray(next) ? next : []; };
   const getStickerEntries = () => stickerEntries;
   return {
     syncInstalledPreset, installedPresetYaml, ensureSession, ensureSlangLearnerSession, runSlangResearch, resolvePresetName, deliverPrompt, drainPromptQueue,
     applyHealedTokens, reportTurnFailure, recordVoiceSentV2, rediscoverDshBase, checkDsh,
-    writeRoleState, shutdownBridge,
+    writeRoleState, shutdownBridge, pumpMux, KNOWN_AGENT_TOKENS,
     getSlangEntries: () => slangEntries,
     completeLearnerTurn(sessionId, output) {
       const waiters = learnerWaiters.get(sessionId) ?? [];
@@ -269,10 +271,11 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     setPresets(value) { dshPresetIds = value; dshDefaultPreset = 'standard'; },
     resetEpoch() { sessionEpoch++; },
   };
-  qq.bindIngress({`);
+  try {
+    startQqTransport();`);
   const timers = new Set();
   const context = vm.createContext({
-    fs, os, path, http, crypto, fileURLToPath, URL, Buffer, AbortSignal, console: { log() {}, error() {} },
+    fs, os, path, http, crypto, fileURLToPath, URL, Buffer, AbortSignal, AbortController, console: { log() {}, error() {} },
     fetch: fakeFetch,
     // 锁文件探测用（bridge.js 顶层的 consolePortInUse）；固定桩掉，测试不连宿主机的端口。
     isPortOpen: async () => false,
@@ -288,6 +291,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     clearTimeout, setInterval: () => ({ unref() {} }), clearInterval: () => {},
     NodeApiClient: class { constructor() { return api; } },
     SnowLumaWebSocketClient: FakeBot,
+    isExternalChannelEnabled, isQqEnabled, normalizeOwnerQQ, qqNeedsConfig,
     canonicalV2Key,
     expectsChannelToolCredentials: () => false,
     createQQAdapter: (config) => createQQAdapter(config, {

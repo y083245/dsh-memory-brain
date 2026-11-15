@@ -46,11 +46,11 @@ test('SnowLuma 客户端库不低于 bot_status 出现的版本（1.14.17）', (
   };
   const min = num('1.14.17');
   for (const name of ['@snowluma/sdk', '@snowluma/mcp']) {
-    const declared = num(pkg.dependencies?.[name]);
-    assert.ok(declared !== null, `${name} 必须在 dependencies 里声明`);
+    const declared = num(pkg.optionalDependencies?.[name]);
+    assert.ok(declared !== null, `${name} 必须在 optionalDependencies 里声明`);
     assert.ok(
       declared >= min,
-      `${name} 声明为 ${pkg.dependencies[name]}，低于 1.14.17 —— 那样订阅不到 bot_status（账号上下线事件），`
+      `${name} 声明为 ${pkg.optionalDependencies[name]}，低于 1.14.17 —— 那样订阅不到 bot_status（账号上下线事件），`
       + '上游健康会少一个信号。',
     );
   }

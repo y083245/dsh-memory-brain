@@ -34,6 +34,7 @@ import { locateSnowLumaHomes, probeOneBotWs, processChainForPort } from './snowl
 import { resolveElectronShim } from './commands.mjs';
 import { findDshCli } from './paths.mjs';
 import { channelTextToolsEnabled, channelToolDshEnv, launchChannelToolBridge, withoutChannelPlatformEnv, withoutChannelToolEnv } from './channel-tool-launch.mjs';
+import { isQqEnabled, isExternalChannelEnabled, qqNeedsConfig } from './channel-config.mjs';
 import {
   EMBED_PORT,
   RAG_PORT,
@@ -52,9 +53,38 @@ const SYSTEMD_TIMEOUT_MS = 180000;
 const STOP_TIMEOUT_MS = 60000;
 const DEFAULT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const entryName = (name, platform = process.platform) => (platform === 'win32' ? `${name}.bat` : `./${name}.sh`);
+const bridgeConsolePort = (config) => Number(config?.consolePort) || BRIDGE_PORT;
+
+function localDshPort(config) {
+  const baseUrl = config?.dsh?.baseUrl;
+  const host = hostOf(baseUrl);
+  if (!['127.0.0.1', 'localhost'].includes(host)) return DSH_PORT;
+  return portOf(baseUrl, DSH_PORT);
+}
 
 function isFile(file) {
   try { return fs.statSync(file).isFile(); } catch { return false; }
+}
+
+async function hasQqSdk(root) {
+  if (!isFile(path.join(root, 'node_modules', '@snowluma', 'sdk', 'package.json'))) return false;
+  try {
+    const sdk = await import('@snowluma/sdk');
+    return typeof sdk.SnowLumaWebSocketClient === 'function' && typeof sdk.text === 'function';
+  } catch {
+    return false;
+  }
+}
+
+async function checkQqAvailability(root, config, warn) {
+  if (!isQqEnabled(config)) return false;
+  if (qqNeedsConfig(config)) {
+    warn('QQ 暂不可用：ownerQQ 配置无效，请修改后重启桥接。');
+    return false;
+  }
+  if (await hasQqSdk(root)) return true;
+  warn('QQ 暂不可用：SnowLuma SDK 缺失或加载失败。在仓库目录执行 npm ci --include=optional 后重启桥接。');
+  return false;
 }
 
 function escapeRegExp(value) {
@@ -469,11 +499,12 @@ async function stopRagSection({ paths, log, ok, warn, platform = process.platfor
 }
 
 async function startDsh({ paths, log, ok, err, platform, onSpawn }) {
-  if (await isPortOpen(DSH_PORT)) {
-    ok(`DSH 已在运行（${DSH_PORT}）`);
+  const port = localDshPort(paths.config);
+  if (await isPortOpen(port)) {
+    ok(`DSH 已在运行（${port}）`);
     return true;
   }
-  const { command, args, cwd } = paths.dshCommand;
+  const { command, args, cwd, kind } = paths.dshCommand;
   const resolved = path.isAbsolute(command)
     ? (isFile(command) ? command : null)
     : findExecutable(command, { env: paths.env, platform });
@@ -481,7 +512,8 @@ async function startDsh({ paths, log, ok, err, platform, onSpawn }) {
     err(`找不到 DSH 启动命令：${command}（可用 DSH_DIR 或 config.json 的 orchestrator.dshCommand 指定）`);
     return false;
   }
-  const spec = commandSpec(command, args, { platform, env: paths.env, nodeBin: paths.nodeBin });
+  const launchArgs = port !== DSH_PORT && kind !== 'custom' ? [...args, '--port', String(port)] : args;
+  const spec = commandSpec(command, launchArgs, { platform, env: paths.env, nodeBin: paths.nodeBin });
   // 与旧脚本一致：非交互环境（systemd / 远程 shell）不一定加载了 nvm 与 pnpm 的 PATH。
   const dshEnv = { ...paths.env };
   const extraPath = [];
@@ -500,11 +532,11 @@ async function startDsh({ paths, log, ok, err, platform, onSpawn }) {
   if (!pid) return false;
   onSpawn?.(pid);
   writePidFile(path.join(paths.runDir, 'dsh.pid'), pid);
-  if (!(await waitForPort(DSH_PORT, 45))) {
-    err(`DSH 45s 内没有监听 ${DSH_PORT}；看日志：${path.join(paths.runDir, 'dsh.log')}`);
+  if (!(await waitForPort(port, 45))) {
+    err(`DSH 45s 内没有监听 ${port}；看日志：${path.join(paths.runDir, 'dsh.log')}`);
     return false;
   }
-  ok(`DSH 已就绪（${DSH_PORT}）`);
+  ok(`DSH 已就绪（${port}）`);
   return true;
 }
 
@@ -578,11 +610,12 @@ export async function checkNodeForServices({
   platform = process.platform,
   warn,
   err,
+  checkQq = isQqEnabled(paths.config),
   portOpen = isPortOpen,
   capCheck = checkSnowLumaCap
 }) {
   let good = true;
-  if (!(await portOpen(DSH_PORT))) {
+  if (!(await portOpen(localDshPort(paths.config)))) {
     const requirement = dshNodeRequirement(paths);
     const problem = nodeVersionProblem({ paths, requirement });
     if (problem.length && requirement.strict) {
@@ -592,7 +625,7 @@ export async function checkNodeForServices({
       warn(problem[0]);
     }
   }
-  if (!(await portOpen(SNOW_PORT)) && !(await capCheck(paths.nodeBin, { err, platform }))) good = false;
+  if (checkQq && !(await portOpen(SNOW_PORT)) && !(await capCheck(paths.nodeBin, { err, platform }))) good = false;
   return good;
 }
 
@@ -643,11 +676,24 @@ async function startSnowLuma({ paths, log, ok, err, platform }) {
   return true;
 }
 
-async function startBridge({ paths, log, ok, err, platform, env = paths.env }) {
+async function startBridge({ paths, log, ok, err, platform, env = paths.env, expectQq = true }) {
   const bridgePid = path.join(paths.runDir, 'bridge.pid');
   const bridgeLog = path.join(paths.runDir, 'bridge.log');
-  if (await isPortOpen(BRIDGE_PORT)) {
-    ok(`qq-bridge 已在运行（${BRIDGE_PORT}）`);
+  const port = bridgeConsolePort(paths.config);
+  if (await isPortOpen(port)) {
+    ok(`qq-bridge 已在运行（${port}）`);
+    return true;
+  }
+  async function confirmReady(offset) {
+    if (!(await waitForPort(port, 40))) {
+      err(`qq-bridge 40s 内没有监听 ${port}；看日志：${bridgeLog}`);
+      return false;
+    }
+    if (expectQq) {
+      if (await waitForLog(bridgeLog, { seconds: 20, needle: 'SnowLuma 已连接', offset })) ok('qq-bridge 已连接 SnowLuma');
+      else log(`warn: qq-bridge 已启动，但还没看到「SnowLuma 已连接」，看日志：${bridgeLog}`);
+    }
+    ok(`qq-bridge 已就绪（${port}）`);
     return true;
   }
   if (platform !== 'win32' && await useUnit('qq-bridge.service', { home: paths.home, env: paths.env, warn: (m) => log(`warn: ${m}`) })) {
@@ -659,14 +705,7 @@ async function startBridge({ paths, log, ok, err, platform, env = paths.env }) {
       err('systemctl 启动 qq-bridge 失败，看：systemctl --user status qq-bridge');
       return false;
     }
-    if (!(await waitForPort(BRIDGE_PORT, 40))) {
-      err(`qq-bridge 40s 内没有监听 ${BRIDGE_PORT}；看日志：${bridgeLog}`);
-      return false;
-    }
-    if (await waitForLog(bridgeLog, { seconds: 20, needle: 'SnowLuma 已连接', offset })) ok('qq-bridge 已连接 SnowLuma');
-    else log(`warn: qq-bridge 已启动，但还没看到「SnowLuma 已连接」，看日志：${bridgeLog}`);
-    ok(`qq-bridge 已就绪（${BRIDGE_PORT}）`);
-    return true;
+    return confirmReady(offset);
   }
 
   const offset = fileSize(bridgeLog);
@@ -681,14 +720,7 @@ async function startBridge({ paths, log, ok, err, platform, env = paths.env }) {
   });
   if (!pid) return false;
   writePidFile(bridgePid, pid);
-  if (!(await waitForPort(BRIDGE_PORT, 40))) {
-    err(`qq-bridge 40s 内没有监听 ${BRIDGE_PORT}；看日志：${bridgeLog}`);
-    return false;
-  }
-  if (await waitForLog(bridgeLog, { seconds: 20, needle: 'SnowLuma 已连接', offset })) ok('qq-bridge 已连接 SnowLuma');
-  else log(`warn: qq-bridge 已启动，但还没看到「SnowLuma 已连接」，看日志：${bridgeLog}`);
-  ok(`qq-bridge 已就绪（${BRIDGE_PORT}）`);
-  return true;
+  return confirmReady(offset);
 }
 
 async function startGsv({ paths, log, ok, warn, platform }) {
@@ -794,7 +826,7 @@ async function ensureConfigFile({ root, log, ok, warn, err }) {
     const example = path.join(root, 'config.example.json');
     if (!isFile(example)) {
       err(`找不到 ${example}`);
-      return false;
+      return null;
     }
     fs.copyFileSync(example, file);
     ok('已从 config.example.json 生成 config.json');
@@ -802,13 +834,15 @@ async function ensureConfigFile({ root, log, ok, warn, err }) {
   const cfg = readJson(file);
   if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) {
     err(`config.json 不是合法的 JSON：${file}（用记事本打开检查逗号 / 引号）`);
-    return false;
+    return null;
   }
+  const qqAvailable = await checkQqAvailability(root, cfg, warn);
+  if (!qqAvailable) return { qqAvailable };
   const hasOwner = /^\d{5,12}$/.test(String(cfg.ownerQQ ?? ''));
   const allowCount = (cfg.allow?.private?.length ?? 0) + (cfg.allow?.groups?.length ?? 0);
   if (hasOwner && allowCount) {
     ok(`config.json：管理员 QQ ${cfg.ownerQQ}，白名单 ${allowCount} 项`);
-    return true;
+    return { qqAvailable };
   }
   log('config.json 还没填管理员 QQ / 白名单：机器人只会回复白名单里的人。');
   const answer = await ask('  请输入你自己的 QQ 号（管理员，会加进私聊白名单；直接回车跳过）：');
@@ -824,28 +858,32 @@ async function ensureConfigFile({ root, log, ok, warn, err }) {
   } else {
     warn('没有填写：白名单为空时机器人谁都不理。之后可编辑 config.json 的 ownerQQ / allow.private，或在控制台填写');
   }
-  return true;
+  return { qqAvailable };
 }
 
 /** ② 跑 setup-dsh（幂等）；返回是否改动、改动了哪些 profile。 */
 async function runSetupDsh({ paths, env, log, ok, warn }) {
   const logFile = path.join(paths.runDir, 'setup-dsh.log');
-  const r = await execFileP(paths.nodeBin, [path.join(paths.root, 'scripts', 'setup-dsh.mjs')], {
+  const scope = isQqEnabled(paths.config) ? 'QQ 预设 / MCP' : '渠道预设';
+  log(`把 ${scope} 装进 DSH...`);
+  const r = await execFileP(paths.nodeBin, [
+    path.join(paths.root, 'scripts', 'setup-dsh.mjs'), `--config=${path.join(paths.root, 'config.json')}`
+  ], {
     cwd: paths.root, env, timeout: 300000
   });
   const output = `${r.stdout}\n${r.stderr}`;
   try { fs.writeFileSync(logFile, output, 'utf8'); } catch { /* 日志写不了不影响结果 */ }
   const result = /RESULT changed=(\d) profiles=(\S*) changedProfiles=(\S*)/.exec(output);
   if (r.code !== 0 || !result) {
-    warn(`把 QQ 预设 / MCP 装进 DSH 失败（完整输出：${logFile}）：`);
+    warn(`把 ${scope} 装进 DSH 失败（完整输出：${logFile}）：`);
     for (const line of output.split(/\r?\n/).filter((l) => /ERROR|失败|failed/i.test(l)).slice(-6)) warn(`  ${line}`);
     return { ok: false, changed: false, changedProfiles: [] };
   }
   const changed = result[1] === '1';
   const changedProfiles = result[3] ? result[3].split(',').filter(Boolean) : [];
   ok(changed
-    ? `QQ 预设 / MCP 已装进 DSH（profile：${result[2]}）`
-    : `DSH 里的 QQ 预设 / MCP 已是最新（profile：${result[2]}）`);
+    ? `${scope}已装进 DSH（profile：${result[2]}）`
+    : `DSH 里的${scope}已是最新（profile：${result[2]}）`);
   return { ok: true, changed, changedProfiles };
 }
 
@@ -911,13 +949,14 @@ async function stopRunningDsh(endpoint, { paths, log, platform }) {
   }
   const pidFile = path.join(paths.runDir, 'dsh.pid');
   const own = readPidFile(pidFile);
-  const pids = own && isPidAlive(own) ? [own] : (await processChainForPort(DSH_PORT, { platform })).slice(0, 1).map((p) => p.pid);
+  const port = localDshPort(paths.config);
+  const pids = own && isPidAlive(own) ? [own] : (await processChainForPort(port, { platform })).slice(0, 1).map((p) => p.pid);
   for (const pid of pids) {
     log(`停止 dsh web（PID ${pid}）...`);
     await stopPid(pid, { platform, timeoutMs: 15000, label: 'dsh web' });
   }
   removePidFile(pidFile);
-  for (let i = 0; i < 20 && await isPortOpen(DSH_PORT); i += 1) await sleep(500);
+  for (let i = 0; i < 20 && await isPortOpen(port); i += 1) await sleep(500);
 }
 
 /** ③ 确保有一个可用的 DSH，并且它已经加载了本项目的 profile 改动。 */
@@ -930,7 +969,7 @@ async function ensureDshDetected({ paths, env, target, setup, log, ok, warn, err
     const profile = profileOf(endpoint);
     const needsRestart = setup.changed && (setup.changedProfiles.length === 0 || setup.changedProfiles.includes(profile));
     if (!needsRestart) return endpoint;
-    warn(`刚把 QQ 预设 / MCP 装进 profile「${profile}」，正在运行的 DSH 要重启一次才会加载`);
+    warn(`刚更新 profile「${profile}」的渠道预设，正在运行的 DSH 要重启一次才会加载`);
     if (preserveRunning) return endpoint;
     const answer = await ask('  现在由脚本自动重启 DSH 吗？[Y/n]（DSH 里正在跑的任务会被中断）：', { yesNo: true });
     if (answer === null || /^n/i.test(answer)) {
@@ -953,7 +992,7 @@ async function ensureDshDetected({ paths, env, target, setup, log, ok, warn, err
 }
 
 /** ④ 等用户开好 OneBot，再找出 HTTP / WS 各自能用的 token 写回 config.json。 */
-async function ensureOneBotUserManaged({ paths, env, log, ok, warn, err, platform }) {
+async function ensureOneBotUserManaged({ paths, env, log, ok, warn, err, platform, waitForGateway = true }) {
   const cfgFile = path.join(paths.root, 'config.json');
   const cfg = readJson(cfgFile) ?? {};
   const sl = cfg.snowluma ?? {};
@@ -971,6 +1010,10 @@ async function ensureOneBotUserManaged({ paths, env, log, ok, warn, err, platfor
   for (;;) {
     const [wsOpen, httpOpen] = await Promise.all([isPortOpen(wsPort, { host: wsHost }), isPortOpen(httpPort, { host: httpHost })]);
     if (wsOpen && httpOpen) break;
+    if (!waitForGateway) {
+      warn('QQ 暂不可用：OneBot 尚未就绪，桥接会继续尝试连接。');
+      return null;
+    }
     if (Date.now() >= deadline) {
       err(`等了 ${waitSeconds} 秒，OneBot 仍未就绪（WebSocket ${wsPort}：${wsOpen ? '已开' : '未开'}，HTTP ${httpPort}：${httpOpen ? '已开' : '未开'}）`);
       err('  请在 SnowLuma 里确认：QQ 已注入并登录；OneBot 网络配置里 HTTP 服务端与 WebSocket 服务端都已启用');
@@ -992,7 +1035,7 @@ async function ensureOneBotUserManaged({ paths, env, log, ok, warn, err, platfor
   // token：先找 SnowLuma 目录（config / 进程 / 常见位置），再逐个试。
   let homes = await locateSnowLumaHomes({ config: cfg, env, wsPort, platform, home: paths.home });
   let http = await discoverSnowLumaConnection({ cfg, baseUrl: httpUrl, homeDirs: homes.map((h) => h.dir), timeoutMs: 5000 });
-  if (!http.ok && !homes.length) {
+  if (!http.ok && !homes.length && waitForGateway) {
     warn('没找到 SnowLuma 的安装目录，读不到它生成的 token');
     const answer = await ask('  请输入 SnowLuma 所在文件夹（含 config 子目录；直接回车跳过）：');
     if (answer) {
@@ -1058,11 +1101,12 @@ function readOneBotTokensSafe(dir) {
 }
 
 /** ⑤ 起桥接，直到「SnowLuma 已连接」「DSH 已就绪」都出现；进程提前退出就把日志尾巴打出来。 */
-async function startBridgeWatched({ paths, env, log, ok, warn, err, platform }) {
+async function startBridgeWatched({ paths, env, log, ok, warn, err, platform, expectQq }) {
   const bridgePid = path.join(paths.runDir, 'bridge.pid');
   const bridgeLog = path.join(paths.runDir, 'bridge.log');
-  if (await isPortOpen(BRIDGE_PORT)) {
-    ok(`qq-bridge 已在运行（${BRIDGE_PORT}）`);
+  const port = bridgeConsolePort(paths.config);
+  if (await isPortOpen(port)) {
+    ok(`qq-bridge 已在运行（${port}）`);
     return true;
   }
   const offset = fileSize(bridgeLog);
@@ -1070,13 +1114,13 @@ async function startBridgeWatched({ paths, env, log, ok, warn, err, platform }) 
   const pid = await spawnService({ spec, cwd: paths.root, logFile: bridgeLog, label: 'qq-bridge', log, err, platform, env });
   if (!pid) return false;
   writePidFile(bridgePid, pid);
-  return waitForBridgeStartup({ pid, bridgePid, bridgeLog, offset, port: BRIDGE_PORT, ok, warn, err });
+  return waitForBridgeStartup({ pid, bridgePid, bridgeLog, offset, port, ok, warn, err, expectQq });
 }
 
-async function waitForBridgeStartup({ pid, bridgePid, bridgeLog, offset, port, ok, warn, err, managed = false }) {
+async function waitForBridgeStartup({ pid, bridgePid, bridgeLog, offset, port, ok, warn, err, managed = false, expectQq = true }) {
   const deadline = Date.now() + 60000;
   const need = { dsh: 'DSH 已就绪' };
-  if (managed) need.console = `本地控制台已启动：http://127.0.0.1:${port}`;
+  if (managed || !expectQq) need.console = `本地控制台已启动：http://127.0.0.1:${port}`;
   else need.snow = 'SnowLuma 已连接';
   const seen = new Set();
   for (;;) {
@@ -1092,13 +1136,13 @@ async function waitForBridgeStartup({ pid, bridgePid, bridgeLog, offset, port, o
       return false;
     }
     if (seen.size === Object.keys(need).length && await isPortOpen(port)) {
-      if (managed && !text.includes('SnowLuma 已连接')) warn(`SnowLuma 尚未连接，桥接会继续尝试；看日志：${bridgeLog}`);
+      if (managed && expectQq && !text.includes('SnowLuma 已连接')) warn(`SnowLuma 尚未连接，桥接会继续尝试；看日志：${bridgeLog}`);
       break;
     }
     if (Date.now() >= deadline) {
-      if (!managed && !seen.has('snow')) warn(`qq-bridge 60 秒内没连上 SnowLuma；看日志：${bridgeLog}`);
+      if (expectQq && !managed && !seen.has('snow')) warn(`qq-bridge 60 秒内没连上 SnowLuma；看日志：${bridgeLog}`);
       if (!seen.has('dsh')) warn(`qq-bridge 60 秒内没连上 DSH；看日志：${bridgeLog}`);
-      if (managed) {
+      if (managed || !expectQq) {
         if (!seen.has('console')) warn(`qq-bridge 控制台没有启动；看日志：${bridgeLog}`);
         return false;
       }
@@ -1106,7 +1150,7 @@ async function waitForBridgeStartup({ pid, bridgePid, bridgeLog, offset, port, o
     }
     await sleep(1000);
   }
-  ok(managed ? 'qq-bridge 已启动控制台并连接 DSH' : 'qq-bridge 已连接 SnowLuma 与 DSH');
+  ok(managed || !expectQq ? 'qq-bridge 已启动控制台并连接 DSH' : 'qq-bridge 已连接 SnowLuma 与 DSH');
   return true;
 }
 
@@ -1123,7 +1167,7 @@ async function verifyManagedTextPreset(endpoint) {
 
 /** Return null to reuse existing services. A failed owned launch returns an explicit failure. */
 export async function startManagedChannelServices({
-  paths, env, bridgeEnv, target, platform, setup, log, ok, warn, err,
+  paths, env, bridgeEnv, target, platform, setup, log, ok, warn, err, expectQq = isQqEnabled(paths.config),
 }, {
   portOpen = isPortOpen, discover = resolveDshEndpoint, listDesktopHosts = findDesktopHosts,
   findImage = findPidsByImage, startBridge = launchChannelToolBridge,
@@ -1136,7 +1180,7 @@ export async function startManagedChannelServices({
   },
 } = {}) {
   if (!channelTextToolsEnabled(paths.config)) return null;
-  const port = Number(paths.config?.consolePort) || BRIDGE_PORT;
+  const port = bridgeConsolePort(paths.config);
   const baseUrl = paths.config?.dsh?.baseUrl || `http://127.0.0.1:${DSH_PORT}`;
   const managedTarget = target === 'desktop' ? 'desktop' : 'web';
   const dshOptions = { baseUrl, target: 'auto', platform };
@@ -1183,7 +1227,7 @@ export async function startManagedChannelServices({
       ? await startDesktop({ ...options, dshOptions: { ...dshOptions, target: 'desktop' } })
       : await startWeb(options) && { baseUrl, kind: 'web' };
     if (!endpoint || (credentials && !ownedDsh) ||
-        !await waitBridge({ pid, bridgePid, bridgeLog, offset, port, ok, warn, err, managed: true })) {
+        !await waitBridge({ pid, bridgePid, bridgeLog, offset, port, ok, warn, err, managed: true, expectQq })) {
       return { ok: false };
     }
     if (credentials && !await verifyTextPreset(endpoint).catch(() => false)) {
@@ -1211,24 +1255,40 @@ export async function startManagedChannelServices({
  * 表现就是 QQ 上没反应，所以这里把能查到的原因都打出来，用户可以直接贴给别人看。
  */
 async function reportPresetRegistration({ endpoint, paths, setup, log, ok, warn }) {
-  const check = await checkDshPresets(endpoint.baseUrl);
+  const qqEnabled = isQqEnabled(paths.config);
+  const externalEnabled = isExternalChannelEnabled(paths.config);
+  const channelPreset = externalEnabled ? (await import('../core/channel-dsh-preset.mjs')).CHANNEL_DSH_PRESET : null;
+  const requiredPresets = [
+    ...(qqEnabled ? REQUIRED_PRESETS : []),
+    ...(externalEnabled ? [channelPreset] : []),
+  ];
+  const check = await checkDshPresets(endpoint.baseUrl, { requiredPresets });
   if (check.ok === null) {
     log('  没能向 DSH 查询预设清单（可能还在启动），跳过这项检查');
     return;
   }
-  if (check.ok) {
-    ok(`DSH 已注册 QQ 预设（${REQUIRED_PRESETS.join(', ')}）`);
-    return;
+  const missingQq = check.missing.filter((id) => REQUIRED_PRESETS.includes(id));
+  if (qqEnabled && !missingQq.length) ok(`DSH 已注册 QQ 预设（${REQUIRED_PRESETS.join(', ')}）`);
+  if (externalEnabled) {
+    if (check.missing.includes(channelPreset)) warn(`DSH 缺少渠道预设 ${channelPreset}，飞书与 Telegram 暂不能进入 DSH 回合`);
+    else ok(`DSH 已注册渠道预设（${channelPreset}）`);
   }
-  warn(`DSH 里没有 QQ 预设（缺 ${check.missing.join(', ')}），群聊和仿真会话会被拒绝。DSH 现有：${check.ids.join(', ') || '（空）'}`);
+  if (!qqEnabled && REQUIRED_PRESETS.some((id) => check.ids.includes(id))) {
+    warn('DSH 进程仍加载旧 QQ 预设，完全退出 DSH 后重新启动以应用当前配置。');
+  }
+  if (check.ok) return;
+  if (missingQq.length) warn(`DSH 里没有 QQ 预设（缺 ${missingQq.join(', ')}），群聊和仿真会话会被拒绝。DSH 现有：${check.ids.join(', ') || '（空）'}`);
   const profile = endpoint.profile || profileOf(endpoint);
-  for (const line of diagnosePresetProfile({ home: endpoint.dshHome || paths.env?.DSH_HOME || path.join(paths.home, '.dsh'), profile })) warn(`  ${line}`);
+  if (missingQq.length) {
+    for (const line of diagnosePresetProfile({ home: endpoint.dshHome || paths.env?.DSH_HOME || path.join(paths.home, '.dsh'), profile })) warn(`  ${line}`);
+  }
   if (setup?.changed) warn('  刚写入过 profile：完全退出 DSH 再打开（桌面版要在托盘 / 菜单栏里退出），然后重新运行本脚本');
   else warn('  请把以上几行和 DSH 版本号一起反馈给我们');
 }
 
 async function runStartUserManaged({ args, paths, env, log, ok, warn, err, platform, ragEnabled }) {
-  if (!(await ensureConfigFile({ root: paths.root, log, ok, warn, err }))) return 1;
+  const configCheck = await ensureConfigFile({ root: paths.root, log, ok, warn, err });
+  if (!configCheck) return 1;
   // config.json 可能刚生成 / 刚改过，重新解析一遍路径。
   Object.assign(paths, resolveOrchestratorPaths({ root: paths.root, env, platform }));
   const serviceEnv = withoutChannelPlatformEnv(env, paths.config);
@@ -1237,32 +1297,43 @@ async function runStartUserManaged({ args, paths, env, log, ok, warn, err, platf
   await startGsv({ paths, log, ok, warn, platform });
   await startRagSection({ paths, ragEnabled, log, ok, warn, platform });
 
-  log('把 QQ 预设 / MCP 装进 DSH...');
   const setup = await runSetupDsh({ paths, env: serviceEnv, log, ok, warn });
 
   const target = args.dshTarget || String(env.QQ_BRIDGE_DSH_TARGET || paths.config?.dsh?.target || 'auto').toLowerCase();
   const managed = channelTextToolsEnabled(paths.config);
+  const externalEnabled = isExternalChannelEnabled(paths.config);
+  const { qqAvailable } = configCheck;
+  const requireOneBot = qqAvailable && !externalEnabled;
   const bridgeEnv = { ...env };
   if (args.dshTarget) bridgeEnv.QQ_BRIDGE_DSH_TARGET = args.dshTarget;
 
   async function prepareOneBot() {
-    // 旧版 Windows 流程由用户管理 QQ / SnowLuma；START_SNOWLUMA=1 时仍可代为启动。
-    if (serviceEnv.START_SNOWLUMA === '1') {
-      if (!(await startQq({ paths, log, ok, err, platform }))) return null;
-      if (!(await startSnowLuma({ paths, log, ok, err, platform }))) return null;
+    if (!qqAvailable) return null;
+    const qqLog = { paths, log, ok, warn, err: externalEnabled ? warn : err, platform };
+    try {
+      // 旧版 Windows 流程由用户管理 QQ / SnowLuma；START_SNOWLUMA=1 时仍可代为启动。
+      if (serviceEnv.START_SNOWLUMA === '1') {
+        if (!(await startQq(qqLog))) return null;
+        if (!(await startSnowLuma(qqLog))) return null;
+      }
+      const result = await ensureOneBotUserManaged({
+        ...qqLog, env: serviceEnv, waitForGateway: !externalEnabled
+      });
+      if (result?.homeDir && !bridgeEnv.SNOWLUMA_HOME) bridgeEnv.SNOWLUMA_HOME = result.homeDir;
+      return result;
+    } catch (error) {
+      if (!externalEnabled) throw error;
+      warn('QQ 暂不可用：OneBot 初始化失败，桥接会继续尝试连接。');
+      return null;
     }
-    const result = await ensureOneBotUserManaged({ paths, env: serviceEnv, log, ok, warn, err, platform });
-    if (result?.homeDir && !bridgeEnv.SNOWLUMA_HOME) bridgeEnv.SNOWLUMA_HOME = result.homeDir;
-    return result;
   }
 
   let managedStartup;
   let onebot;
   if (managed) {
     onebot = await prepareOneBot();
-    if (!onebot) return 1;
     managedStartup = await startManagedChannelServices({
-      paths, env: serviceEnv, bridgeEnv, target, platform, setup, log, ok, warn, err,
+      paths, env: serviceEnv, bridgeEnv, target, platform, setup, log, ok, warn, err, expectQq: !!onebot,
     });
     if (managedStartup?.ok === false) return 1;
   }
@@ -1281,45 +1352,91 @@ async function runStartUserManaged({ args, paths, env, log, ok, warn, err, platf
   }
 
   if (!managed) onebot = await prepareOneBot();
-  if (!onebot) return 1;
-  if (!managedStartup && !(await startBridgeWatched({ paths, env: bridgeEnv, log, ok, warn, err, platform }))) return 1;
+  if (requireOneBot && !onebot) return 1;
+  if (!managedStartup && !(await startBridgeWatched({ paths, env: bridgeEnv, log, ok, warn, err, platform, expectQq: !!onebot }))) return 1;
 
   const cfg = readJson(path.join(paths.root, 'config.json')) ?? {};
   const out = (line = '') => process.stdout.write(`${line}\n`);
   out('');
-  out('全部就绪');
+  out(requireOneBot ? '全部就绪' : '桥接与 DSH 已就绪');
   out(`  DSH              ${describeEndpoint(endpoint)}`);
-  out(`  QQ 机器人账号    ${onebot.self?.nickname ?? '?'}（${onebot.self?.user_id ?? '?'}）`);
-  out(`  桥接控制台       http://127.0.0.1:${managedStartup?.consolePort ?? BRIDGE_PORT}/`);
+  if (onebot) out(`  QQ 机器人账号    ${onebot.self?.nickname ?? '?'}（${onebot.self?.user_id ?? '?'}）`);
+  out(`  桥接控制台       http://127.0.0.1:${bridgeConsolePort(paths.config)}/`);
   out(`  控制台令牌       ${platform === 'win32' ? 'type' : 'cat'} "${path.join(paths.root, 'state', 'console-token')}"`);
   out(`  日志目录         ${paths.runDir}`);
   out('');
-  if (cfg.ownerQQ) out(`现在用你的 QQ（${cfg.ownerQQ}）给机器人账号发一条私聊试试，例如「在吗」。`);
-  else out(`还没配置管理员 QQ / 白名单：编辑 config.json 的 ownerQQ 和 allow.private 后，${entryName('stop-all', platform)} 再 ${entryName('start-all', platform)}。`);
+  if (onebot) {
+    if (cfg.ownerQQ) out(`现在用你的 QQ（${cfg.ownerQQ}）给机器人账号发一条私聊试试，例如「在吗」。`);
+    else out(`还没配置管理员 QQ / 白名单：编辑 config.json 的 ownerQQ 和 allow.private 后，${entryName('stop-all', platform)} 再 ${entryName('start-all', platform)}。`);
+  }
   out('');
   return 0;
 }
 
-function printStartSummary({ paths, ragEnabled, managed, startGsv, platform, consolePort = BRIDGE_PORT }) {
+function printStartSummary({ paths, ragEnabled, managed, startGsv, platform, qqReady, endpoint }) {
   const out = (line = '') => process.stdout.write(`${line}\n`);
-  const title = platform === 'win32' ? '全部就绪' : '\u001b[1;32m全部就绪\u001b[0m';
+  const message = endpoint ? '桥接与 DSH 已就绪' : '全部就绪';
+  const title = platform === 'win32' ? message : `\u001b[1;32m${message}\u001b[0m`;
   out('');
   out(title);
-  out(`  DSH              http://127.0.0.1:${DSH_PORT}`);
+  out(`  DSH              ${endpoint ? describeEndpoint(endpoint) : `http://127.0.0.1:${DSH_PORT}`}`);
   if (startGsv) out(`  GPT-SoVITS API   http://127.0.0.1:${GSV_PORT}/docs`);
   if (ragEnabled) {
     if (managed) out(`  embedding        http://127.0.0.1:${EMBED_PORT}`);
     else out('  向量模型         自己部署 / 云端，不由本脚本管理');
     out(`  memory-rag       http://127.0.0.1:${RAG_PORT}`);
   }
-  out(`  SnowLuma WebUI   http://127.0.0.1:${SNOW_PORT}`);
-  out(`  桥接控制台       http://127.0.0.1:${consolePort}/`);
+  if (qqReady) out(`  SnowLuma WebUI   http://127.0.0.1:${SNOW_PORT}`);
+  out(`  桥接控制台       http://127.0.0.1:${bridgeConsolePort(paths.config)}/`);
   out(`  控制台令牌       ${platform === 'win32' ? 'type' : 'cat'} ${path.join(paths.root, 'state', 'console-token')}`);
   out(`  日志目录         ${paths.runDir}`);
   if (platform !== 'win32' && isFile(systemdUnitFile(paths.home, 'qq-bridge.service'))) {
     out('  systemd 服务     systemctl --user status qq-bridge qq-memory-rag qq-embedding');
   }
   out('');
+}
+
+async function checkLinuxQq({ paths, platform, err }) {
+  if (!(await isPortOpen(SNOW_PORT))) {
+    if (!paths.snowLaunch) {
+      err(`找不到 SnowLuma 目录：${paths.snowDir || '(空)'}。可用 SNOW_DIR 或 config.json 的 orchestrator.snowDir 指定`);
+      return false;
+    }
+    if (!await checkSnowLumaCap(paths.nodeBin, { err, platform })) return false;
+  }
+  return true;
+}
+
+async function startLinuxQq({ paths, platform, log, ok, warn, err, externalEnabled }) {
+  try {
+    if (!(await startQq({ paths, log, ok, err, platform }))) return false;
+    if (!(await startSnowLuma({ paths, log, ok, err, platform }))) return false;
+    if (externalEnabled) {
+      if (!(await waitForPorts(ONEBOT_PORTS, 0))) {
+        warn('QQ 暂不可用：OneBot 尚未就绪，桥接会继续尝试连接。');
+        return false;
+      }
+    } else {
+      log('等待 QQ 登录并打开 OneBot（最多 180 秒）...');
+      log('  如果 QQ 弹出扫码窗口，请现在扫码');
+      if (!(await waitForPorts(ONEBOT_PORTS, 180))) {
+        err('OneBot 没起来：要么 QQ 还没登录完，要么 SnowLuma 没注入到 QQ 进程');
+        console.error('  1) 看一下 QQ 窗口，扫码/确认登录');
+        console.error('  2) 登录完成后重新运行本脚本（已启动的会自动跳过）');
+        console.error('  3) 日志里没有 "[Hook] login detected" 说明 SnowLuma 没挂上 QQ：');
+        console.error(`     ${entryName('stop-all', platform)} 后重新 ${entryName('start-all', platform)}（本脚本会用 SNOWLUMA_HOOK_AUTOLOAD=1 重启 SnowLuma）`);
+        console.error(`  4) SnowLuma 日志：${path.join(paths.runDir, 'snowluma.log')}`);
+        for (const line of tailLines(path.join(paths.runDir, 'snowluma.log'))) console.error(`     ${line}`);
+        return false;
+      }
+    }
+    ok('OneBot 已就绪（3000/3001）');
+    return true;
+  } catch (error) {
+    if (!externalEnabled) throw error;
+    warn('QQ 暂不可用：QQ 或 SnowLuma 启动失败，桥接会继续尝试连接。');
+    return false;
+  }
 }
 
 /** start-all.mjs 入口。返回进程退出码。 */
@@ -1367,8 +1484,10 @@ export async function runStart({
     ok(`日志目录: ${paths.runDir}`);
     return runStartUserManaged({ args, paths, env, log, ok, warn, err, platform, ragEnabled });
   }
-  // 与旧脚本一样尽早发现明显的路径错误：DSH / SnowLuma 没装时先别去起 QQ。
-  if (!(await isPortOpen(DSH_PORT))) {
+  const qqAvailable = await checkQqAvailability(paths.root, paths.config, warn);
+  const externalEnabled = isExternalChannelEnabled(paths.config);
+  const legacyStart = qqAvailable && !externalEnabled;
+  if (legacyStart && !(await isPortOpen(localDshPort(paths.config)))) {
     const { command } = paths.dshCommand;
     const resolved = path.isAbsolute(command)
       ? (isFile(command) ? command : null)
@@ -1378,11 +1497,10 @@ export async function runStart({
       return 1;
     }
   }
-  if (!(await isPortOpen(SNOW_PORT)) && !paths.snowLaunch) {
-    err(`找不到 SnowLuma 目录：${paths.snowDir || '(空)'}。可用 SNOW_DIR 或 config.json 的 orchestrator.snowDir 指定`);
-    return 1;
-  }
-  if (!(await checkNodeForServices({ paths, platform, warn, err }))) return 1;
+  if (!(await checkNodeForServices({ paths, platform, warn, err, checkQq: false }))) return 1;
+  const qqIssue = externalEnabled ? warn : err;
+  const canStartQq = qqAvailable && await checkLinuxQq({ paths, platform, err: qqIssue });
+  if (legacyStart && !canStartQq) return 1;
   ok(`node: ${paths.nodeBin}`);
   ok(`日志目录: ${paths.runDir}`);
 
@@ -1390,52 +1508,49 @@ export async function runStart({
   await startRagSection({ paths, ragEnabled, log, ok, warn, platform });
 
   const managed = channelTextToolsEnabled(paths.config);
-  if (!managed) {
+  if (legacyStart) {
     log('启动 DSH...');
     if (!(await startDsh({ paths, log, ok, err, platform }))) return 1;
   }
 
-  if (!(await startQq({ paths, log, ok, err, platform }))) return 1;
-  if (!(await startSnowLuma({ paths, log, ok, err, platform }))) return 1;
-
-  log('等待 QQ 登录并打开 OneBot（最多 180 秒）...');
-  log('  如果 QQ 弹出扫码窗口，请现在扫码');
-  if (!(await waitForPorts(ONEBOT_PORTS, 180))) {
-    err('OneBot 没起来：要么 QQ 还没登录完，要么 SnowLuma 没注入到 QQ 进程');
-    console.error('  1) 看一下 QQ 窗口，扫码/确认登录');
-    console.error('  2) 登录完成后重新运行本脚本（已启动的会自动跳过）');
-    console.error('  3) 日志里没有 "[Hook] login detected" 说明 SnowLuma 没挂上 QQ：');
-    console.error(`     ${entryName('stop-all', platform)} 后重新 ${entryName('start-all', platform)}（本脚本会用 SNOWLUMA_HOOK_AUTOLOAD=1 重启 SnowLuma）`);
-    console.error(`  4) SnowLuma 日志：${path.join(paths.runDir, 'snowluma.log')}`);
-    for (const line of tailLines(path.join(paths.runDir, 'snowluma.log'))) console.error(`     ${line}`);
-    return 1;
-  }
-  ok('OneBot 已就绪（3000/3001）');
+  const qqReady = canStartQq && await startLinuxQq({ paths, platform, log, ok, warn, err: qqIssue, externalEnabled });
+  if (legacyStart && !qqReady) return 1;
 
   let managedStartup;
-  if (managed) {
-    log('把 QQ 预设 / MCP 装进 DSH...');
+  let endpoint;
+  if (!legacyStart) {
     const setup = await runSetupDsh({ paths, env: paths.env, log, ok, warn });
     const target = args.dshTarget || String(env.QQ_BRIDGE_DSH_TARGET || paths.config?.dsh?.target || 'auto').toLowerCase();
-    managedStartup = await startManagedChannelServices({ paths, env: paths.env, bridgeEnv: env, target, platform, setup, log, ok, warn, err });
+    if (managed) {
+      managedStartup = await startManagedChannelServices({ paths, env: paths.env, bridgeEnv: env, target, platform, setup, log, ok, warn, err, expectQq: qqReady });
+    }
     if (managedStartup?.ok === false) return 1;
-    if (!managedStartup && !(await startDsh({ paths, log, ok, err, platform }))) return 1;
+    endpoint = managedStartup?.endpoint ?? await ensureDshDetected({
+      paths, env: paths.env, target, setup, log, ok, warn, err, platform, preserveRunning: managed
+    });
+    if (!endpoint) return 1;
+    await reportPresetRegistration({ endpoint, paths, setup, log, ok, warn });
   }
-  if (!managedStartup && !(await startBridge({ paths, env, log, ok, err, platform }))) return 1;
+  if (!managedStartup && !(await startBridge({ paths, env, log, ok, err, platform, expectQq: qqReady }))) return 1;
   printStartSummary({
     paths, ragEnabled, managed: isEmbeddingManaged(root), startGsv: paths.startGsv, platform,
-    consolePort: managedStartup?.consolePort,
+    qqReady, endpoint,
   });
   return 0;
 }
 
 async function stopDshIfRequested({ paths, log, ok, warn, platform }) {
   const pidFile = path.join(paths.runDir, 'dsh.pid');
+  const patterns = platform === 'win32'
+    ? ['node.exe', 'cmd.exe', 'deepseek harness.exe', 'dsh.exe']
+    : ['apps/cli/src/bin.ts web', 'pnpm dsh web', 'dsh/lib/bin.js web', '.bin/dsh web'];
+  const { command, kind } = paths.dshCommand;
+  if (platform !== 'win32' && kind === 'cli' && path.isAbsolute(command)) patterns.push(`${command} web`);
   return stopService({
     pidFile,
     label: 'DSH',
-    patterns: platform === 'win32' ? ['node.exe', 'cmd.exe', 'deepseek harness.exe', 'dsh.exe'] : ['apps/cli/src/bin.ts web', 'pnpm dsh web'],
-    port: DSH_PORT,
+    patterns,
+    port: localDshPort(paths.config),
     platform, log, ok, warn
   });
 }
@@ -1454,6 +1569,7 @@ export async function runStop({
 
   const paths = resolveOrchestratorPaths({ root, env, platform });
   paths.env = env;
+  const port = bridgeConsolePort(paths.config);
 
   if (args.ragOnly) {
     log('只停向量记忆（--rag）');
@@ -1465,12 +1581,12 @@ export async function runStop({
   log('停止 qq-bridge');
   if (platform !== 'win32' && await useUnit('qq-bridge.service', { home: paths.home, env: paths.env, warn })) {
     await systemdStop('qq-bridge.service', 'qq-bridge', { env: paths.env, log, ok, warn });
-    if (await isPortOpen(BRIDGE_PORT) || readPidFile(path.join(paths.runDir, 'bridge.pid'))) {
+    if (await isPortOpen(port) || readPidFile(path.join(paths.runDir, 'bridge.pid'))) {
       await stopService({
         pidFile: path.join(paths.runDir, 'bridge.pid'),
         label: 'qq-bridge（systemd 之外）',
         patterns: platform === 'win32' ? ['node.exe'] : ['node src/bridge.js', 'src/bridge.js'],
-        port: BRIDGE_PORT,
+        port,
         platform, log, ok, warn
       });
     }
@@ -1479,7 +1595,7 @@ export async function runStop({
       pidFile: path.join(paths.runDir, 'bridge.pid'),
       label: 'qq-bridge',
       patterns: platform === 'win32' ? ['node.exe'] : ['node src/bridge.js', 'src/bridge.js'],
-      port: BRIDGE_PORT,
+      port,
       platform, log, ok, warn
     });
   }
@@ -1497,10 +1613,10 @@ export async function runStop({
   // Windows 上 QQ / SnowLuma 默认由用户自己打开、注入（start-all 不再替你起它们）：
   // 只停本脚本用 START_SNOWLUMA=1 起过、留了 PID 文件的那份；否则按镜像名兜底会把用户自己的 QQ 关掉。
   const userManaged = (pidName) => platform === 'win32' && !readPidFile(path.join(paths.runDir, pidName));
-  if (userManaged('snowluma.pid')) {
-    ok('SnowLuma 由你自己管理，保留运行');
-  } else {
-    await stopService({
+  if (isQqEnabled(paths.config)) {
+    if (userManaged('snowluma.pid')) {
+      ok('SnowLuma 由你自己管理，保留运行');
+    } else await stopService({
       pidFile: path.join(paths.runDir, 'snowluma.pid'),
       label: 'SnowLuma',
       patterns: platform === 'win32' ? ['node.exe', 'cmd.exe', 'SnowLuma.exe'] : ['SnowLuma-[^/]*/index\\.mjs'],
@@ -1508,12 +1624,9 @@ export async function runStop({
       port: SNOW_PORT,
       platform, log, ok, warn
     });
-  }
-
-  if (userManaged('qq.pid')) {
-    ok('QQ 由你自己管理，保留运行');
-  } else {
-    await stopService({
+    if (userManaged('qq.pid')) {
+      ok('QQ 由你自己管理，保留运行');
+    } else await stopService({
       pidFile: path.join(paths.runDir, 'qq.pid'),
       label: 'QQ',
       patterns: platform === 'win32' ? [path.basename(paths.qqBin)] : [`^${escapeRegExp(paths.qqBin)}( |$)`],

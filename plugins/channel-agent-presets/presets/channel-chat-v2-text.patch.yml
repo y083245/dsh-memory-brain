@@ -12,7 +12,7 @@
             config:
               mode: native
           - id: channel-native-text-tools
-            name: qq-agent-presets/channel-native-text-tools.mjs
+            name: channel-agent-presets/channel-native-text-tools.mjs
           - id: persona
             name: '@deepseek-ai/dsh-persona'
             config:

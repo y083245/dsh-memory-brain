@@ -1,4 +1,5 @@
 import { spawnDetached, stopPid } from './process.mjs';
+import { isExternalChannelEnabled } from './channel-config.mjs';
 
 const HANDOFF = 'QQB_CHANNEL_TOOL_HANDOFF';
 const PORT_ENV = 'DSH_CHANNEL_TOOL_PORT';
@@ -7,9 +8,7 @@ const MESSAGE = 'qqb:channel-tool-listener:v1';
 const HANDOFF_KEYS = new Set([HANDOFF, PORT_ENV, SECRET_ENV]);
 
 export function channelTextToolsEnabled(config) {
-  const channels = config?.channels;
-  return channels?.textTools === true &&
-    (channels.feishu?.enabled === true || channels.telegram?.enabled === true);
+  return config?.channels?.textTools === true && isExternalChannelEnabled(config);
 }
 
 export function withoutChannelToolEnv(env) {

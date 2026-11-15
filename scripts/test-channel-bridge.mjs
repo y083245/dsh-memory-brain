@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
+import { once } from 'node:events';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { bridgeHarness } from './audit-bridge-harness.mjs';
@@ -60,6 +62,185 @@ function hostFixture({ managed = true, publish = true, failText = false, failPas
     },
   };
 }
+
+async function withConsole(h, run) {
+  const server = h.startConsoleServer();
+  try {
+    if (!server.listening) await once(server, 'listening');
+    const request = (route, { body, agent = false } = {}) => fetch(new URL(route, `http://127.0.0.1:${server.address().port}`), {
+      method: body === undefined ? 'GET' : 'POST',
+      headers: { 'x-console-token': 'fixture-console-token', 'content-type': 'application/json', ...(agent ? { 'x-agent-call': '1' } : {}) },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    await run(request, server);
+  } finally { await new Promise((resolve) => server.close(resolve)); }
+}
+
+test('a Telegram-only bridge never loads QQ or resumes its legacy jobs', async () => {
+  const fixture = hostFixture({ managed: false });
+  let attempted = 0;
+  const h = await bridgeHarness({
+    config: { ownerQQ: 'invalid old QQ administrator', allow: undefined, channels: { qq: { enabled: false }, telegram: { enabled: true } } },
+    savedState: { sessions: { 'private:123': 'qqb-p-123' } },
+    globals: { ...fixture.globals, createQQAdapter: () => { attempted++; return { bot: {} }; } },
+  });
+  try {
+    assert.equal(attempted, 0);
+    assert.deepEqual(fixture.events, ['discover', 'start passive']);
+    assert.equal(h.getOwnLife(), null);
+    assert.equal(h.getLifeLoop(), null);
+    assert.deepEqual(h.calls.follows, []);
+    await h.checkDsh();
+    assert.deepEqual(h.calls.archived, []);
+    await withConsole(h, async (request) => {
+      const result = await request('/api/status');
+      assert.equal(result.status, 200);
+      const status = await result.json();
+      assert.equal(status.dshReady, true);
+      assert.deepEqual(status.channels.qq, { enabled: false, state: 'disabled' });
+      assert.deepEqual(status.channels.feishu, { enabled: false, state: 'disabled' });
+      assert.deepEqual(status.channels.telegram, { enabled: true, state: 'awaiting_adapter' });
+      assert.equal((await request('/api/test-send', { body: { kind: 'private', id: 123, message: 'offline fixture' } })).status, 503);
+      assert.equal((await request('/api/send/group', { body: { groupId: 456, message: 'offline fixture' }, agent: true })).status, 503);
+      assert.equal((await (await request('/api/status', { agent: true })).json()).channels, undefined);
+    });
+    assert.deepEqual(h.calls.http, []);
+    assert.deepEqual({ ...h.state.sessions }, { 'private:123': 'qqb-p-123' });
+  } finally { await h.close(); }
+});
+
+test('an unavailable QQ SDK is isolated and omitted from public diagnostics', async () => {
+  const fixture = hostFixture({ managed: false });
+  const h = await bridgeHarness({ config, globals: {
+    ...fixture.globals,
+    createQQAdapter: async () => { throw Object.assign(new Error('private SDK loader detail'), { code: 'ERR_MODULE_NOT_FOUND' }); },
+  } });
+  try {
+    assert.deepEqual(fixture.events, ['discover', 'start passive']);
+    assert.equal(h.getLifeLoop(), null);
+    await h.checkDsh();
+    await withConsole(h, async (request) => {
+      const status = await (await request('/api/status')).json();
+      assert.deepEqual(status.channels.qq, { enabled: true, state: 'missing_dependency' });
+      assert.deepEqual(status.channels.telegram, { enabled: true, state: 'awaiting_adapter' });
+      assert.equal(status.dshReady, true);
+    });
+    assert.doesNotMatch(fs.readFileSync(path.join(h.temp, 'state', 'bridge.log'), 'utf8'), /private SDK loader detail/);
+  } finally { await h.close(); }
+});
+
+test('an invalid QQ administrator in mixed mode leaves Telegram available', async () => {
+  const fixture = hostFixture({ managed: false });
+  let sdkLoads = 0;
+  const invalidOwner = 'fixture invalid administrator';
+  const h = await bridgeHarness({
+    config: { ...config, ownerQQ: invalidOwner },
+    globals: { ...fixture.globals, createQQAdapter() { sdkLoads++; throw new Error('unexpected QQ load'); } },
+  });
+  try {
+    assert.equal(sdkLoads, 0);
+    assert.deepEqual(fixture.events, ['discover', 'start passive']);
+    const configFile = path.join(h.temp, 'config.json');
+    const saved = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+    assert.equal(saved.ownerQQ, invalidOwner);
+    await h.checkDsh();
+    await withConsole(h, async (request) => {
+      const status = await (await request('/api/status')).json();
+      assert.deepEqual(status.channels.qq, { enabled: true, state: 'needs_config' });
+      assert.deepEqual(status.channels.telegram, { enabled: true, state: 'awaiting_adapter' });
+      assert.equal(status.dshReady, true);
+      assert.doesNotMatch(JSON.stringify(status), /fixture invalid administrator/);
+      fs.writeFileSync(configFile, JSON.stringify({ ...saved, ownerQQ: 123 }));
+      const repaired = await (await request('/api/status')).json();
+      assert.deepEqual(repaired.channels.qq, { enabled: true, state: 'restart_required' });
+    });
+    assert.deepEqual(h.calls.http, []);
+    assert.doesNotMatch(fs.readFileSync(path.join(h.temp, 'state', 'bridge.log'), 'utf8'), /fixture invalid administrator/);
+  } finally { await h.close(); }
+});
+
+test('disabling QQ stops its client, and changing the flag back requires a restart', async () => {
+  const fixture = hostFixture({ managed: false });
+  const h = await bridgeHarness({ config, globals: fixture.globals });
+  try {
+    let closed = 0;
+    h.bot.close = () => { closed++; };
+    const configFile = path.join(h.temp, 'config.json');
+    const saved = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+    const writeEnabled = (enabled) => fs.writeFileSync(configFile, JSON.stringify({ ...saved, channels: { ...saved.channels, qq: { enabled } } }));
+    writeEnabled(false);
+    fixture.watches.get(h.temp)('rename', 'config.json');
+    assert.equal(closed, 1);
+    writeEnabled(true);
+    fixture.watches.get(h.temp)('rename', 'config.json');
+    await withConsole(h, async (request) => {
+      const status = await (await request('/api/status')).json();
+      assert.deepEqual(status.channels.qq, { enabled: true, state: 'restart_required' });
+      assert.equal((await request('/api/test-send', { body: { kind: 'private', id: 123, message: 'offline fixture' } })).status, 503);
+    });
+    assert.deepEqual(h.calls.sent, []);
+  } finally { await h.close(); }
+});
+
+test('a QQ test send whose request body arrives after disable never reaches the adapter', { timeout: 5000 }, async () => {
+  const fixture = hostFixture({ managed: false });
+  const h = await bridgeHarness({ config, globals: fixture.globals });
+  try {
+    await withConsole(h, async (_request, server) => {
+      const body = JSON.stringify({ kind: 'private', id: 123, message: 'offline fixture' });
+      const started = once(server, 'request');
+      const req = http.request({
+        host: '127.0.0.1', port: server.address().port, path: '/api/test-send', method: 'POST',
+        headers: { 'x-console-token': 'fixture-console-token', 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) },
+      });
+      const responded = once(req, 'response');
+      try {
+        req.flushHeaders();
+        await started;
+        const configFile = path.join(h.temp, 'config.json');
+        const saved = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+        saved.channels.qq = { enabled: false };
+        fs.writeFileSync(configFile, JSON.stringify(saved));
+        req.end(body);
+        const [response] = await responded;
+        response.resume();
+        assert.equal(response.statusCode, 503);
+      } finally { req.destroy(); }
+    });
+    assert.deepEqual(h.calls.sent, []);
+  } finally { await h.close(); }
+});
+
+test('a late DSH result during QQ disable preserves the existing QQ session mapping', { timeout: 5000 }, async () => {
+  const fixture = hostFixture({ managed: false });
+  const sessionId = 'qqb-p-123';
+  const key = 'private:123';
+  const h = await bridgeHarness({
+    config, savedState: { sessions: { [key]: sessionId } }, globals: fixture.globals,
+  });
+  try {
+    h.state.sessionPolicies[key] = h.sessionPolicy(key);
+    const selectedModel = Promise.withResolvers();
+    const finishSelecting = Promise.withResolvers();
+    h.api.sessions.selectModel = async () => {
+      selectedModel.resolve();
+      await finishSelecting.promise;
+      throw new Error('not-found');
+    };
+    const queued = h.deliverPrompt(key, 'offline fixture');
+    const rejected = assert.rejects(queued, /QQ 渠道未运行/);
+    await selectedModel.promise;
+    const configFile = path.join(h.temp, 'config.json');
+    const saved = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+    saved.channels.qq = { enabled: false };
+    fs.writeFileSync(configFile, JSON.stringify(saved));
+    finishSelecting.resolve();
+    await rejected;
+    assert.equal(h.state.sessions[key], sessionId);
+    assert.deepEqual(h.calls.archived, []);
+    assert.deepEqual(h.calls.prompts, []);
+  } finally { await h.close(); }
+});
 
 test('managed startup publishes the listener before DSH discovery and hooks up live bridge state', async () => {
   const fixture = hostFixture();
@@ -156,17 +337,19 @@ test('a state permissions failure prevents the text and zero-tool hosts from ope
   } finally { await h.close(); }
 });
 
-test('a malformed config leaves the existing session mapping byte-for-byte intact', (t) => {
+function assertConfigRejected(t, rawConfig, diagnostic) {
   const repo = fileURLToPath(new URL('..', import.meta.url));
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-bridge-invalid-config-'));
   t.after(() => fs.rmSync(temp, { recursive: true, force: true }));
   fs.cpSync(path.join(repo, 'src'), path.join(temp, 'src'), { recursive: true });
-  fs.cpSync(path.join(repo, 'plugins', 'qq-agent-presets'), path.join(temp, 'plugins', 'qq-agent-presets'), { recursive: true });
+  for (const bundle of ['qq-agent-presets', 'channel-agent-presets']) {
+    fs.cpSync(path.join(repo, 'plugins', bundle), path.join(temp, 'plugins', bundle), { recursive: true });
+  }
   fs.mkdirSync(path.join(temp, 'scripts'));
   fs.copyFileSync(path.join(repo, 'scripts', 'build-agent-preset-patches.mjs'), path.join(temp, 'scripts', 'build-agent-preset-patches.mjs'));
   fs.symlinkSync(path.join(repo, 'node_modules'), path.join(temp, 'node_modules'), process.platform === 'win32' ? 'junction' : 'dir');
   fs.writeFileSync(path.join(temp, 'package.json'), '{"type":"module"}');
-  fs.writeFileSync(path.join(temp, 'config.json'), '{invalid');
+  fs.writeFileSync(path.join(temp, 'config.json'), rawConfig);
   fs.mkdirSync(path.join(temp, 'state'));
   const mappingPath = path.join(temp, 'state', 'sessions.json');
   const mapping = '{\n  "sessions": { "private:123": "fixture-session" }\n}\n';
@@ -176,8 +359,16 @@ test('a malformed config leaves the existing session mapping byte-for-byte intac
   });
   assert.ifError(child.error);
   assert.equal(child.status, 1, child.stderr);
-  assert.match(child.stderr, /配置文件读取\/解析失败/);
+  assert.match(child.stderr, diagnostic);
   assert.equal(fs.readFileSync(mappingPath, 'utf8'), mapping);
+}
+
+test('a malformed config leaves the existing session mapping byte-for-byte intact', (t) => {
+  assertConfigRejected(t, '{invalid', /配置文件读取\/解析失败/);
+});
+
+test('a legacy QQ-only config still rejects an invalid administrator', (t) => {
+  assertConfigRejected(t, '{"ownerQQ":"invalid administrator"}', /ownerQQ 必须是 QQ 号/);
 });
 
 test('shutdown closes the channel listener and workers before releasing the bridge lock', async () => {

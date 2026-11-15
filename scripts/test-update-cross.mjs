@@ -30,12 +30,24 @@ const remote = path.join(base, 'remote.git');
 const author = path.join(base, 'author');
 const user = path.join(base, 'user');
 const home = path.join(base, 'home');
+const dshHome = path.join(home, '.dsh');
 const fake = path.join(base, 'bin');
 // Windows 上测试保险只认系统临时目录，所以把 TEMP 设成 base 本身，仓库才算在它下面。
 const tmp = process.platform === 'win32' ? base : path.join(base, 'tmp');
 const log = path.join(base, 'cmd.log');
 for (const d of [home, fake, tmp]) fs.mkdirSync(d, { recursive: true });
 fs.writeFileSync(log, '');
+const sdkManifest = path.join(user, 'node_modules', '@snowluma', 'sdk', 'package.json');
+const npmFixture = path.join(fake, 'npm.mjs');
+fs.writeFileSync(npmFixture, `${standin('npm', log)}
+fs.mkdirSync(${JSON.stringify(path.dirname(sdkManifest))}, { recursive: true });
+fs.writeFileSync(${JSON.stringify(sdkManifest)}, '{"name":"@snowluma/sdk"}');
+`);
+if (process.platform === 'win32') {
+  fs.writeFileSync(path.join(fake, 'npm.cmd'), `@"${process.execPath}" "%~dp0npm.mjs" %*\r\n`);
+} else {
+  fs.writeFileSync(path.join(fake, 'npm'), `#!/bin/sh\nexec "${process.execPath}" "${npmFixture}" "$@"\n`, { mode: 0o755 });
+}
 git(base, 'init', '-q', '--bare', '-b', 'main', remote);
 git(base, 'clone', '-q', remote, author);
 const tooling = {
@@ -44,6 +56,8 @@ const tooling = {
   'scripts/lib/upgrade-common.mjs': dev('scripts/lib/upgrade-common.mjs'),
   'scripts/lib/upgrade-notes.mjs': dev('scripts/lib/upgrade-notes.mjs'),
   'scripts/migrate.mjs': dev('scripts/migrate.mjs'),
+  'scripts/setup-dsh.mjs': standin('setup-dsh', log),
+  'scripts/build-agent-preset-patches.mjs': '// Fixture has no generated presets.\n',
   'src/preset-prompt.js': dev('src/preset-prompt.js'),
   'scripts/start-all.mjs': standin('start-all', log),
   'scripts/stop-all.mjs': standin('stop-all', log),
@@ -55,7 +69,7 @@ put(author, {
   '.gitignore': 'node_modules\nstate/\nconfig.json\n',
   '.gitattributes': '* -text\n',
   'src/bridge.js': '// v1\n',
-  'package.json': '{ "name": "qq-bridge", "version": "0.1.0" }\n',
+  'package.json': '{ "name": "qq-bridge", "version": "0.1.0", "dependencies": { "@snowluma/sdk": "1.14.20" } }\n',
   'CHANGELOG.md': '# 更新日志\n\n## v0.1.0 — 2026-11-01\n\n- 首个标签\n'
 });
 for (const f of ['start-all.sh', 'stop-all.sh']) fs.chmodSync(path.join(author, f), 0o755);
@@ -64,6 +78,8 @@ git(author, 'commit', '-q', '-m', 'v0.1.0');
 git(author, 'tag', 'v0.1.0');
 put(author, {
   'src/bridge.js': '// v2\n',
+  'src/runtime/channel-config.mjs': '// Fixture supports disabling QQ.\n',
+  'plugins/channel-agent-presets/package.json': '{"name":"channel-agent-presets"}\n',
   'package.json': '{ "name": "qq-bridge", "version": "0.2.0" }\n',
   'CHANGELOG.md': '# 更新日志\n\n## v0.2.0 — 2026-11-02\n\n- 第二版\n\n```upgrade\nrestart: bridge\n```\n\n## v0.1.0 — 2026-11-01\n\n- 首个标签\n'
 });
@@ -81,6 +97,7 @@ put(user, {
 
 const env = {
   ...process.env, ...GIT_ENV, HOME: home, USERPROFILE: home, TMPDIR: tmp, TEMP: tmp, TMP: tmp,
+  DSH_HOME: dshHome,
   QQB_UPDATE_TEST: '1', QQB_TEST_LINUX_FLOW: '0', QQB_FAKE_BIN: fake, QQB_HEALTH_BASE: health, QQB_HEALTH_WAIT: '5'
 };
 const script = (name, args) => new Promise((resolve) => {
@@ -110,7 +127,7 @@ await test('升级：备份、快进、停桥接再 start-all、不打印令牌�
   assert.equal(r.code, 0, r.out);
   assert.equal(sha('HEAD'), sha('v0.2.0'));
   const calls = fs.readFileSync(log, 'utf8').trim().split(/\r?\n/).map((l) => l.trim());
-  assert.deepEqual(calls, ['stop-all', 'start-all'], r.out);
+  assert.deepEqual(calls, ['setup-dsh', 'stop-all', 'start-all'], r.out);
   const names = fs.readdirSync(path.join(home, 'qq-bridge-backups'));
   assert.equal(names.length, 1);
   assert.match(names[0], /^update-\d{8}-\d{6}-v0\.1\.0\.tar\.gz$/);
@@ -118,17 +135,41 @@ await test('升级：备份、快进、停桥接再 start-all、不打印令牌�
   assert.deepEqual(fs.readdirSync(tmp).filter((n) => n.startsWith('qqb-')), []);
   const uj = JSON.parse(fs.readFileSync(path.join(user, 'state', 'upgrade.json'), 'utf8'));
   assert.equal(uj.history.at(-1).result, 'ok');
-  assert.deepEqual(uj.history.at(-1).restarted, ['bridge']);
+  assert.deepEqual(uj.history.at(-1).restarted, ['dsh', 'bridge']);
 });
 
-await test('回滚：回到 v0.1.0、state 还原、记 rolled-back', async () => {
+await test('回滚至旧版：恢复缺少的必需 SDK、旧 DSH profile 和备份状态', async () => {
   fs.writeFileSync(path.join(user, 'state', 'people.json'), '{"v":"升级后改过"}\n');
   fs.writeFileSync(log, '');
+  const bundleName = 'channel-agent-presets';
+  const installed = path.join(dshHome, 'plugins', bundleName);
+  const managed = {
+    dependencies: { [bundleName]: `link:${installed.replaceAll('\\', '/')}`, custom: '1.0.0' },
+    dsh: { profile: { bundles: ['custom', bundleName] } },
+  };
+  const custom = {
+    dependencies: { [bundleName]: 'link:../custom' },
+    dsh: { profile: { bundles: [bundleName] } },
+  };
+  put(dshHome, {
+    'profiles/web/package.json': JSON.stringify(managed),
+    'profiles/custom/package.json': JSON.stringify(custom),
+    'profiles/unrelated/package.json': '{',
+  });
+  fs.mkdirSync(path.dirname(installed), { recursive: true });
+  fs.symlinkSync(path.join(user, 'plugins', bundleName), installed, process.platform === 'win32' ? 'junction' : 'dir');
+  assert.equal(fs.existsSync(sdkManifest), false);
   const r = await script('rollback', ['--yes']);
   assert.equal(r.code, 0, r.out);
   assert.equal(sha('HEAD'), sha('v0.1.0'));
   assert.equal(fs.readFileSync(path.join(user, 'state', 'people.json'), 'utf8'), '{"v":"原来的账本"}\n');
-  assert.deepEqual(fs.readFileSync(log, 'utf8').trim().split(/\r?\n/).map((l) => l.trim()), ['stop-all', 'start-all']);
+  const manifest = (profile) => fs.readFileSync(path.join(dshHome, 'profiles', profile, 'package.json'), 'utf8');
+  assert.deepEqual(JSON.parse(manifest('web')), { dependencies: { custom: '1.0.0' }, dsh: { profile: { bundles: ['custom'] } } });
+  assert.equal(manifest('custom'), JSON.stringify(custom));
+  assert.equal(manifest('unrelated'), '{');
+  assert.equal(fs.lstatSync(installed).isSymbolicLink(), true);
+  assert.equal(fs.existsSync(sdkManifest), true);
+  assert.deepEqual(fs.readFileSync(log, 'utf8').trim().split(/\r?\n/).map((l) => l.trim()), ['stop-all', 'npm ci', 'setup-dsh web', 'start-all']);
   const uj = JSON.parse(fs.readFileSync(path.join(user, 'state', 'upgrade.json'), 'utf8'));
   assert.equal(uj.history.at(-1).result, 'rolled-back');
   assert.ok(fs.readdirSync(path.join(home, 'qq-bridge-backups')).some((n) => n.startsWith('rollback-pre-')));

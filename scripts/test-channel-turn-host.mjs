@@ -12,7 +12,7 @@ import { encodeConversationKey } from '../src/core/identity.mjs';
 
 const GROUP = { platform: 'telegram', accountId: '41', chatType: 'group', chatId: '-100123' };
 const success = (value) => ({ result: { ok: true, value } });
-const patch = yaml.load(readFileSync(new URL('../plugins/qq-agent-presets/presets/channel-chat-v2.patch.yml', import.meta.url), 'utf8'));
+const patch = yaml.load(readFileSync(new URL('../plugins/channel-agent-presets/presets/channel-chat-v2.patch.yml', import.meta.url), 'utf8'));
 const guardedPlugins = patch[0].insert.find((row) => row.config?.id === CHANNEL_DSH_PRESET).config.plugins;
 
 function task({ threadId = '7', bindingRevision = null } = {}) {

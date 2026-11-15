@@ -27,7 +27,7 @@ function fixture(name, patch = '') {
   // setup-dsh 用 src/runtime 解析 node / .cmd 垫片 / dsh CLI，夹具要保持同样的模块布局。
   // paths.mjs 依赖 commands.mjs + python.mjs，一并放进去。
   fs.mkdirSync(path.join(repo, 'src/runtime'), { recursive: true });
-  for (const file of ['commands.mjs', 'node-bin.mjs', 'paths.mjs', 'python.mjs']) {
+  for (const file of ['channel-config.mjs', 'commands.mjs', 'node-bin.mjs', 'paths.mjs', 'python.mjs']) {
     fs.copyFileSync(path.join(root, 'src/runtime', file), path.join(repo, 'src/runtime', file));
   }
   fs.cpSync(path.join(root, 'dsh'), path.join(repo, 'dsh'), { recursive: true });
@@ -42,7 +42,7 @@ function fixture(name, patch = '') {
   }));
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toLowerCase() !== 'path'));
   Object.assign(env, { PATH: path.dirname(process.execPath), DSH_HOME: home, HOME: home, USERPROFILE: home, QQ_BRIDGE_SKIP_DSH_INSTALL: '1' });
-  const run = (profile = 'web', extraEnv = {}) => spawnSync(process.execPath, [path.join(repo, 'scripts/setup-dsh.mjs'), profile], {
+  const run = (profile = 'web', extraEnv = {}, options = []) => spawnSync(process.execPath, [path.join(repo, 'scripts/setup-dsh.mjs'), ...options, profile], {
     env: { ...env, ...extraEnv }, cwd: repo, encoding: 'utf8', timeout: 15000,
   });
   return { repo, home, patchFile, run };
@@ -71,7 +71,60 @@ try {
     }
     const pkg = JSON.parse(fs.readFileSync(path.join(f.home, 'profiles/web/package.json')));
     assert.equal(pkg.dependencies.existing, '1.0.0');
-    assert.deepEqual(pkg.dsh.profile.bundles, ['existing', 'qq-mode-console', 'qq-agent-presets']);
+    assert.deepEqual(pkg.dsh.profile.bundles, ['existing', 'qq-mode-console', 'qq-agent-presets', 'channel-agent-presets']);
+  });
+
+  test('QQ disable migrates a legacy profile, preserves settings, and is reversible', () => {
+    const patch = `- insert:
+    - id: custom
+      name: custom-plugin
+- id: qq-mode
+  config:
+    mode: reserved
+- insert:
+    - id: mcp-snowluma
+      name: old
+- insert:
+    - id: mcp-snowluma-host
+      name: old
+`;
+    const f = fixture('channel-only-profile', patch);
+    const pkgFile = path.join(f.home, 'profiles/web/package.json');
+    const legacy = ['existing', 'qq-mode-console', 'qq-agent-presets'];
+    fs.writeFileSync(pkgFile, JSON.stringify({
+      name: 'existing-profile', private: true,
+      dependencies: { existing: '1.0.0', 'qq-mode-console': 'link:old', 'qq-agent-presets': 'link:old' },
+      dsh: { profile: { bundles: legacy } },
+    }));
+    const oldQqBundle = path.join(f.home, 'plugins', 'qq-mode-console');
+    fs.mkdirSync(oldQqBundle, { recursive: true });
+    fs.writeFileSync(path.join(oldQqBundle, 'keep.txt'), 'old profile files');
+    const configFile = path.join(f.repo, 'config.json');
+    fs.writeFileSync(configFile, JSON.stringify({ channels: { qq: { enabled: false }, feishu: { enabled: true } } }));
+
+    const disabled = f.run();
+    assert.equal(disabled.status, 0, disabled.stderr);
+    const disabledPackage = JSON.parse(fs.readFileSync(pkgFile, 'utf8'));
+    assert.deepEqual(disabledPackage.dsh.profile.bundles, ['existing', 'channel-agent-presets']);
+    assert.deepEqual(Object.keys(disabledPackage.dependencies), ['existing', 'channel-agent-presets']);
+    const disabledPatch = yaml.load(fs.readFileSync(f.patchFile, 'utf8'));
+    assert.deepEqual(disabledPatch.flatMap((op) => (op.insert ?? []).map((row) => row.id)),
+      ['custom', 'mcp-web-search-safe']);
+    assert.deepEqual(disabledPatch.find((op) => op.id === 'qq-mode'), { id: 'qq-mode', config: { mode: 'reserved' } });
+    assert.equal(fs.readFileSync(path.join(oldQqBundle, 'keep.txt'), 'utf8'), 'old profile files');
+    assert.equal(fs.existsSync(path.join(f.repo, 'state', 'mode.json')), false);
+    assert.match(f.run().stdout, /RESULT changed=0 /);
+
+    fs.rmSync(oldQqBundle, { recursive: true });
+    const legacyConfig = path.join(f.repo, 'legacy-config.json');
+    fs.writeFileSync(legacyConfig, '{}');
+    const enabled = f.run('web', {}, [`--config=${legacyConfig}`]);
+    assert.equal(enabled.status, 0, enabled.stderr);
+    const enabledPackage = JSON.parse(fs.readFileSync(pkgFile, 'utf8'));
+    assert.deepEqual(new Set(enabledPackage.dsh.profile.bundles), new Set([...legacy, 'channel-agent-presets']));
+    const enabledIds = yaml.load(fs.readFileSync(f.patchFile, 'utf8')).flatMap((op) => (op.insert ?? []).map((row) => row.id));
+    assert.deepEqual(enabledIds, ['custom', 'mcp-snowluma', 'mcp-snowluma-host', 'mcp-web-search-safe']);
+    assert.match(f.run('web', {}, [`--config=${legacyConfig}`]).stdout, /RESULT changed=0 /);
   });
 
   test('legacy root [] is repaired without altering literal strings', () => {

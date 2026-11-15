@@ -26,6 +26,7 @@ function timerFixture(random = 0) {
     currentMode: 'reserved2', socialV2: { paused: false },
     social: { pendingTimers: new Map() },
     getSocialV2State: () => st,
+    qqIsActive: () => true,
     isSessionAllowedInCurrentMode: () => true,
     isConversationBusyV2: () => false,
     cancelReplyCheckV2: () => {},

@@ -5,6 +5,7 @@ import path from 'node:path';
 import vm from 'node:vm';
 import { test } from 'node:test';
 import { z } from 'zod';
+import { isQqEnabled } from '../src/runtime/channel-config.mjs';
 
 /** 剥掉不可信数据外壳，取回里面的 JSON（外壳格式与 mcp-snowluma-safe 一致）。 */
 function parseEnvelope(text) {
@@ -115,10 +116,10 @@ test('empty searches are rejected without calling the transport', async () => {
  * 用假 transport 加载 mcp-snowluma-safe.js，拿到它的工具回调。
  * 只需要把 fetch（桥接 API / OneBot HTTP）、http（长轮询）、McpServer、zod、两个本地纯模块塞进上下文。
  */
-function loadSnowlumaTools(fetchImpl, fixtureConfig = null, httpImpl = null, fixtureMode = 'closed-agent') {
+function loadSnowlumaTools(fetchImpl, fixtureConfig = null, httpImpl = null, fixtureMode = 'closed-agent', entry = 'mcp-snowluma-safe.js') {
   const tools = new Map();
   // vm 里没有 ESM 的 import.meta，把模块顶部的 __dirname 推导整段替换成固定值。
-  const source = fs.readFileSync(new URL('../src/mcp-snowluma-safe.js', import.meta.url), 'utf8')
+  const source = fs.readFileSync(new URL(`../src/${entry}`, import.meta.url), 'utf8')
     .replace(/^import .*;\r?\n/gm, '')
     .replace("const __dirname = path.dirname(fileURLToPath(import.meta.url));", "const __dirname = '/fixture/src';")
     .replace('await server.connect(new StdioServerTransport());', 'server.connect(new StdioServerTransport());');
@@ -131,7 +132,7 @@ function loadSnowlumaTools(fetchImpl, fixtureConfig = null, httpImpl = null, fix
     ...fs,
     readFileSync(file, ...args) {
       if (path.basename(String(file)) === 'config.json' && String(file).includes('fixture')) {
-        return JSON.stringify(fixtureConfig);
+        return typeof fixtureConfig === 'function' ? fixtureConfig() : JSON.stringify(fixtureConfig);
       }
       return fs.readFileSync(file, ...args);
     },
@@ -162,6 +163,7 @@ function loadSnowlumaTools(fetchImpl, fixtureConfig = null, httpImpl = null, fix
     Buffer,
     path,
     fs: modeAwareFs,
+    isQqEnabled,
     SENSITIVE_RE: { test: () => false },
     serializeModelData: (value) => JSON.stringify(value),
   });
@@ -174,6 +176,42 @@ function loadSnowlumaTools(fetchImpl, fixtureConfig = null, httpImpl = null, fix
   callTool.has = (name) => tools.has(name);
   return callTool;
 }
+
+test('already-registered QQ tools stop before contacting OneBot or the bridge when disabled or config is invalid', async () => {
+  let readConfig = () => JSON.stringify({ channels: { qq: { enabled: true } } });
+  const requests = [];
+  const fetchFixture = async (url) => {
+    requests.push(url);
+    return Response.json({ status: 'ok', retcode: 0, data: {} });
+  };
+  const callTool = loadSnowlumaTools(fetchFixture, () => readConfig());
+  const callHostTool = loadSnowlumaTools(fetchFixture, () => readConfig(), null, 'closed-agent', 'mcp-host-server.js');
+  assert.equal((await callTool('qq_status')).isError, undefined);
+  assert.equal((await callHostTool('snowluma_status')).isError, undefined);
+  const requestsWhileEnabled = requests.length;
+  assert.ok(requestsWhileEnabled > 0);
+
+  for (const config of [
+    () => JSON.stringify({ channels: { qq: { enabled: false } } }),
+    () => '{ broken JSON',
+    () => 'null',
+    () => { throw Object.assign(new Error('fixture config permission denied'), { code: 'EACCES' }); },
+  ]) {
+    readConfig = config;
+    for (const denied of [await callTool('qq_status'),
+      await callTool('qq_get_prompt', { key: 'group:123', token: 'fixture' }),
+      await callHostTool('snowluma_status')]) {
+      assert.equal(denied.isError, true);
+      assert.equal(denied.content[0].text, 'QQ 渠道已关闭');
+    }
+  }
+  assert.equal(requests.length, requestsWhileEnabled);
+
+  readConfig = () => { throw Object.assign(new Error('fixture config absent'), { code: 'ENOENT' }); };
+  assert.equal((await callTool('qq_status')).isError, undefined);
+  assert.equal((await callHostTool('snowluma_status')).isError, undefined);
+  assert.ok(requests.length > requestsWhileEnabled);
+});
 
 // 回归（issue #24）：`qq_wait_for_messages` 以前走全局 fetch（undici 自带 300s headersTimeout），
 // 而沉睡前观察的预算就是 300s —— 第 301 秒必然 `fetch failed`，桥接侧却还在跑满预算占着

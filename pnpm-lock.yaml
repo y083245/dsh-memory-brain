@@ -15,20 +15,21 @@ importers:
         specifier: ^3.18.1
         version: 3.18.5
       '@modelcontextprotocol/sdk':
-        specifier: ^1.30.0
+        specifier: ^1.32.2
         version: 1.32.2(zod@4.6.7)
+      js-yaml:
+        specifier: ^4.3.2
+        version: 4.3.2
+      zod:
+        specifier: ^4.6.7
+        version: 4.6.7
+    optionalDependencies:
       '@snowluma/mcp':
         specifier: ^1.14.20
         version: 1.14.22(zod@4.6.7)
       '@snowluma/sdk':
         specifier: ^1.14.20
         version: 1.14.22
-      js-yaml:
-        specifier: ^4.3.2
-        version: 4.3.2
-      zod:
-        specifier: ^4.4.3
-        version: 4.6.7
 
 packages:
 

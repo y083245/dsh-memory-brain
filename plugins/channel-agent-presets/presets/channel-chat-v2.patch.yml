@@ -1,6 +1,6 @@
 - insert:
     - id: channel-tool-guard-global
-      name: qq-agent-presets/channel-tool-guard-global.mjs
+      name: channel-agent-presets/channel-tool-guard-global.mjs
     - id: preset-channel-chat-v2
       name: '@deepseek-ai/dsh-agent-preset'
       config:
@@ -14,7 +14,7 @@
             config:
               mode: native
           - id: channel-tool-guard
-            name: qq-agent-presets/channel-tool-guard.mjs
+            name: channel-agent-presets/channel-tool-guard.mjs
           - id: persona
             name: '@deepseek-ai/dsh-persona'
             config:

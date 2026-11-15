@@ -2,13 +2,13 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
-import { closeSync, fstatSync, mkdtempSync, openSync, readSync, rmSync } from 'node:fs';
+import { closeSync, fstatSync, mkdirSync, mkdtempSync, openSync, readSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as pause } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
-import { channelToolNames } from '../plugins/qq-agent-presets/channel-tool-contract.mjs';
+import { channelToolNames } from '../plugins/channel-agent-presets/channel-tool-contract.mjs';
 import { CHANNEL_DSH_TEXT_PRESET, confirmChannelPreset } from '../src/core/channel-dsh-preset.mjs';
 import { encodeConversationKey } from '../src/core/identity.mjs';
 import { openChannelInbox } from '../src/core/inbox-store.mjs';
@@ -25,6 +25,7 @@ const REPLY = 'Fixture reply';
 const MODEL_KEY = 'fixture-local-only';
 const TOOLS = [...channelToolNames].sort();
 const setupFile = fileURLToPath(new URL('./setup-dsh.mjs', import.meta.url));
+const withoutQq = process.argv.includes('--without-qq');
 
 async function listen(server) {
   server.listen(0, HOST);
@@ -140,7 +141,20 @@ try {
   ]) {
     delete setupEnv[key];
   }
-  const setup = spawnSync(process.execPath, [setupFile, 'web'], {
+  const configFile = join(fixtureDir, 'config.json');
+  const channelConfig = {
+    textTools: true,
+    feishu: { enabled: true },
+    ...(withoutQq ? { qq: { enabled: false } } : {}),
+  };
+  writeFileSync(configFile, JSON.stringify({ channels: channelConfig }));
+  if (withoutQq) {
+    // A prior user's setting stays in the profile and should not activate the QQ plugin.
+    const profileDir = join(fixtureEnv.DSH_HOME, 'profiles', 'web');
+    mkdirSync(profileDir, { recursive: true });
+    writeFileSync(join(profileDir, 'cordis.patch.yml'), '- id: qq-mode\n  config:\n    mode: reserved2\n');
+  }
+  const setup = spawnSync(process.execPath, [setupFile, `--config=${configFile}`, 'web'], {
     cwd: fixtureDir, env: setupEnv, encoding: 'utf8', timeout: 180_000, windowsHide: true,
   });
   if (setup.error) throw setup.error;
@@ -164,7 +178,7 @@ try {
   const delivered = [];
   channelHost = await startChannelHost({
     api, workspacePath: fixtureDir, stateDir, longMemory, enableTextTools: true, intervalMs: 50,
-    readConfig: () => ({ channels: { textTools: true, feishu: policy } }),
+    readConfig: () => ({ channels: { ...channelConfig, feishu: policy } }),
     readRoleState: () => null, readRoleCard: () => '', isSensitive: () => false,
   });
   const binding = channelHost.registerAccount(account, {
@@ -204,6 +218,13 @@ try {
   const startup = AbortSignal.timeout(120_000);
   await poll(() => confirmChannelPreset(api, { preset: CHANNEL_DSH_TEXT_PRESET, signal: startup }),
     (value) => value === true, startup, () => failure);
+  assert.equal(await confirmChannelPreset(api, { signal: startup }), true);
+  const roster = (await api.callUnary('agentPresets/list', {}, startup)).result.value.presets;
+  for (const id of ['qq-chat', 'qq-chat-v2']) {
+    assert.equal(roster.some((preset) => preset.id === id), !withoutQq, `Unexpected registration of ${id}`);
+  }
+  const settings = (await api.settings.describe({})).result.value.namespaces;
+  assert.equal(settings.some((setting) => setting.ns === 'qq-mode'), !withoutQq);
 
   const event = {
     conversation, actor, kind: 'message', senderType: 'human', trigger: 'directed',
@@ -241,7 +262,7 @@ try {
   assert.deepEqual(delivered[0].conversation, conversation);
   assert.equal(archivedReply.sendId, delivered[0].sendId);
   assert.equal(archivedReply.msgId, 'om_sent_fixture');
-  console.log('Real DSH read the scoped inbox, delivered one authenticated reply, and archived its confirmation.');
+  console.log(`Real DSH (QQ ${withoutQq ? 'disabled' : 'enabled'}) read the scoped inbox, delivered one authenticated reply, and archived its confirmation.`);
 } catch (error) {
   if (child) {
     try { printHostTail(hostLog); } catch { /* Keep the original failure if the log cannot be read. */ }

@@ -7,21 +7,89 @@
 //
 // 做什么：停桥接 / memory-rag → git checkout --detach <升级前的提交> → 把当前 state/、config.json 再打包一份
 //   （rollback-pre-<时间>.tar.gz）→ 解包备份覆盖 state/、config.json → 首次迁移挪走的文件放回原处 →
-//   重新生成派生 patch → 起服务 → 健康检查 → 记 result: rolled-back。
+//   恢复旧版依赖、重新生成派生 patch → 起服务 → 健康检查 → 记 result: rolled-back。
 // 永远不碰 QQ、SnowLuma；DSH 只在那次升级重启过它时才重启，而且只按 PID 逐个停。
 //
 // 退出码：0 回滚完成；1 检查没通过（什么都没改）；2 中途失败；3 用户取消。
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  DERIVED, Exit, RAG_EXCLUDES, ask, createContext, dshPids, ensureBackupDir, err, git, gitOk, gitOut, hostMissing, hostRunning,
+  DERIVED, Exit, RAG_EXCLUDES, ask, binOf, createContext, dshPids, ensureBackupDir, err, git, gitOk, gitOut, hostMissing, hostRunning,
   info, ok, pgrepF, ragEnabled, restoreFirstRun, rollbackCommand, run, sdctl, sendSignal, startAll, startCommand, stepper, stopAll,
   tarCreate, tarExtract, tarList, timestamp, ujFind, ujPutRolledBack, unitInstalled, waitGone, waitHealthy, warn
 } from './lib/upgrade-common.mjs';
 
 const SELF = fileURLToPath(import.meta.url);
 const step = stepper(8);
+
+function missingRequiredQqSdk(repo) {
+  if (fs.existsSync(path.join(repo, 'src', 'runtime', 'channel-config.mjs'))) return false;
+  const manifest = path.join(repo, 'package.json');
+  if (!fs.existsSync(manifest)) return false;
+  const config = JSON.parse(fs.readFileSync(manifest, 'utf8').replace(/^\uFEFF/, ''));
+  if (!config?.dependencies?.['@snowluma/sdk'] || config.optionalDependencies?.['@snowluma/sdk']) return false;
+  return !fs.statSync(path.join(repo, 'node_modules', '@snowluma', 'sdk', 'package.json'), { throwIfNoEntry: false })?.isFile();
+}
+
+function removeUnavailableChannelBundle(repo) {
+  const name = 'channel-agent-presets';
+  const bundle = path.join(fs.realpathSync(repo), 'plugins', name);
+  if (fs.existsSync(path.join(bundle, 'package.json'))) return [];
+  const home = path.resolve(process.env.DSH_HOME || path.join(os.homedir(), '.dsh'));
+  const installLink = path.join(home, 'plugins', name);
+  function normalizePath(file) {
+    const normalized = path.normalize(file);
+    if (process.platform !== 'win32') return normalized;
+    return normalized.replace(/^\\\\\?\\UNC\\/i, '\\\\').replace(/^\\\\\?\\/, '').toLowerCase();
+  }
+  let target;
+  try { target = fs.readlinkSync(installLink); }
+  catch (error) {
+    if (['ENOENT', 'EINVAL', 'UNKNOWN'].includes(error.code)) return [];
+    throw error;
+  }
+  // readlink also works after checkout removed the link's target from the repository.
+  const linkedToRepo = normalizePath(path.resolve(path.dirname(installLink), target)) === normalizePath(bundle);
+  if (!linkedToRepo) return [];
+  const profilesDir = path.join(home, 'profiles');
+  let entries;
+  try { entries = fs.readdirSync(profilesDir, { withFileTypes: true }); }
+  catch (error) {
+    if (error.code === 'ENOENT') return [];
+    throw error;
+  }
+  const changed = [];
+  for (const profile of entries) {
+    if (!profile.isDirectory() || profile.name === 'node_modules' || profile.name.startsWith('-')
+      || /[\\/\x00-\x1f<>:"|?*]|[. ]$/.test(profile.name)) continue;
+    const file = path.join(profilesDir, profile.name, 'package.json');
+    if (!fs.existsSync(file) || !fs.lstatSync(file).isFile()) continue;
+    let manifest;
+    const contents = fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '');
+    try { manifest = JSON.parse(contents); }
+    catch (error) {
+      if (error instanceof SyntaxError) continue;
+      throw error;
+    }
+    const dependency = manifest?.dependencies?.[name];
+    if (typeof dependency !== 'string' || !dependency.startsWith('link:')
+      || normalizePath(dependency.slice('link:'.length)) !== normalizePath(installLink)) continue;
+    delete manifest.dependencies[name];
+    const settings = manifest.dsh?.profile;
+    if (Array.isArray(settings?.bundles)) settings.bundles = settings.bundles.filter((id) => id !== name);
+    const temporary = `${file}.rollback-${process.pid}.tmp`;
+    try {
+      fs.writeFileSync(temporary, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+      fs.renameSync(temporary, file);
+    } finally {
+      fs.rmSync(temporary, { force: true });
+    }
+    changed.push(profile.name);
+  }
+  return changed;
+}
 
 async function main() {
   process.umask(0o077);
@@ -131,9 +199,24 @@ async function main() {
     }
 
     step(7, '重新生成派生 patch、起服务');
+    if (missingRequiredQqSdk(repo)) {
+      const npm = binOf(ctx, 'npm');
+      if (!npm || run(npm, ['ci'], { cwd: repo, orig: true }).code !== 0 || missingRequiredQqSdk(repo)) {
+        fail2('旧版必需的 SnowLuma SDK 未恢复，请在当前版本运行 npm ci');
+      }
+      ok('已安装旧版所需的 SnowLuma SDK');
+    }
     if (fs.existsSync(path.join(repo, 'scripts', 'build-agent-preset-patches.mjs'))
       && run(process.execPath, [path.join(repo, 'scripts', 'build-agent-preset-patches.mjs')], { cwd: repo, orig: true }).code !== 0) {
       fail2('重新生成 preset patch 失败');
+    }
+    const profiles = removeUnavailableChannelBundle(repo);
+    if (profiles.length) {
+      const setup = path.join(repo, 'scripts', 'setup-dsh.mjs');
+      if (fs.existsSync(setup) && run(process.execPath, [setup, ...profiles], { cwd: repo, orig: true }).code !== 0) {
+        fail2('恢复升级前的 DSH 预设失败，请在当前版本重新运行 node scripts/setup-dsh.mjs');
+      }
+      info('已同步升级前的 DSH profile，请重新载入 profile 以应用配置');
     }
     const ragOn = ragEnabled(repo);
     if (ragOn) {

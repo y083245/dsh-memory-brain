@@ -16,6 +16,20 @@
     "injectEveryNWakes": 4,
     "injectDedupeWindowMs": 8000
   },
+  "channels": {
+    "qq": { "enabled": true },
+    "feishu": {
+      "enabled": false,
+      "appId": "",
+      "appSecretEnv": "FEISHU_APP_SECRET"
+    },
+    "telegram": {
+      "enabled": false,
+      "botTokenEnv": "TELEGRAM_BOT_TOKEN",
+      "proxyUrlEnv": "TELEGRAM_PROXY_URL"
+    },
+    "textTools": false
+  },
   "snowluma": {
     "wsUrl": "ws://127.0.0.1:3001",
     "httpUrl": "http://127.0.0.1:3000",

@@ -203,6 +203,17 @@ export async function startChannelHost({
     return !stopped && entryFor(entry.account) === entry ? entry.policy : null;
   }
 
+  function platformState(platform) {
+    if (!Object.hasOwn(TRANSPORT_CONFIG, platform)) return null;
+    if (stopped) return 'unavailable';
+    const settings = readChannels()?.[platform];
+    if (settings?.enabled !== true) return 'disabled';
+    const entry = accounts.get(platform);
+    if (!entry) return 'awaiting_adapter';
+    refreshEntry(entry, settings);
+    return entry.active ? 'registered' : 'unavailable';
+  }
+
   function isScopeCurrent({ conversationKey }, requiresTextTools) {
     if (stopped) return false;
     const conversation = decodeIdentityKey(conversationKey);
@@ -486,7 +497,7 @@ export async function startChannelHost({
   }
 
   return {
-    registerAccount, privateBindings, reload, invalidateAll, close,
+    registerAccount, privateBindings, reload, invalidateAll, close, platformState,
     // Trusted host callers supply an already-authorized account or conversation.
     getDeliveryStatus: (account, operationId) => stopped ? null : outbox?.getDeliveryStatus(account, operationId) ?? null,
     getConversationDeliveryStats: (conversation) => stopped ? null : outbox?.getConversationDeliveryStats(conversation) ?? null,

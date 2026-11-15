@@ -26,33 +26,28 @@ import { fileURLToPath } from 'node:url';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
+import { isQqEnabled } from './runtime/channel-config.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
 
 function loadConfig() {
   try {
-    let text = fs.readFileSync(path.join(ROOT, 'config.json'), 'utf8');
-    if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
-    return JSON.parse(text);
-  } catch {
-    return {};
+    const text = fs.readFileSync(path.join(ROOT, 'config.json'), 'utf8').replace(/^\uFEFF/, '');
+    const config = JSON.parse(text);
+    return config && typeof config === 'object' && !Array.isArray(config) ? config : null;
+  } catch (error) {
+    return error.code === 'ENOENT' ? {} : null;
   }
 }
 
-function getConfig() {
-  return loadConfig();
-}
-
-function getHostConfig() {
-  const c = getConfig();
+function getHostConfig(c) {
   const httpUrl = (c.snowluma?.httpUrl ?? 'http://127.0.0.1:3000').replace(/\/+$/, '');
   const homeDir = c.snowluma?.homeDir ?? (c.snowluma?.launcherPath ? path.dirname(c.snowluma.launcherPath) : '');
   return { httpUrl, homeDir, token: c.snowluma?.accessToken ?? '' };
 }
 
-async function gatewayInfo() {
-  const { httpUrl, token } = getHostConfig();
+async function gatewayInfo({ httpUrl, token }) {
   try {
     const res = await fetch(`${httpUrl}/get_login_info`, {
       headers: token ? { Authorization: `Bearer ${token}` } : {},
@@ -81,8 +76,12 @@ server.registerTool(
     inputSchema: z.object({}).strict()
   },
   async () => {
-    const hc = getHostConfig();
-    const info = await gatewayInfo();
+    const config = loadConfig();
+    if (!config || !isQqEnabled(config)) {
+      return { content: [{ type: 'text', text: 'QQ 渠道已关闭' }], isError: true };
+    }
+    const hc = getHostConfig(config);
+    const info = await gatewayInfo(hc);
     // 只读工具：不再暴露本机路径/PID（那需要进程控制能力，而该能力已被移除）。
     const payload = { ...info };
     if (info.reachable === false) {

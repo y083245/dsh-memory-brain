@@ -15,6 +15,8 @@ const tmpHome = path.join(os.tmpdir(), 'qq-bridge-setup-test-home');
 fs.rmSync(tmpHome, { recursive: true, force: true });
 fs.mkdirSync(path.join(tmpHome, 'profiles', 'web'), { recursive: true });
 fs.mkdirSync(path.join(tmpHome, 'plugins'), { recursive: true });
+const configFile = path.join(tmpHome, 'config.json');
+fs.writeFileSync(configFile, '{}');
 
 // 预置一个「历史版本」patch：无 BEGIN/END 标记、含空的 [] 根节点、只挂了 2 个 MCP
 const legacyPatch = `# legacy profile patch
@@ -51,9 +53,9 @@ fs.writeFileSync(path.join(tmpHome, 'profiles', 'web', 'package.json'), JSON.str
 linkDir(path.join(ROOT, 'plugins', 'qq-mode-console'), path.join(tmpHome, 'plugins', 'qq-mode-console'));
 
 function runSetup(label) {
-  const r = spawnSync(process.execPath, [path.join(ROOT, 'scripts', 'setup-dsh.mjs'), 'web'], {
+  const r = spawnSync(process.execPath, [path.join(ROOT, 'scripts', 'setup-dsh.mjs'), `--config=${configFile}`, 'web'], {
     // 保留最小 PATH（进程启动需要），但把 dsh CLI 排除在外 → 跳过自动 pnpm 安装那一步
-    env: { ...process.env, DSH_HOME: tmpHome, PATH: path.dirname(process.execPath) },
+    env: { ...process.env, DSH_HOME: tmpHome, PATH: path.dirname(process.execPath), QQ_BRIDGE_SKIP_DSH_INSTALL: '1' },
     encoding: 'utf8',
     cwd: ROOT,
   });
@@ -102,14 +104,16 @@ if (doc) {
   console.log(`   解析出的 MCP id: ${ids.join(', ')}`);
 }
 
-// 断言 5：profile package.json 含两个 bundle（qq-mode-console + qq-agent-presets），且未破坏其他 bundle
+// 断言 5：profile package.json 含三个本项目 bundle，且未破坏其他 bundle
 const pkg = JSON.parse(fs.readFileSync(path.join(tmpHome, 'profiles', 'web', 'package.json'), 'utf8'));
 const bundles = pkg.dsh.profile.bundles;
-const okBundle = bundles.includes('qq-mode-console') && bundles.includes('qq-agent-presets') && bundles.includes('dsh-approval-toast');
+const okBundle = ['qq-mode-console', 'qq-agent-presets', 'channel-agent-presets', 'dsh-approval-toast']
+  .every((name) => bundles.includes(name));
 console.log(`${okBundle ? '✅' : '❌'} profile bundles 正确: ${bundles.join(', ')}`);
 if (!okBundle) failed += 1;
 const depOk = String(pkg.dependencies['qq-agent-presets'] ?? '').startsWith('link:')
-  && String(pkg.dependencies['qq-mode-console'] ?? '').startsWith('link:');
+  && String(pkg.dependencies['qq-mode-console'] ?? '').startsWith('link:')
+  && String(pkg.dependencies['channel-agent-presets'] ?? '').startsWith('link:');
 console.log(`${depOk ? '✅' : '❌'} link: 依赖已登记（preset 子行的裸说明符靠它解析）`);
 if (!depOk) failed += 1;
 

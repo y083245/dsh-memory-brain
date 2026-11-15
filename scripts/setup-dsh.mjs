@@ -1,17 +1,10 @@
 #!/usr/bin/env node
-// setup-dsh.mjs — 在目标设备上安装 qq-bridge 的 DSH 端配置
-//
-// 功能：
-//   1. 安装两套 agent preset：qq-chat、qq-chat-v2
-//      （DSH 0.1.7 机制：作为 qq-agent-presets bundle 的 patch 层插入
-//        @deepseek-ai/dsh-agent-preset 行；~/.dsh/.agent-presets/ 目录已不再被读取）
-//   2. 在 DSH profile 的 cordis.patch.yml 中挂载三个 MCP server：
-//      mcp-snowluma / mcp-snowluma-host / mcp-web-search-safe
-//   3. 在 profile package.json 中注册两个 bundle：qq-mode-console、qq-agent-presets
+// setup-dsh.mjs — 安装渠道安全预设；按配置同步 QQ 预设、设置插件和 MCP server。
 //
 // 用法：
 //   node scripts/setup-dsh.mjs            # 装进 web（dsh web）和 desktop（DSH 桌面版）两个 profile
 //   node scripts/setup-dsh.mjs web        # 只装指定 profile（可写多个）
+//   node scripts/setup-dsh.mjs --config=<file> web  # 使用指定的配置文件
 //
 // 桌面版固定使用 profiles/desktop，`dsh web` 默认使用 profiles/web；两边各有一份
 // package.json / cordis.patch.yml，必须分别安装，否则换一个版本打开就没有 QQ 预设和 MCP。
@@ -27,6 +20,7 @@ import { spawnSync } from 'node:child_process';
 import yaml from 'js-yaml';
 // UPGRADE_PATCH：effectiveSourceYaml —— 旧安装目录要和「生效版本」（出厂 + state/preset-overrides/）比，而不是只和出厂比。
 import { BUNDLE_DIR, PRESETS, buildPatches, effectiveSourceYaml, patchFileFor } from './build-agent-preset-patches.mjs';
+import { isQqEnabled } from '../src/runtime/channel-config.mjs';
 import { commandSpec, findExecutable } from '../src/runtime/commands.mjs';
 import { resolveStableNode } from '../src/runtime/node-bin.mjs';
 import { findDshCli } from '../src/runtime/paths.mjs';
@@ -53,7 +47,12 @@ function defaultProfiles() {
   return out;
 }
 
-const PROFILES = process.argv.length > 2 ? [...new Set(process.argv.slice(2))] : defaultProfiles();
+const args = process.argv.slice(2);
+const configArgs = args.filter((arg) => arg.startsWith('--config='));
+const explicitConfig = configArgs[0]?.slice('--config='.length);
+if (configArgs.length > 1 || explicitConfig === '') fatal('Specify one nonempty --config=<file>');
+const profileArgs = args.filter((arg) => !arg.startsWith('--config='));
+const PROFILES = profileArgs.length ? [...new Set(profileArgs)] : defaultProfiles();
 // 当前正在安装的 profile；下面的函数沿用原来的全局写法，由主循环逐个赋值。
 let PROFILE = PROFILES[0];
 // 本次是否改动了任何 DSH 侧文件（改了就要重启 DSH 才生效）。
@@ -75,6 +74,22 @@ function fatal(msg) {
   console.error(`[setup-dsh] ERROR: ${msg}`);
   process.exit(1);
 }
+
+function readChannelConfig() {
+  const file = explicitConfig ?? path.join(REPO_ROOT, 'config.json');
+  try {
+    const config = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
+    if (!config || typeof config !== 'object' || Array.isArray(config)) {
+      fatal('The channel configuration must be a JSON object');
+    }
+    return config;
+  } catch (error) {
+    if (error.code === 'ENOENT' && explicitConfig === undefined) return {};
+    fatal(`无法读取渠道配置：${file}（${error.code ?? 'invalid JSON'}）`);
+  }
+}
+
+const QQ_ENABLED = isQqEnabled(readChannelConfig());
 
 function ensureDir(p) {
   fs.mkdirSync(p, { recursive: true });
@@ -118,7 +133,10 @@ function backupBeforeOverwrite(file, keep = 5) {
 //          ① 把 qq-agent-presets bundle 注册进 profile（link: 依赖 + bundles + junction）；
 //          ② 从仓库权威源（dsh/agent-presets/<preset>/）重新生成 patch 文件。
 //        旧目录不再写入、也不删除（见 reportLegacyPresetDir）。
-const BUNDLE_NAMES = ['qq-mode-console', 'qq-agent-presets'];
+const QQ_BUNDLES = ['qq-mode-console', 'qq-agent-presets'];
+const CHANNEL_BUNDLE = 'channel-agent-presets';
+const MANAGED_BUNDLES = [...QQ_BUNDLES, CHANNEL_BUNDLE];
+const ACTIVE_BUNDLES = QQ_ENABLED ? MANAGED_BUNDLES : [CHANNEL_BUNDLE];
 
 /** 从仓库源重新生成 bundle 里的 patch 文件（人格正文/工具面改了就必须重跑）。 */
 function regeneratePresetPatches() {
@@ -161,8 +179,12 @@ function yamlSingleQuote(s) {
   return `'${String(s).replace(/'/g, "''")}'`;
 }
 
-// 由桥接托管的 MCP 条目 id：脚本对这三个 id 拥有所有权，可安全地按 id 增删。
-const MANAGED_MCP_IDS = ['mcp-snowluma', 'mcp-snowluma-host', 'mcp-web-search-safe'];
+// 这些 id 由安装脚本托管。关闭 QQ 时只移除 SnowLuma MCP，通用网页查询仍可供普通 DSH 会话使用。
+const QQ_MCP_IDS = ['mcp-snowluma', 'mcp-snowluma-host'];
+const MANAGED_MCP_IDS = [...QQ_MCP_IDS, 'mcp-web-search-safe'];
+const MANAGED_INSERT_IDS = QQ_ENABLED
+  ? MANAGED_MCP_IDS
+  : [...MANAGED_MCP_IDS, 'qq-mode', ...PRESETS.map((name) => `preset-${name}`)];
 
 // MCP 的 command 是「写一次、长期用」的绝对路径：DSH 每次启动都按它拉进程。
 // 所以不能直接用 process.execPath —— 便携版/沙箱里的 node 被回收后，三个 MCP
@@ -193,6 +215,7 @@ function mcpEntries() {
   let out = '# === qq-bridge MCP BEGIN ===\n';
   out += '# 由 scripts/setup-dsh.mjs 维护；这段区块会被整体替换，请勿手工编辑内部条目。\n';
   for (const [id, s] of Object.entries(servers)) {
+    if (!QQ_ENABLED && QQ_MCP_IDS.includes(id)) continue;
     out += `- insert:\n`;
     out += `    - id: ${id}\n`;
     out += `      name: '@deepseek-ai/dsh-mcp-client'\n`;
@@ -234,27 +257,28 @@ function prepareCordisPatch() {
     if (!Object.hasOwn(operation, 'insert')) { kept.push(operation); continue; }
     if (!Array.isArray(operation.insert)) fatal(`insert must be an array in ${patchFile}; file unchanged`);
     const entries = operation.insert.filter((entry) => {
-      if (!MANAGED_MCP_IDS.includes(entry?.id)) return true;
+      if (!MANAGED_INSERT_IDS.includes(entry?.id)) return true;
       removed++;
       return false;
     });
     // Retain shared insert parents and their selectors/other operation fields.
     if (entries.length || Object.keys(operation).length > 1) kept.push({ ...operation, insert: entries });
   }
-  const text = (kept.length ? `${yaml.dump(kept, { lineWidth: -1, noRefs: true })}\n` : '') + mcpEntries();
-  // 三个托管 MCP 条目已经和要写的一模一样时**不动文件**：DSH 自己（尤其桌面版）会往这个
+  const managed = mcpEntries();
+  const text = (kept.length ? `${yaml.dump(kept, { lineWidth: -1, noRefs: true })}\n` : '') + managed;
+  // 托管条目已经和要写的一模一样时**不动文件**：DSH 自己（尤其桌面版）会往这个
   // 文件末尾追加设置项，按文本比较会把「只是顺序 / 引号不同」误判成改动，既白白重写用户文件，
   // 又让 start-all 以为必须重启 DSH。
   const managedNow = [];
   for (const operation of doc) {
-    for (const entry of operation.insert ?? []) if (MANAGED_MCP_IDS.includes(entry?.id)) managedNow.push(entry);
+    for (const entry of operation.insert ?? []) if (MANAGED_INSERT_IDS.includes(entry?.id)) managedNow.push(entry);
   }
-  const wanted = yaml.load(mcpEntries()).flatMap((operation) => operation.insert);
+  const wanted = yaml.load(managed).flatMap((operation) => operation.insert);
   const unchanged = JSON.stringify(managedNow) === JSON.stringify(wanted);
-  return { patchFile, original, text: unchanged ? original : text, removed };
+  return { patchFile, original, text: unchanged ? original : text, removed, installed: wanted.length };
 }
 
-function patchCordis({ patchFile, original, text, removed }) {
+function patchCordis({ patchFile, original, text, removed, installed }) {
   ensureDir(path.dirname(patchFile));
   // Parsing/serialization normalizes formatting; keep the original text (including comments).
   if (original && original !== text) {
@@ -272,7 +296,7 @@ function patchCordis({ patchFile, original, text, removed }) {
   } finally {
     fs.rmSync(temporary, { force: true });
   }
-  log(`cordis.patch.yml: MCP 条目已同步（清理旧条目 ${removed} 条，写入 ${MANAGED_MCP_IDS.length} 条）`);
+  log(`cordis.patch.yml: MCP 条目已同步（清理旧条目 ${removed} 条，写入 ${installed} 条）`);
 }
 
 /**
@@ -365,10 +389,14 @@ function patchProfilePackage(links) {
   if (!Array.isArray(pkg.dsh.profile.bundles)) pkg.dsh.profile.bundles = [];
   // 修复旧版 setup 在「profile 不存在」时留下的残缺清单：只有本项目的 bundle、
   // 一个 DSH 自带 bundle 都没有（DSH 起不来）。用户自己的第三方 bundle 不在此列，原样保留。
-  const ours = new Set(BUNDLE_NAMES);
+  const ours = new Set(MANAGED_BUNDLES);
   if (pkg.dsh.profile.bundles.length && pkg.dsh.profile.bundles.every((name) => ours.has(name))) {
     pkg.dsh.profile.bundles.unshift(...BASE_BUNDLES);
     log(`package.json 缺少 DSH 基础 bundle，已补上：${BASE_BUNDLES.join(', ')}`);
+  }
+  if (!QQ_ENABLED) {
+    pkg.dsh.profile.bundles = pkg.dsh.profile.bundles.filter((name) => !QQ_BUNDLES.includes(name));
+    for (const name of QQ_BUNDLES) delete pkg.dependencies[name];
   }
   for (const [name, linkDir] of Object.entries(links)) {
     const linkVal = `link:${linkDir.replace(/\\/g, '/')}`;
@@ -403,7 +431,7 @@ function ensureLocalModeFile() {
   log(`state/mode.json created with mode=reserved2 (fallback if DSH settings are not available)`);
 }
 
-// qq-mode-console / qq-agent-presets 以 link: 依赖注册进 profile package.json 后，DSH 首次启动
+// bundle 以 link: 依赖注册进 profile package.json 后，DSH 首次启动
 // 需要先安装一次才能解析这些 bundle（否则 cold start 报 "cannot resolve profile bundle"）。
 // dsh CLI 可用时自动执行。
 function autoInstallProfileBundles() {
@@ -470,7 +498,7 @@ const prepared = PROFILES.map((name) => {
   PROFILE = name;
   return { name, cordisPatch: prepareCordisPatch() };
 });
-regeneratePresetPatches();
+if (QQ_ENABLED) regeneratePresetPatches();
 reportMcpNode();
 const changedProfiles = [];
 for (const { name, cordisPatch } of prepared) {
@@ -480,7 +508,7 @@ for (const { name, cordisPatch } of prepared) {
   CHANGED = false;
   patchCordis(cordisPatch);
   const links = {};
-  for (const bundle of BUNDLE_NAMES) links[bundle] = ensureBundle(bundle);
+  for (const bundle of ACTIVE_BUNDLES) links[bundle] = ensureBundle(bundle);
   patchProfilePackage(links);
   // 文件都没变且 pnpm 状态已在时不再跑 install（每次都跑要十几秒）。
   const installed = fs.existsSync(path.join(DSH_HOME, 'profiles', name, 'node_modules', '.modules.yaml'));
@@ -489,8 +517,10 @@ for (const { name, cordisPatch } of prepared) {
   if (CHANGED) changedProfiles.push(name);
   CHANGED = before || CHANGED;
 }
-reportLegacyPresetDir();
-ensureLocalModeFile();
+if (QQ_ENABLED) {
+  reportLegacyPresetDir();
+  ensureLocalModeFile();
+}
 log(CHANGED
   ? 'Done. Restart DSH (or reload the profile) so the new presets/MCP take effect.'
   : 'Done. DSH 侧已是最新，无需重启。');

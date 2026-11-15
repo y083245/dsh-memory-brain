@@ -87,6 +87,27 @@ await test('resolveOrchestratorPaths：config.orchestrator 被环境变量覆盖
   assert.equal(withVenv.ragPython.command, venvPython);
 });
 
+await test('resolveOrchestratorPaths：禁用 QQ 时跳过 SnowLuma/QQ 目录扫描', () => {
+  const root = tempDir('repo-no-qq');
+  fs.writeFileSync(path.join(root, 'config.json'), JSON.stringify({
+    channels: { qq: { enabled: false }, feishu: { enabled: true } },
+    orchestrator: { dshCommand: ['node', 'dsh.js'] }
+  }));
+  const inspect = (file) => {
+    assert.doesNotMatch(file, /snowluma|qqnt|qq\.exe/i);
+  };
+  const fsImpl = {
+    ...fs,
+    statSync(file) { inspect(file); return fs.statSync(file); },
+    readdirSync(dir, ...args) { inspect(dir); return fs.readdirSync(dir, ...args); },
+  };
+  const paths = resolveOrchestratorPaths({ root, fsImpl, env: { SNOW_DIR: 'missing', QQ_BIN: 'missing' }, home: root, platform: 'win32' });
+  assert.equal(paths.snowDir, '');
+  assert.equal(paths.snowLaunch, null);
+  assert.equal(paths.qqBin, '');
+  assert.deepEqual(paths.dshCommand.args, ['dsh.js']);
+});
+
 await test('resolvePython：优先 venv，Windows/Linux 各自的目录结构', () => {
   const venv = tempDir('venv');
   const sub = process.platform === 'win32' ? 'Scripts' : 'bin';

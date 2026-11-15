@@ -257,14 +257,14 @@ export async function checkDshModels(baseUrl, { timeoutMs = 8000, auth } = {}) {
 export const REQUIRED_PRESETS = ['qq-chat', 'qq-chat-v2'];
 
 /** 问 DSH：预设注册上了没有。ok=null 表示查询本身失败（不等于没注册）。 */
-export async function checkDshPresets(baseUrl, { timeoutMs = 8000, auth } = {}) {
+export async function checkDshPresets(baseUrl, { timeoutMs = 8000, auth, requiredPresets = REQUIRED_PRESETS } = {}) {
   try {
     const api = new NodeApiClient(baseUrl, timeoutMs, auth ?? {});
     const response = await api.callUnary('agentPresets/list', {}, AbortSignal.timeout(timeoutMs));
     const presets = response?.result?.value?.presets;
     if (!Array.isArray(presets)) return { ok: null, ids: [], missing: [] };
     const ids = presets.map((p) => String(p?.id ?? ''));
-    const missing = REQUIRED_PRESETS.filter((id) => !ids.includes(id));
+    const missing = requiredPresets.filter((id) => !ids.includes(id));
     return { ok: missing.length === 0, ids, missing };
   } catch {
     return { ok: null, ids: [], missing: [] };

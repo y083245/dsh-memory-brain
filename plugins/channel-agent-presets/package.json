@@ -1,0 +1,15 @@
+{
+  "name": "channel-agent-presets",
+  "version": "0.5.2",
+  "description": "飞书与 Telegram 的 DSH 安全预设及会话工具守卫",
+  "type": "module",
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "dsh": {
+    "bundle": {
+      "patch": [
+        "./presets/channel-chat-v2.patch.yml",
+        "./presets/channel-chat-v2-text.patch.yml"
+      ]
+    }
+  }
+}

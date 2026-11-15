@@ -13,6 +13,7 @@ import { McpServer as RealMcpServer } from '@modelcontextprotocol/sdk/server/mcp
 import { z } from 'zod';
 import { compactModelMessage, serializeModelData } from '../src/qq-model-view.js';
 import { sessionBindingDenial, SESSION_UNAVAILABLE } from '../plugins/qq-agent-presets/qq-self-key.mjs';
+import { isQqEnabled } from '../src/runtime/channel-config.mjs';
 
 function loadTools({ selfKey = 'group:123' } = {}) {
   let server;
@@ -34,7 +35,7 @@ function loadTools({ selfKey = 'group:123' } = {}) {
     },
   };
   vm.runInNewContext(source, {
-    McpServer, StdioServerTransport: class {}, z, path, fs: fixtureFs,
+    McpServer, StdioServerTransport: class {}, z, path, fs: fixtureFs, isQqEnabled,
     URL, URLSearchParams, AbortSignal, Buffer, setTimeout, clearTimeout,
     process: { env: { QQ_BRIDGE_SELF_KEY: selfKey }, argv: [], cwd: () => '/fixture' },
     console: { error() {} }, http: { request() { throw new Error('Unexpected long poll'); } },

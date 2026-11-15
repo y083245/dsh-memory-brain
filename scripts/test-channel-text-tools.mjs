@@ -67,7 +67,7 @@ function fixture(t, account = TELEGRAM) {
     async callUnary(method, params) {
       if (method === 'agentPresets/list') return success({ presets: [{ id: 'channel-chat-v2' }, { id: PRESET }] });
       if (method === 'agentPresets/read' && ['channel-chat-v2', PRESET].includes(params.agentPreset)) {
-        const patch = yaml.load(readFileSync(new URL(`../plugins/qq-agent-presets/presets/${params.agentPreset}.patch.yml`, import.meta.url), 'utf8'));
+        const patch = yaml.load(readFileSync(new URL(`../plugins/channel-agent-presets/presets/${params.agentPreset}.patch.yml`, import.meta.url), 'utf8'));
         const plugins = patch[0].insert.find((row) => row.config?.id === params.agentPreset).config.plugins;
         return success({ agentPreset: params.agentPreset, content: yaml.dump(plugins) });
       }

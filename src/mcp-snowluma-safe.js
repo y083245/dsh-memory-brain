@@ -19,6 +19,7 @@ import { z } from 'zod';
 // 在 MCP 里拦会连「安全拒绝理由」都拿不到，反而让模型无法把话说清楚。
 import { SENSITIVE_RE } from './sensitive.js';
 import { serializeModelData } from './qq-model-view.js';
+import { isQqEnabled } from './runtime/channel-config.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -61,18 +62,21 @@ function selfKeyGuard(key) {
 
 function loadConfig() {
   try {
-    let text = fs.readFileSync(path.join(ROOT, 'config.json'), 'utf8');
-    if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
-    return JSON.parse(text);
-  } catch {
-    return {};
+    const text = fs.readFileSync(path.join(ROOT, 'config.json'), 'utf8').replace(/^\uFEFF/, '');
+    const config = JSON.parse(text);
+    return config && typeof config === 'object' && !Array.isArray(config) ? config : null;
+  } catch (error) {
+    return error.code === 'ENOENT' ? {} : null;
   }
 }
 
-const cfg = loadConfig();
+const cfg = loadConfig() ?? {};
+const QQ_UNAVAILABLE = 'QQ 渠道已关闭';
 
 function getConfig() {
-  return loadConfig();
+  const config = loadConfig();
+  if (!config || !isQqEnabled(config)) throw new Error(QQ_UNAVAILABLE);
+  return config;
 }
 
 function getAccess() {
@@ -466,6 +470,10 @@ function normalizeWakeArguments(config) {
       for (const alias of alternatives) shape[alias] = schema[canonical].optional().describe(`${canonical} 的别名；请只使用一种写法`);
     }
     const guarded = async (args, ...tail) => {
+      const config = loadConfig();
+      if (!config || !isQqEnabled(config)) {
+        return { content: [{ type: 'text', text: QQ_UNAVAILABLE }], isError: true };
+      }
       let canonicalArgs;
       try { canonicalArgs = foldArgumentAliases(args, aliases, required); }
       catch (error) { return { content: [{ type: 'text', text: `参数错误：${error.message}` }], isError: true }; }

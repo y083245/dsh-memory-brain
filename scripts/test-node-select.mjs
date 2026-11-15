@@ -202,6 +202,18 @@ await test('planStartNode：NODE_BIN / orchestrator.nodeBin 指定过的不改',
   assert.equal(planStartNode({ ...base, env: { DSH_DIR } }), null);
 });
 
+await test('planStartNode：禁用 QQ 时不用 cap_sys_ptrace 来选择 Node', () => {
+  const root = tempDir('repo-no-qq');
+  const home = tempDir('home-no-qq');
+  makeNvm(home, ['v24.22.1']);
+  writeFile(path.join(root, 'config.json'), JSON.stringify({ channels: { qq: { enabled: false } } }));
+  const plan = planStartNode({
+    root, home, entryMin: ENTRY_MIN, platform: 'linux', env: { DSH_DIR: makeDshDir('>=24.9.0') },
+    execPath: '/usr/bin/node', version: '22.22.1', hasCap: () => assert.fail('禁用 QQ 时不探测 cap_sys_ptrace')
+  });
+  assert.equal(plan?.version, '24.22.1');
+});
+
 await test('Windows 行为不变：不换 node，nodeBin 还是当前进程', () => {
   const home = tempDir('home');
   const root = tempDir('repo');
@@ -274,6 +286,10 @@ await test('checkNodeForServices：只查这次真要起的服务', async () => 
   const allUp = await run({ open: [3080, 5099], cap: false });
   assert.equal(allUp.good, true);
   assert.equal(allUp.capAsked, 0, 'SnowLuma 已在运行就不查权限');
+
+  const noQq = await run({ open: [3080], cap: false, target: { ...paths, config: { channels: { qq: { enabled: false } } } } });
+  assert.equal(noQq.good, true);
+  assert.equal(noQq.capAsked, 0);
 
   const soft = await run({ open: [5099], target: { ...paths, dshCommand: { kind: 'cli', command: 'dsh' } } });
   if (!versionAtLeast(process.versions.node, '24.9.0')) {

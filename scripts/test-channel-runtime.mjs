@@ -93,7 +93,7 @@ async function fixture(t, { enableTextTools = true } = {}) {
     async callUnary(method, params) {
       if (method === 'agentPresets/list') return success({ presets: [{ id: 'channel-chat-v2' }, { id: 'channel-chat-v2-text' }] });
       if (method === 'agentPresets/read') {
-        const patch = yaml.load(readFileSync(new URL(`../plugins/qq-agent-presets/presets/${params.agentPreset}.patch.yml`, import.meta.url), 'utf8'));
+        const patch = yaml.load(readFileSync(new URL(`../plugins/channel-agent-presets/presets/${params.agentPreset}.patch.yml`, import.meta.url), 'utf8'));
         const preset = patch[0].insert.find((row) => row.config?.id === params.agentPreset).config;
         return success({ agentPreset: params.agentPreset, content: yaml.dump(preset.plugins) });
       }
@@ -151,6 +151,24 @@ test('live disabling text tools selects the zero-tool preset for new turns', asy
   assert.equal(feishu.accept(makeEvent()).status, 'durableAccepted');
   const prompt = await eventually(() => prompts[0]);
   assert.equal(sessions.get(prompt.sessionId), 'channel-chat-v2');
+});
+
+test('platform status follows each channel and its verified registration independently', async (t) => {
+  const { host, feishu, channels, controls } = await fixture(t);
+  assert.equal(host.platformState('feishu'), 'registered');
+  assert.equal(host.platformState('telegram'), 'awaiting_adapter');
+  const telegram = host.registerAccount(TELEGRAM);
+  controls.current = false;
+  assert.equal(host.platformState('feishu'), 'unavailable');
+  assert.equal(host.platformState('telegram'), 'registered');
+  channels.feishu.enabled = false;
+  assert.equal(host.platformState('feishu'), 'disabled');
+  assert.equal(host.platformState('telegram'), 'registered');
+  channels.feishu.enabled = true;
+  feishu.close();
+  assert.equal(host.platformState('feishu'), 'awaiting_adapter');
+  telegram.close();
+  assert.equal(host.platformState('telegram'), 'awaiting_adapter');
 });
 
 test('verified account replacement reconciles the retired account journal without redispatch', async (t) => {

@@ -173,7 +173,7 @@ function tooling({ marker = false } = {}) {
  * 建一套世界：remote.git、user/（停在 v0.3.0）、home/、bin/、tmp/。
  * legacy = v0.3.0 里还没有 update.sh / migrate.mjs（照现在线上的 main）。
  */
-function makeWorld(name, { legacy = false, rag = true } = {}) {
+function makeWorld(name, { legacy = false, rag = true, qqDisabled = false } = {}) {
   const root = path.join(BASE, name);
   fs.rmSync(root, { recursive: true, force: true });
   for (const d of ['home', 'bin', 'tmp']) fs.mkdirSync(path.join(root, d), { recursive: true });
@@ -207,6 +207,7 @@ function makeWorld(name, { legacy = false, rag = true } = {}) {
   git(author, 'tag', 'v0.3.0');
   writeFiles(author, {
     'src/bridge.js': '// v0.3.1\n',
+    ...(qqDisabled ? { 'src/runtime/channel-config.mjs': devFile('src/runtime/channel-config.mjs') } : {}),
     'package-lock.json': '{ "lockfileVersion": 3, "v": "0.3.1" }\n',
     'dsh/agent-presets/qq-chat-v2/agent.cordis.yml': presetYaml('（v0.3.1）'),
     'roles/A.md': '# A\n出厂的 A（v0.3.1 版）\n',
@@ -222,7 +223,10 @@ function makeWorld(name, { legacy = false, rag = true } = {}) {
   fs.symlinkSync(path.join(DEV, 'node_modules'), path.join(user, 'node_modules'));
   // 用户数据
   writeFiles(user, {
-    'config.json': `${JSON.stringify({ consolePort: 3100, memoryRag: { enabled: rag } }, null, 2)}\n`,
+    'config.json': `${JSON.stringify({
+      consolePort: 3100, memoryRag: { enabled: rag },
+      ...(qqDisabled ? { channels: { qq: { enabled: false }, feishu: { enabled: true } } } : {})
+    }, null, 2)}\n`,
     'state/console-token': `${TOKEN}\n`,
     'state/people.json': '{"version":1,"people":{"1":"原来的账本"}}\n',
     'state/long-memory/rag/chroma/data.bin': 'vectors',
@@ -617,6 +621,21 @@ function setProcs(w, procs) {
 }
 const withoutPid = (...pids) => PROCS.filter((p) => !pids.includes(p.pid));
 const startAllPlain = (w, from = 0) => w.calls().slice(from).map(callStr).filter((c) => c === 'start-all.sh');
+
+await test('已关闭 QQ 时升级跳过 QQ 依赖和进程检查，回滚至旧版仍保留旧进程保护', async () => {
+  const w = world('channels-no-qq', { qqDisabled: true });
+  setProcs(w, withoutPid(500, 600));
+  const upgraded = await update(w, ['--yes']);
+  assert.equal(upgraded.code, 0, upgraded.out);
+  assert.ok(w.calls().map(callStr).includes('npm ci --omit=optional'));
+  assert.deepEqual(startAllPlain(w), ['start-all.sh', 'start-all.sh']);
+  assert.ok(!w.calls().some((c) => c.cmd === 'pgrep' && c.args.includes('qq')));
+  const beforeRollback = w.calls().length;
+  const rolledBack = await rollback(w, ['--yes']);
+  assert.equal(rolledBack.code, 0, rolledBack.out);
+  assert.deepEqual(startAllPlain(w, beforeRollback), []);
+  assert.match(rolledBack.out, /QQ\/SnowLuma 没在运行/);
+});
 
 await test('R2-1. QQ 不在跑（没装单元）：不停桥接 / DSH、不调 start-all.sh，提示，ok-partial', async () => {
   const w = world('host-noqq');

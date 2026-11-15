@@ -7,6 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { findExecutable } from './commands.mjs';
 import { resolvePython } from './python.mjs';
+import { isQqEnabled } from './channel-config.mjs';
 
 function isFile(file, fsImpl = fs) {
   try { return fsImpl.statSync(file).isFile(); } catch { return false; }
@@ -16,7 +17,7 @@ function isDir(dir, fsImpl = fs) {
   try { return fsImpl.statSync(dir).isDirectory(); } catch { return false; }
 }
 
-function readConfig(root, fsImpl = fs) {
+export function readRuntimeConfig(root, fsImpl = fs) {
   try {
     const text = fsImpl.readFileSync(path.join(root, 'config.json'), 'utf8');
     const doc = JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text);
@@ -196,7 +197,7 @@ export function resolveOrchestratorPaths({
   fsImpl = fs,
   execPath = process.execPath
 } = {}) {
-  const config = readConfig(root, fsImpl);
+  const config = readRuntimeConfig(root, fsImpl);
   const oc = config.orchestrator && typeof config.orchestrator === 'object' && !Array.isArray(config.orchestrator)
     ? config.orchestrator
     : {};
@@ -207,8 +208,9 @@ export function resolveOrchestratorPaths({
 
   const runDir = pick('QQB_RUN_DIR', 'runDir', path.join(home, '.ai-companion-run'));
   const dshDir = pick('DSH_DIR', 'dshDir', path.join(home, 'deepseek-harness'));
-  const snowDir = pick('SNOW_DIR', 'snowDir', findSnowLumaDir({ home, platform, env, fsImpl }));
-  const qqBin = pick('QQ_BIN', 'qqBin', defaultQqBin({ platform, env, fsImpl }));
+  const qqEnabled = isQqEnabled(config);
+  const snowDir = qqEnabled ? pick('SNOW_DIR', 'snowDir', findSnowLumaDir({ home, platform, env, fsImpl })) : '';
+  const qqBin = qqEnabled ? pick('QQ_BIN', 'qqBin', defaultQqBin({ platform, env, fsImpl })) : '';
   const gsvDir = pick('GSV_DIR', 'gsvDir', path.join(home, 'gpt-sovits'));
   const embedBin = pick('EMBED_BIN', 'embedBin', defaultEmbedBin({ platform, home, fsImpl }));
   const embedModel = pick('EMBED_MODEL', 'embedModel', path.join(home, 'models', 'Qwen3-Embedding-8B-Q8_0.gguf'));
@@ -272,4 +274,4 @@ export function resolveOrchestratorPaths({
   };
 }
 
-export const __test = { readConfig, defaultEmbedBin };
+export const __test = { readConfig: readRuntimeConfig, defaultEmbedBin };

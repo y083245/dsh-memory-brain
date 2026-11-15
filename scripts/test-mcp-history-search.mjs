@@ -48,6 +48,8 @@ const fakePort = server.address().port;
 // ── 临时 ROOT：src/ + package.json + node_modules 软链 ───────────────────
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-bridge-mcp-history-'));
 fs.mkdirSync(path.join(tmp, 'src'));
+fs.mkdirSync(path.join(tmp, 'src', 'runtime'));
+fs.copyFileSync(path.join(ROOT, 'src/runtime/channel-config.mjs'), path.join(tmp, 'src/runtime/channel-config.mjs'));
 for (const file of ['mcp-snowluma-safe.js', 'sensitive.js', 'qq-model-view.js']) {
   fs.copyFileSync(path.join(ROOT, 'src', file), path.join(tmp, 'src', file));
 }

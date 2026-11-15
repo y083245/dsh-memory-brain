@@ -2,7 +2,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import {
   CHANNEL_TOOL_MAX_RESULT_BYTES, CHANNEL_TOOL_MAX_WAIT_MS, channelCommonToolNames,
   validChannelToolArgs, validChannelToolResult,
-} from '../../plugins/qq-agent-presets/channel-tool-contract.mjs';
+} from '../../plugins/channel-agent-presets/channel-tool-contract.mjs';
 import { normalizeDateRange } from '../memory-rag-client.js';
 import { sanitizeUntrustedText } from '../qq-model-view.js';
 import { encodeConversationKey, encodePersonKey, sameAccount } from './identity.mjs';
