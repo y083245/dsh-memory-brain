@@ -71,6 +71,17 @@ async function sendTool(config, payload, signal) {
   }
 }
 
+const benignContextKinds = new Set(['runtime-context', 'compact-checkpoint']);
+const pluginSourceKind = /^plugin:[^\s]+$/;
+
+function isBenignContextSource(source) {
+  const kind = source?.kind;
+  if (typeof kind !== 'string') return false;
+  if (benignContextKinds.has(kind)) return true;
+  if (source.form === 'relay' || source.senderSessionId !== undefined) return false;
+  return kind === 'plugin' || pluginSourceKind.test(kind);
+}
+
 function observeTurn(turns, session, { type, data }) {
   if (typeof session?.id !== 'string' || !channelSessionId.test(session.id)) return;
   if (type === 'turn/start') {
@@ -84,9 +95,9 @@ function observeTurn(turns, session, { type, data }) {
   const current = turns.get(session);
   if (!current) return;
   if (type === 'user/message') {
-    const source = data.source;
-    // The loop records its own runtime context as a user/message alongside the actual input.
-    if (source?.kind === 'runtime-context') return;
+    const source = data?.source;
+    // Skip host/plugin context injections; only a single valid user prompt may authorize a turn.
+    if (isBenignContextSource(source)) return;
     current.requestId = current.requestId === null && source?.kind === 'user' &&
       typeof source.rpcId === 'string' && bridgeRequestId.test(source.rpcId) ? source.rpcId : false;
     return;

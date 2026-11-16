@@ -276,8 +276,31 @@ test('native channel tools require the exact preset and a live direct call and v
   assert.equal(typeof checkScoped(rawExec), 'string');
   assert.deepEqual(await sendText.execute(args, rawExec), { status: 'invalid' });
   assert.deepEqual(await sendText.execute({ text: 'rewritten' }, exec), { status: 'invalid' });
-  for (const sources of [[], [user('untrusted')], [user(), user()], [user(), { source: { kind: 'agent-message' } }]]) {
+  const hindsight = { source: { kind: 'plugin:hindsight', form: 'recall' } };
+  const pluginApproval = { source: { kind: 'plugin', plugin: 'user-approval' } };
+  const checkpoint = { source: { kind: 'compact-checkpoint' } };
+  for (const sources of [
+    [],
+    [hindsight],
+    [pluginApproval],
+    [checkpoint],
+    [user('untrusted')],
+    [user('untrusted'), hindsight],
+    [{ source: { kind: 'user' } }, hindsight],
+    [user(), user()],
+    [user(), hindsight, user()],
+    [user(), user(), hindsight],
+    [user(), { source: { kind: 'agent-message' } }],
+    [user(), hindsight, { source: { kind: 'agent-message' } }],
+    [{ source: { kind: 'agent-message' } }, user(), hindsight],
+    [user(), { source: { kind: 'plugin:hindsight', form: 'relay' } }],
+    [user(), { source: { kind: 'plugin', plugin: 'relay', senderSessionId: sessionId } }],
+    [user(), { source: { kind: 'plugin:' } }],
+    [user(), { source: { kind: 'coordinator', form: 'relay', senderSessionId: sessionId } }],
+  ]) {
     begin(exec, sources);
+    assert.equal(typeof checkGlobal(exec), 'string');
+    assert.equal(typeof checkScoped(exec), 'string');
     assert.deepEqual(await sendText.execute(args, exec), denied);
   }
   assert.equal(calls.length, 0);
@@ -394,4 +417,42 @@ test('native channel tools require the exact preset and a live direct call and v
     assert.deepEqual(await result, { status: cancel.signal.aborted ? 'unavailable' : 'denied' });
     presets.set(agent.ctx, textPreset);
   }
+
+  response = { body: '{"status":"queued"}' };
+  for (const [index, sources] of [
+    [hindsight, user()],
+    [user(), hindsight],
+    [user(), pluginApproval, checkpoint],
+  ].entries()) {
+    const turn = 5 + index;
+    begin(exec, sources, turn);
+    assert.equal(checkGlobal(exec), undefined);
+    assert.equal(checkScoped(exec), undefined);
+    assert.deepEqual(await sendText.execute(args, exec), { status: 'queued' });
+  }
+
+  // Real DSH order: user + runtime-context, then agent/pre-step plugin:hindsight, plus mid-turn step 2 context.
+  event('turn/end', { turn: 7 });
+  event('turn/start', { turn: 8 });
+  event('step/start', { turn: 8, step: 1 });
+  event('user/message', user());
+  event('user/message', { source: { kind: 'runtime-context' } });
+  event('user/message', hindsight);
+  event('tool/call', { turn: 8, step: 1, callId: exec.callId, name: exec.name });
+  assert.equal(checkGlobal(exec), undefined);
+  assert.deepEqual(await sendText.execute(args, exec), { status: 'queued' });
+  event('tool/result', { turn: 8, step: 1, message: { toolCallId: exec.callId } });
+  event('step/end', { turn: 8, step: 1 });
+
+  const step2Exec = { ...exec, callId: 'toolu_native_5', rootCallId: 'toolu_native_5' };
+  event('step/start', { turn: 8, step: 2 });
+  event('user/message', hindsight);
+  event('user/message', checkpoint);
+  event('tool/call', { turn: 8, step: 2, callId: step2Exec.callId, name: step2Exec.name });
+  assert.equal(checkGlobal(step2Exec), undefined);
+  assert.deepEqual(await sendText.execute(args, step2Exec), { status: 'queued' });
+
+  event('user/message', { source: { kind: 'agent-message' } });
+  assert.equal(typeof checkGlobal(step2Exec), 'string');
+  assert.deepEqual(await sendText.execute(args, step2Exec), denied);
 });
