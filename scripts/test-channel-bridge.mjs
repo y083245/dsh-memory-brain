@@ -379,6 +379,7 @@ test('shutdown closes the channel listener and workers before releasing the brid
   try {
     const lock = path.join(h.temp, 'state', 'bridge.lock');
     const stopping = h.shutdownBridge();
+    await new Promise((resolve) => setImmediate(resolve));
     assert.equal(fixture.events.at(-1), 'closing');
     assert.equal(fs.existsSync(lock), true);
     finishClose();
@@ -397,6 +398,7 @@ test('shutdown deadline leaves the bridge lock for process exit even if a worker
   try {
     const lock = path.join(h.temp, 'state', 'bridge.lock');
     const stopping = h.shutdownBridge();
+    await new Promise((resolve) => setImmediate(resolve));
     assert.equal(fixture.events.at(-1), 'closing');
     t.mock.timers.tick(10_000);
     const nextTurn = new Promise((done) => setImmediate(() => done('pending')));
@@ -406,4 +408,134 @@ test('shutdown deadline leaves the bridge lock for process exit even if a worker
     await promise;
     assert.equal(fs.existsSync(lock), true);
   } finally { resolve(); await h.close(); }
+});
+
+test('Feishu adapter starts, syncs on config change, and stops before host close and lock release', async () => {
+  const fixture = hostFixture({ managed: false });
+  let finishFeishuStop;
+  const feishuStopGate = new Promise((resolve) => { finishFeishuStop = resolve; });
+  const h = await bridgeHarness({
+    config: { channels: { qq: { enabled: false }, feishu: { enabled: true }, telegram: { enabled: false } } },
+    globals: {
+      ...fixture.globals,
+      createFeishuAdapter: () => {
+        fixture.events.push('feishu:create');
+        return {
+          async start() { fixture.events.push('feishu:start'); return { status: 'registered' }; },
+          async syncConfig() { fixture.events.push('feishu:syncConfig'); return { status: 'disabled' }; },
+          async stop() {
+            fixture.events.push('feishu:stop:begin');
+            await feishuStopGate;
+            fixture.events.push('feishu:stop:end');
+          },
+          status: () => ({ status: 'registered' }),
+        };
+      },
+    },
+  });
+  try {
+    assert.ok(fixture.events.includes('feishu:create'));
+    assert.ok(fixture.events.includes('feishu:start'));
+
+    const configFile = path.join(h.temp, 'config.json');
+    const saved = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+    fs.writeFileSync(configFile, JSON.stringify({ ...saved, channels: { ...saved.channels, feishu: { enabled: false } } }));
+    fixture.watches.get(h.temp)('rename', 'config.json');
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(fixture.events.at(-1), 'feishu:syncConfig');
+
+    const lock = path.join(h.temp, 'state', 'bridge.lock');
+    const stopping = h.shutdownBridge();
+    assert.ok(fixture.events.includes('feishu:stop:begin'));
+    assert.equal(fs.existsSync(lock), true);
+
+    finishFeishuStop();
+    await stopping;
+    const stopEndIndex = fixture.events.indexOf('feishu:stop:end');
+    const hostClosingIndex = fixture.events.indexOf('closing');
+    assert.ok(stopEndIndex !== -1 && hostClosingIndex !== -1 && stopEndIndex < hostClosingIndex);
+    assert.equal(fs.existsSync(lock), false);
+  } finally {
+    finishFeishuStop();
+    await h.close();
+  }
+});
+
+test('bridge options.isSensitive blocks Feishu appSecret, Telegram botToken, and proxy credentials', async () => {
+  const fixture = hostFixture({ managed: false });
+  let capturedEnv;
+  const h = await bridgeHarness({
+    config: { channels: { qq: { enabled: false }, feishu: { enabled: true }, telegram: { enabled: true } } },
+    globals: {
+      ...fixture.globals,
+      createFeishuAdapter: ({ env }) => {
+        capturedEnv = env;
+        return { start: async () => ({ status: 'awaiting_credentials' }), stop: async () => {}, syncConfig: async () => {}, status: () => ({ status: 'idle' }) };
+      },
+    },
+  });
+  try {
+    capturedEnv.FEISHU_APP_SECRET = 'feishu-app-secret-fixture-99';
+    capturedEnv.TELEGRAM_BOT_TOKEN = '123456789:telegram-bot-token-fixture';
+    capturedEnv.TELEGRAM_PROXY_URL = 'http://proxyuser:proxypass1234@127.0.0.1:7890';
+    const [{ isSensitive }] = fixture.starts;
+
+    assert.equal(isSensitive('leaked feishu-app-secret-fixture-99 here'), true);
+    assert.equal(isSensitive('f e i s h u - a p p - s e c r e t - f i x t u r e - 9 9'), true);
+    assert.equal(isSensitive(Buffer.from('feishu-app-secret-fixture-99').toString('base64')), true);
+    assert.equal(isSensitive('token 123456789:telegram-bot-token-fixture'), true);
+    assert.equal(isSensitive('pass proxypass1234'), true);
+    assert.equal(isSensitive('ordinary friendly message'), false);
+  } finally { await h.close(); }
+});
+
+test('Telegram adapter starts, syncs on config change, and stops before host close and lock release', async () => {
+  const fixture = hostFixture({ managed: false });
+  let finishTelegramStop;
+  const telegramStopGate = new Promise((resolve) => { finishTelegramStop = resolve; });
+  const h = await bridgeHarness({
+    config: { channels: { qq: { enabled: false }, feishu: { enabled: false }, telegram: { enabled: true } } },
+    globals: {
+      ...fixture.globals,
+      createTelegramAdapter: () => {
+        fixture.events.push('telegram:create');
+        return {
+          async start() { fixture.events.push('telegram:start'); return { status: 'registered' }; },
+          async syncConfig() { fixture.events.push('telegram:syncConfig'); return { status: 'disabled' }; },
+          async stop() {
+            fixture.events.push('telegram:stop:begin');
+            await telegramStopGate;
+            fixture.events.push('telegram:stop:end');
+          },
+          status: () => ({ status: 'registered' }),
+        };
+      },
+    },
+  });
+  try {
+    assert.ok(fixture.events.includes('telegram:create'));
+    assert.ok(fixture.events.includes('telegram:start'));
+
+    const configFile = path.join(h.temp, 'config.json');
+    const saved = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+    fs.writeFileSync(configFile, JSON.stringify({ ...saved, channels: { ...saved.channels, telegram: { enabled: false } } }));
+    fixture.watches.get(h.temp)('rename', 'config.json');
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(fixture.events.at(-1), 'telegram:syncConfig');
+
+    const lock = path.join(h.temp, 'state', 'bridge.lock');
+    const stopping = h.shutdownBridge();
+    assert.ok(fixture.events.includes('telegram:stop:begin'));
+    assert.equal(fs.existsSync(lock), true);
+
+    finishTelegramStop();
+    await stopping;
+    const stopEndIndex = fixture.events.indexOf('telegram:stop:end');
+    const hostClosingIndex = fixture.events.indexOf('closing');
+    assert.ok(stopEndIndex !== -1 && hostClosingIndex !== -1 && stopEndIndex < hostClosingIndex);
+    assert.equal(fs.existsSync(lock), false);
+  } finally {
+    finishTelegramStop();
+    await h.close();
+  }
 });

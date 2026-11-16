@@ -298,6 +298,18 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
       loadSdk: async () => ({ SnowLumaWebSocketClient: context.SnowLumaWebSocketClient, text: (s) => s }),
       fetch: (...args) => context.fetch(...args),
     }),
+    createFeishuAdapter: () => ({
+      start: async () => ({ status: 'disabled' }),
+      stop: async () => {},
+      syncConfig: async () => ({ status: 'disabled' }),
+      status: () => ({ status: 'idle' }),
+    }),
+    createTelegramAdapter: () => ({
+      start: async () => ({ status: 'disabled' }),
+      stop: async () => {},
+      syncConfig: async () => ({ status: 'disabled' }),
+      status: () => ({ status: 'idle' }),
+    }),
     discoverDshLaunchToken: () => '', unwrap, createTurnCollector,
     // DSH 端点发现（src/dsh-discovery.js）：测试里固定为 dsh web，不去扫真实进程。
     resolveDshEndpoint: async ({ baseUrl }) => ({ baseUrl, kind: 'web' }),

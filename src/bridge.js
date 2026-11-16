@@ -17,6 +17,8 @@ import { extractPresetPrefix, presetPromptBlockers, presetPromptWarnings, render
 import { GEN1_ROLE_LINE_RE, parseRoleSections, roleCharStats, roleSectionReport, selectRoleText } from './role-card.js';
 import { fileURLToPath } from 'node:url';
 import { createQQAdapter } from './channels/qq.js';
+import { createFeishuAdapter } from './channels/feishu.js';
+import { createTelegramAdapter } from './channels/telegram.js';
 import { canonicalLegacyQQKey as canonicalV2Key } from './core/identity.mjs';
 import { startChannelHost } from './runtime/channel-host.mjs';
 import { isExternalChannelEnabled, isQqEnabled, normalizeOwnerQQ, qqNeedsConfig } from './runtime/channel-config.mjs';
@@ -25,7 +27,7 @@ import { NodeApiClient, unwrap, createTurnCollector, discoverDshLaunchToken } fr
 import { describeEndpoint, modelSetupHint, resolveDshEndpoint } from './dsh-discovery.js';
 import { discoverDshBaseUrl } from './dsh-endpoint.js';
 import { mdToPlain, splitForQQ, truncateText, truncateTextTail } from './md-to-plain.js';
-import { SENSITIVE_RE } from './sensitive.js';
+import { SENSITIVE_RE, sensitiveTextForms } from './sensitive.js';
 import { looksLikeUnfinished } from './v2-wait.js';
 import { compactModelMessage, describeAge, sanitizeUntrustedText } from './qq-model-view.js';
 import { safeFetchBuffer, looksLikeImageBuffer } from './safe-fetch.js';
@@ -718,6 +720,42 @@ function includesTokenFragment(value, token) {
     if (value.includes(token.slice(i, i + TOKEN_FRAGMENT_WIDTH))) return true;
   }
   return false;
+}
+
+function matchesSecretFragment(form, secret) {
+  if (typeof secret !== 'string' || secret.length < 6) return false;
+  const compactSecret = secret.replace(/[\s._-]+/g, '');
+  const candidates = compactSecret && compactSecret !== secret ? [secret, compactSecret] : [secret];
+  return candidates.some((candidate) => candidate.length >= 6 && (
+    candidate.length >= TOKEN_FRAGMENT_WIDTH
+      ? includesTokenFragment(form, candidate)
+      : form.includes(candidate)
+  ));
+}
+
+function channelSecretTokens(channels) {
+  const secrets = [];
+  const addEnv = (name, fallback) => {
+    const key = typeof name === 'string' && /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) ? name : fallback;
+    const value = process.env[key];
+    if (typeof value === 'string' && value) secrets.push(value);
+  };
+  addEnv(channels?.feishu?.appSecretEnv, 'FEISHU_APP_SECRET');
+  addEnv(channels?.telegram?.botTokenEnv, 'TELEGRAM_BOT_TOKEN');
+  const proxyKey = typeof channels?.telegram?.proxyUrlEnv === 'string' && /^[A-Za-z_][A-Za-z0-9_]*$/.test(channels.telegram.proxyUrlEnv)
+    ? channels.telegram.proxyUrlEnv : 'TELEGRAM_PROXY_URL';
+  const proxyUrl = process.env[proxyKey];
+  if (typeof proxyUrl === 'string' && proxyUrl) {
+    try {
+      const parsed = new URL(proxyUrl);
+      if (parsed.password) {
+        secrets.push(parsed.password);
+        try { secrets.push(decodeURIComponent(parsed.password)); } catch {}
+        if (parsed.username) secrets.push(`${parsed.username}:${parsed.password}`);
+      }
+    } catch {}
+  }
+  return secrets;
 }
 
 /** 文本里是否出现任一已知 token 的任意 12 字符窗口。 */
@@ -1601,6 +1639,8 @@ let stateDirHardened = null;
 let channelHost = null;
 let channelHostStarting = null;
 let stopQqChannel = null;
+let feishuAdapter = null;
+let telegramAdapter = null;
 const channelStateWatches = [];
 let bridgeShutdown = null;
 const BRIDGE_SHUTDOWN_TIMEOUT_MS = 8_000;
@@ -1624,6 +1664,10 @@ function shutdownBridge() {
       for (const watcher of channelStateWatches.splice(0)) watcher.close();
       stopQqChannel?.();
       if (!channelHost && channelHostStarting) await channelHostStarting;
+      await Promise.allSettled([
+        feishuAdapter ? Promise.resolve(feishuAdapter.stop()).catch(() => { log('[channels] 飞书渠道关闭失败'); }) : null,
+        telegramAdapter ? Promise.resolve(telegramAdapter.stop()).catch(() => { log('[channels] Telegram 渠道关闭失败'); }) : null,
+      ]);
       await channelHost?.close();
     };
     let timer;
@@ -15260,7 +15304,14 @@ async function main() {
           try { return roleStore.read(safeName); } catch { return ''; }
         },
         isSensitive(text) {
-          return hasKnownTokenFragment(text) || includesTokenFragment(text, channelHost?.toolCredentials?.secret);
+          if (hasKnownTokenFragment(text)) return true;
+          const forms = sensitiveTextForms(text);
+          const toolSecret = channelHost?.toolCredentials?.secret;
+          if (toolSecret && forms.some((form) => includesTokenFragment(form, toolSecret))) return true;
+          for (const secret of channelSecretTokens(readChannelConfig()?.channels ?? cfg?.channels)) {
+            if (forms.some((form) => matchesSecretFragment(form, secret))) return true;
+          }
+          return false;
         },
         canRunTurns: () => channelDshReady && !bridgeShutdown,
         log,
@@ -15299,6 +15350,29 @@ async function main() {
     })();
     await channelHostStarting;
     channelHostStarting = null;
+  }
+  if (bridgeShutdown) return;
+  if (channelHost) {
+    feishuAdapter = createFeishuAdapter({
+      channelHost,
+      readConfig: readChannelConfig,
+      env: process.env,
+      log,
+    });
+    if (readChannelConfig()?.channels?.feishu?.enabled === true) {
+      try { await feishuAdapter.start(); }
+      catch { log('[channels] 飞书渠道启动失败'); }
+    }
+    telegramAdapter = createTelegramAdapter({
+      channelHost,
+      readConfig: readChannelConfig,
+      env: process.env,
+      log,
+    });
+    if (readChannelConfig()?.channels?.telegram?.enabled === true) {
+      try { await telegramAdapter.start(); }
+      catch { log('[channels] Telegram 渠道启动失败'); }
+    }
   }
   if (bridgeShutdown) return;
 
@@ -15342,6 +15416,12 @@ async function main() {
       if (config && !isQqEnabled(config)) stopQqChannel?.();
       channelHost?.invalidateAll();
       channelHost?.reload();
+      Promise.resolve(feishuAdapter?.syncConfig()).catch(() => {
+        log('[channels] 飞书渠道配置同步失败');
+      });
+      Promise.resolve(telegramAdapter?.syncConfig()).catch(() => {
+        log('[channels] Telegram 渠道配置同步失败');
+      });
     });
   }
   if (channelHost) watchChannelState(ROLE_STATE_FILE, () => channelHost?.invalidateAll());

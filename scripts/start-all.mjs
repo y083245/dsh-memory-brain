@@ -25,7 +25,10 @@ import { isQqEnabled } from '../src/runtime/channel-config.mjs';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 function dependenciesInstalled() {
-  return ['js-yaml', '@deepseek-ai/dsh-host-apiproxy']
+  return [
+    'js-yaml', '@deepseek-ai/dsh-host-apiproxy', '@larksuiteoapi/node-sdk',
+    'grammy', 'https-proxy-agent', 'socks-proxy-agent',
+  ]
     .every((name) => fs.existsSync(path.join(ROOT, 'node_modules', ...name.split('/'), 'package.json')));
 }
 
