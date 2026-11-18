@@ -217,7 +217,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
   return {
     syncInstalledPreset, installedPresetYaml, ensureSession, ensureSlangLearnerSession, runSlangResearch, resolvePresetName, deliverPrompt, drainPromptQueue,
     applyHealedTokens, reportTurnFailure, recordVoiceSentV2, rediscoverDshBase, checkDsh,
-    writeRoleState, shutdownBridge, pumpMux, KNOWN_AGENT_TOKENS,
+    writeRoleState, shutdownBridge, pumpMux, startQqTransport, KNOWN_AGENT_TOKENS,
     getSlangEntries: () => slangEntries,
     completeLearnerTurn(sessionId, output) {
       const waiters = learnerWaiters.get(sessionId) ?? [];

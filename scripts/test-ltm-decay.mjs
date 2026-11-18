@@ -428,6 +428,60 @@ await test('rowsAt：最多 200 行', async () => {
   });
 });
 
+await test('sharedQqProfile 只投影来源明确、可共享的私聊账本条目', async () => {
+  await withMemory(async (_lm, dir) => {
+    const file = path.join(dir, 'people.json');
+    const items = [
+      { cat: 'fact', text: '可共享事实 token-dummy' },
+      { cat: 'event', text: '可共享摘要' },
+      { cat: 'note', text: '仅限来源私聊', scope: 'private' },
+      { cat: 'note', text: '仅限群来源', sourceKey: OTHER_KEY },
+      { cat: 'note', text: '来源不明', sourceKey: '' },
+      { cat: 'note', text: '权限不明', scope: undefined },
+      { cat: 'pending', text: '仅限原目标的提醒' },
+      { cat: 'fact', text: '已归档', archivedAt: '2026-11-01T15:00:00Z' },
+      { cat: 'fact', text: '已过时', outdatedAt: '2026-11-01T15:00:00Z' },
+      { cat: 'fact', text: '已冻结' },
+      { cat: 'unsupported', text: '旧版未知类别' },
+    ].map((item) => ({ sourceKey: KEY, scope: 'public', ...item }));
+    const state = JSON.stringify({ version: 1, people: { [OWNER]: { name: '来源不明的显示名', items } } });
+    fs.writeFileSync(file, state);
+    const lm = createLongMemory({
+      stateDir: dir,
+      redact: (text) => text.replace('token-dummy', '***'),
+      decayOf: (item) => item.text === '已冻结' ? { frozen: true } : null,
+    });
+    const expected = [
+      { cat: 'fact', text: '可共享事实 ***' },
+      { cat: 'event', text: '可共享摘要' },
+    ];
+    const profile = lm.sharedQqProfile(OWNER);
+    assert.equal(profile.name, '');
+    assert.deepEqual(profile.items, expected);
+    profile.items[0].text = '只能修改投影';
+    assert.deepEqual(lm.sharedQqProfile(OWNER).items, expected);
+    assert.equal(lm.sharedQqProfile('100000002'), null);
+    assert.equal(lm.sharedQqProfile(`0${OWNER}`), null);
+    assert.equal(fs.readFileSync(file, 'utf8'), state);
+  });
+});
+
+await test('sharedQqProfile 在有界输出内优先保留核心和高牢固度条目', async () => {
+  await withMemory(async (lm) => {
+    const remember = (text, core = false) =>
+      lm.remember({ userId: OWNER, cat: 'fact', text, core, sourceKey: KEY, scope: 'public' });
+    remember('核心记忆', true);
+    remember('最牢固的普通条目');
+    for (let i = 0; i < 20; i += 1) remember(`最近记入${i}`);
+    const texts = lm.sharedQqProfile(OWNER).items.map((item) => item.text);
+    assert.equal(texts.length, 6);
+    assert.equal(texts[0], '核心记忆');
+    assert.ok(texts.includes('最牢固的普通条目'));
+    assert.ok(texts.includes('最近记入19'));
+    assert.ok(!texts.includes('最近记入0'));
+  }, { decayOf: (item) => ({ R: item.text === '最牢固的普通条目' ? 1 : 0.1 }) });
+});
+
 if (failures) {
   console.error(`\n${failures} 项失败`);
   process.exitCode = 1;

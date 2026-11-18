@@ -7,7 +7,7 @@ import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 import { openChannelInbox } from '../src/core/inbox-store.mjs';
 import { createChannelArchive } from '../src/core/channel-archive.mjs';
-import { encodeConversationKey } from '../src/core/identity.mjs';
+import { encodeConversationKey, encodePersonKey } from '../src/core/identity.mjs';
 
 const telegram = { platform: 'telegram', accountId: '41' };
 const feishu = { platform: 'feishu', accountId: 'cli_fixture', tenantId: 'tenant_a' };
@@ -212,6 +212,132 @@ test('confirmed private endpoints share a durable identity and dialogue across Q
     assert.equal(isolated.bindingRevision, null);
     assert.notEqual(isolated.principalId, shared.principalId);
     assert.notEqual(isolated.dialogueId, shared.dialogueId);
+  }
+});
+
+test('private membership returns canonical endpoints in a stable order after restart', (t) => {
+  const f = fixture(t);
+  const endpoints = [qq, feishu, telegram].map(privateEndpoint);
+  assert.equal(f.bindings.link(withRevision(f.bindings, ...endpoints)).status, 'linked');
+  const expected = f.bindings.resolve(endpoints[0]);
+  f.reopen();
+
+  const result = f.bindings.members(endpoints[0], expected);
+  const canonical = endpoints.map(({ actor, conversation }) => ({
+    actor: { tenantId: null, ...actor },
+    conversation: { tenantId: null, ...conversation, threadId: null },
+  }));
+  assert.deepEqual(new Set(result?.members), new Set(canonical));
+  assert.deepEqual(result, { ...expected, members: result.members, sharedQqProfileKey: null });
+  for (const endpoint of endpoints) assert.deepEqual(f.bindings.members(endpoint), result);
+  assert.equal(f.bindings.members(privateEndpoint({ ...feishu, tenantId: 'tenant_b' })), null);
+  assert.equal(f.bindings.members(message(telegram, '1')), null);
+  assert.equal(f.bindings.members({
+    ...endpoints[1],
+    conversation: { ...endpoints[1].conversation, threadId: 'thread_x' },
+  }), null);
+});
+
+test('private membership refuses stale snapshots and shrinks on unlink', (t) => {
+  const { bindings } = fixture(t);
+  const [first, second, third] = [qq, feishu, telegram].map(privateEndpoint);
+  assert.equal(bindings.link(withRevision(bindings, first, second, third)).status, 'linked');
+  const previous = bindings.resolve(first);
+  assert.equal(bindings.members(first, { ...previous, principalId: 'wrong' }), null);
+  assert.equal(bindings.members(first, { ...previous, dialogueId: 'wrong' }), null);
+  assert.equal(bindings.unlink(withRevision(bindings, second)[0]).status, 'unlinked');
+
+  assert.equal(bindings.members(first, previous), null);
+  assert.equal(bindings.members(second), null);
+  const current = bindings.members(first);
+  assert.notEqual(current.bindingRevision, previous.bindingRevision);
+  assert.deepEqual(new Set(current.members.map(({ actor }) => actor.platform)), new Set(['qq', 'telegram']));
+
+  assert.equal(bindings.unlink(withRevision(bindings, third)[0]).status, 'unlinked');
+  assert.equal(bindings.members(first), null);
+});
+
+test('legacy QQ profile sharing requires an explicit grant and invalidates previous snapshots', (t) => {
+  const f = fixture(t);
+  const [source, feishuPeer, telegramPeer] = [qq, feishu, telegram].map(privateEndpoint);
+  const sourceKey = encodeConversationKey(source.conversation);
+  assert.equal(f.bindings.link(withRevision(f.bindings, source, feishuPeer, telegramPeer)).status, 'linked');
+
+  // Simulate opening a database created before profile grants were introduced.
+  const db = new DatabaseSync(f.file);
+  try { db.exec('DROP TABLE IF EXISTS channel_legacy_qq_profile_sharing'); }
+  finally { db.close(); }
+  f.reopen();
+
+  const original = f.bindings.resolve(feishuPeer);
+  assert.equal(f.bindings.members(feishuPeer).sharedQqProfileKey, null);
+  const [grant] = withRevision(f.bindings, source);
+  assert.throws(() => f.bindings.setLegacyQqProfileSharing(grant, 'true'), TypeError);
+  assert.throws(() => f.bindings.setLegacyQqProfileSharing(withRevision(f.bindings, feishuPeer)[0], true), TypeError);
+  assert.throws(() => f.bindings.setLegacyQqProfileSharing(message(qq, '1'), true), TypeError);
+  assert.equal(f.bindings.setLegacyQqProfileSharing(grant, true).status, 'updated');
+  assert.equal(f.bindings.setLegacyQqProfileSharing(grant, true).status, 'stale_binding');
+  assert.equal(f.bindings.members(feishuPeer, original), null);
+
+  f.reopen();
+  const granted = f.bindings.resolve(feishuPeer);
+  assert.notEqual(granted.bindingRevision, original.bindingRevision);
+  assert.equal(f.bindings.members(feishuPeer, granted).sharedQqProfileKey, sourceKey);
+  assert.equal(f.bindings.members(telegramPeer, granted).sharedQqProfileKey, sourceKey);
+  assert.equal(f.bindings.setLegacyQqProfileSharing(withRevision(f.bindings, source)[0], true).status, 'updated');
+  assert.deepEqual(f.bindings.resolve(feishuPeer), granted);
+
+  assert.equal(f.bindings.setLegacyQqProfileSharing(withRevision(f.bindings, source)[0], false).status, 'updated');
+  assert.equal(f.bindings.members(feishuPeer, granted), null);
+  assert.equal(f.bindings.members(feishuPeer).sharedQqProfileKey, null);
+});
+
+test('a legacy QQ profile grant cannot move to another QQ endpoint or survive unlink', (t) => {
+  const { bindings } = fixture(t);
+  const [source, otherSource, peer] = [qq, { ...qq, accountId: '43' }, telegram].map(privateEndpoint);
+  assert.equal(bindings.setLegacyQqProfileSharing(withRevision(bindings, source)[0], true).status, 'binding_conflict');
+  assert.equal(bindings.link(withRevision(bindings, source, otherSource, peer)).status, 'linked');
+  assert.equal(bindings.setLegacyQqProfileSharing(withRevision(bindings, source)[0], true).status, 'updated');
+
+  const granted = bindings.members(peer);
+  assert.equal(bindings.setLegacyQqProfileSharing(withRevision(bindings, otherSource)[0], true).status, 'binding_conflict');
+  assert.deepEqual(bindings.members(peer), granted);
+  assert.equal(bindings.unlink(withRevision(bindings, source)[0]).status, 'unlinked');
+  assert.equal(bindings.members(peer).sharedQqProfileKey, null);
+  assert.equal(bindings.link(withRevision(bindings, source, peer)).status, 'linked');
+  assert.equal(bindings.members(peer).sharedQqProfileKey, null);
+});
+
+test('a legacy QQ profile grant expires when its only peer is unlinked', (t) => {
+  const { bindings } = fixture(t);
+  const [source, peer] = [qq, telegram].map(privateEndpoint);
+  assert.equal(bindings.link(withRevision(bindings, source, peer)).status, 'linked');
+  assert.equal(bindings.setLegacyQqProfileSharing(withRevision(bindings, source)[0], true).status, 'updated');
+  assert.equal(bindings.unlink(withRevision(bindings, peer)[0]).status, 'unlinked');
+  assert.equal(bindings.members(source), null);
+  assert.equal(bindings.setLegacyQqProfileSharing(withRevision(bindings, source)[0], true).status, 'binding_conflict');
+  assert.equal(bindings.link(withRevision(bindings, source, peer)).status, 'linked');
+  assert.equal(bindings.members(peer).sharedQqProfileKey, null);
+});
+
+test('private membership rejects inconsistent stored endpoints and revisions', (t) => {
+  const f = fixture(t);
+  const [first, second] = [feishu, telegram].map(privateEndpoint);
+  assert.equal(f.bindings.link(withRevision(f.bindings, first, second)).status, 'linked');
+  const { bindingRevision } = f.bindings.resolve(second);
+  const key = encodeConversationKey(second.conversation);
+  const db = new DatabaseSync(f.file);
+  try {
+    const setRevision = db.prepare('UPDATE channel_private_bindings SET binding_revision = ? WHERE conversation_key = ?');
+    setRevision.run('unexpected revision', key);
+    assert.equal(f.bindings.members(first), null);
+    setRevision.run(bindingRevision, key);
+
+    db.prepare('UPDATE channel_private_bindings SET person_key = ? WHERE conversation_key = ?')
+      .run(encodePersonKey({ ...second.actor, userId: '43' }), key);
+    assert.equal(f.bindings.members(first), null);
+  } finally {
+    db.close();
   }
 });
 

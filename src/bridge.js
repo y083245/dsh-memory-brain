@@ -1711,6 +1711,22 @@ async function main() {
   let qq = null;
   let qqStartupFailure = qqConfigInvalid ? 'needs_config' : null;
   let qqDisabledSinceStart = !qqConfiguredAtStart;
+  let qqProfileGeneration = 0;
+  let qqProfileLoginPending = false;
+  let observedQqProfileAccount = null;
+  let verifiedQqProfile = null;
+
+  function normalizeQqPeer(value) {
+    if (typeof value !== 'string' && typeof value !== 'number') return null;
+    const id = String(value);
+    return /^[1-9][0-9]*$/.test(id) && Number.isSafeInteger(Number(id)) ? id : null;
+  }
+
+  function clearQqProfile() {
+    qqProfileGeneration++;
+    qqProfileLoginPending = false;
+    verifiedQqProfile = null;
+  }
 
   function qqIsActive() {
     return !!qq && !qqDisabledSinceStart && !bridgeShutdown;
@@ -4685,6 +4701,7 @@ async function main() {
    */
   async function pollSnowlumaStatus() {
     if (!qqIsActive()) return;
+    const profileGeneration = qqProfileGeneration;
     const httpUrl = String(cfg.snowluma?.httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '');
     try {
       const res = await fetchQq(`${httpUrl}/get_status`, {
@@ -4702,7 +4719,10 @@ async function main() {
         snowlumaHealth.goodError = `HTTP ${res.status}${body?.wording ? ` ${body.wording}` : ''}`;
       } else {
         noteReceiveHealth(body.data?.good, 'get_status');
-        if (typeof body.data?.online === 'boolean') snowlumaHealth.accountOnline = body.data.online;
+        if (typeof body.data?.online === 'boolean' && profileGeneration === qqProfileGeneration) {
+          noteQqProfileIdentity(null, body.data.online);
+          snowlumaHealth.accountOnline = body.data.online;
+        }
       }
     } catch (error) {
       if (!qqIsActive()) return;
@@ -15289,6 +15309,45 @@ async function main() {
     }
   }
 
+  function readQqProfileList(section, field, legacyField) {
+    if (section != null && (typeof section !== 'object' || Array.isArray(section))) return null;
+    const list = section?.[field] ?? section?.[legacyField] ?? [];
+    if (!Array.isArray(list)) return null;
+    const ids = list.map((id) => normalizeQqPeer(typeof id === 'string' ? id.trim() : id));
+    return ids.includes(null) ? null : ids;
+  }
+
+  function authorizeQqProfile({ actor, conversation } = {}) {
+    const live = verifiedQqProfile;
+    if (!live || !qqIsActive() || qq.bot.isConnected !== true ||
+        snowlumaHealth.accountOnline === false || !modeKnown ||
+        !['chat', 'reserved', 'reserved2', 'closed-agent'].includes(currentMode)) return false;
+    const userId = normalizeQqPeer(actor?.userId);
+    if (!userId || actor.userId !== userId || userId === live.accountId ||
+        actor.platform !== 'qq' || actor.tenantId !== null || actor.accountId !== live.accountId ||
+        conversation?.platform !== 'qq' || conversation.tenantId !== null || conversation.accountId !== live.accountId ||
+        conversation.chatType !== 'private' || conversation.threadId !== null || conversation.chatId !== userId) return false;
+
+    const config = readChannelConfig();
+    const enabled = config?.channels?.qq?.enabled;
+    if (!config || (enabled !== undefined && enabled !== true) || qqNeedsConfig(config) ||
+        (config.snowluma?.wsUrl ?? 'ws://127.0.0.1:3001') !== live.gatewayUrl ||
+        (qq.bot.url ?? cfg.snowluma.wsUrl) !== live.gatewayUrl ||
+        config.socialV2?.tools?.longMemory === false || cfg.socialV2?.tools?.longMemory === false) return false;
+    const allow = readQqProfileList(config.allow, 'private', 'privates');
+    const deny = readQqProfileList(config.deny, 'private', 'privates');
+    const ignore = readQqProfileList(config.ignore, 'sendQQ', 'senders');
+    let ownerQQ;
+    try { ownerQQ = normalizeOwnerQQ(config.ownerQQ); }
+    catch { return false; }
+    if (!allow || !deny || !ignore || ignoredSender(userId, cfg) ||
+        ignoredSender(userId, { ownerQQ, ignore: { sendQQ: ignore } }) ||
+        !allowed('private', userId, {
+          allow: { private: allow }, deny: { private: deny }, allowAllWhenEmpty: config.allowAllWhenEmpty === true,
+        }) || !modeAllowed('private:' + userId, 'private', userId, cfg, currentMode)) return false;
+    return currentMode !== 'closed-agent' || String(ownerQQ) === userId;
+  }
+
   const initialChannelConfig = readChannelConfig();
   const channelStateDir = path.join(STATE_DIR, 'channels');
   const hasChannelOutbox = stateDirHardened === true && fs.existsSync(path.join(channelStateDir, 'outbox.sqlite'));
@@ -15297,7 +15356,8 @@ async function main() {
     channelHostStarting = (async () => {
       const options = {
         api, stateDir: channelStateDir, workspacePath: path.join(channelStateDir, 'workspace'), longMemory: ltm, rag,
-        readConfig: readChannelConfig, readRoleState,
+        readConfig: readChannelConfig, readRoleState, authorizeQqProfile,
+        readQqPersona: (userId) => persona?.sharedPrivateContext?.(userId) ?? '',
         readRoleCard(name) {
           const safeName = sanitizeRoleName(name);
           if (!safeName || safeName !== name) return '';
@@ -15379,6 +15439,7 @@ async function main() {
   stopQqChannel = () => {
     if (qqDisabledSinceStart) return;
     qqDisabledSinceStart = true;
+    clearQqProfile();
     qqAbort.abort();
     clearTimeout(snowlumaWatchTimers.shift());
     for (const timer of snowlumaWatchTimers.splice(0)) clearInterval(timer);
@@ -15547,6 +15608,42 @@ async function main() {
     }
   }
 
+  function verifyQqLogin() {
+    clearQqProfile();
+    const generation = qqProfileGeneration;
+    qqProfileLoginPending = true;
+    const gatewayUrl = bot.url ?? cfg.snowluma.wsUrl;
+    bot.getLoginInfo().then((login) => {
+      if (!qqIsActive() || generation !== qqProfileGeneration || bot.isConnected !== true ||
+          gatewayUrl !== (bot.url ?? cfg.snowluma.wsUrl)) return;
+      const accountId = normalizeQqPeer(login?.user_id);
+      if (accountId && (!observedQqProfileAccount || observedQqProfileAccount === accountId)) {
+        verifiedQqProfile = { accountId, gatewayUrl };
+      }
+      if (login?.nickname) {
+        selfNickname = String(login.nickname).toLowerCase();
+        selfDisplayName = String(login.nickname).trim();
+        log('机器人昵称: ' + login.nickname);
+      }
+      if (login?.user_id != null) selfUserId = String(login.user_id);
+    }).catch(() => {}).finally(() => {
+      if (generation === qqProfileGeneration) qqProfileLoginPending = false;
+    });
+  }
+
+  function noteQqProfileIdentity(event, online) {
+    if (online === false) {
+      observedQqProfileAccount = null;
+      clearQqProfile();
+      return;
+    }
+    if (!qqIsActive() || bot.isConnected !== true) return;
+    const accountId = normalizeQqPeer(event?.self_id);
+    if (accountId) observedQqProfileAccount = accountId;
+    if ((online === true && !verifiedQqProfile && !qqProfileLoginPending) ||
+        (accountId && verifiedQqProfile && accountId !== verifiedQqProfile.accountId)) verifyQqLogin();
+  }
+
   function startQqTransport() {
     if (!refreshQqEnabled()) return;
     qq.bindIngress({
@@ -15570,7 +15667,9 @@ async function main() {
         noteUpstreamPacket(post
           ? `${post}${event.notice_type ? `/${event.notice_type}` : ''}${event.meta_event_type ? `/${event.meta_event_type}` : ''}${event.message_type ? `/${event.message_type}` : ''}`
           : 'event');
-        if (post === 'meta_event' && event?.meta_event_type === 'heartbeat') {
+        const heartbeat = post === 'meta_event' && event?.meta_event_type === 'heartbeat';
+        noteQqProfileIdentity(event, heartbeat ? event.status?.online : null);
+        if (heartbeat) {
           // status 未在 SDK 类型里声明（OneBotMetaEvent 只声明 meta_event_type），
           // 但 OneBotBaseEvent 是 JsonObject，读取合法。
           noteReceiveHealth(event.status?.good, 'heartbeat');
@@ -15588,6 +15687,7 @@ async function main() {
       bot.onBotStatus((event) => {
         noteUpstreamPacket('notice/bot_status');
         const sub = String(event?.sub_type ?? '');
+        if (sub === 'offline' || sub === 'online') noteQqProfileIdentity(event, sub === 'online');
         snowlumaHealth.accountOnline = sub === 'online';
         if (sub === 'offline') {
           log('⚠️ SnowLuma 报告 QQ 账号会话已离线（bot_status: offline）—— QQ 侧掉线或被顶号，'
@@ -15611,23 +15711,17 @@ async function main() {
       log(`SnowLuma 已连接：${connectedUrl}`);
       // 「已连接」只说明与 SnowLuma 的 WebSocket 通了，**不说明 QQ 侧收得到消息** ——
       // 这个区别见 startSnowlumaWatch 的说明。这里顺手把上游健康快照刷一次。
+      // 重连后重新确认网关账号，并刷新社交模式用于识别提及的昵称。
+      observedQqProfileAccount = null;
+      verifyQqLogin();
       void pollSnowlumaStatus();
-      // 读取机器人昵称（用于社交模式"被提到"识别）；重连后也会刷新
-      bot.getLoginInfo().then((login) => {
-        if (!qqIsActive()) return;
-        if (login?.nickname) {
-          selfNickname = String(login.nickname).toLowerCase();
-          selfDisplayName = String(login.nickname).trim();
-          log(`机器人昵称: ${login.nickname}`);
-        }
-        if (login?.user_id != null) selfUserId = String(login.user_id);
-      }).catch(() => {});
       // 连接成功后顺手确认一下 token 是否已跟当前账号对齐；不一致就写回 config.json，
       // 让 MCP 工具（另一个进程）也能拿到正确的 token。
       void syncTokenToFile();
     });
 
     bot.on('close', (info) => {
+      clearQqProfile();
       snowlumaHealth.connected = false;
       if (!refreshQqEnabled()) return;
       // REPORT_PATCH：只在「由连着变成断开」那一刻记时间，重复的 close 不覆盖。

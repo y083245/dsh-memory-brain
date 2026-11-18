@@ -13,6 +13,7 @@ import {
 } from './persona-state.js';
 import { createHash } from 'node:crypto';
 import { createPersonaStore } from './persona-store.js';
+import { canonicalLegacyQQKey } from './core/identity.mjs';
 import { createDeepSeekClient, createAppraiser, createGroupBatcher, ruleAppraise } from './persona-appraisal.js';
 import { runNightly, rollbackTo, factoryMessages, parseFactory, confirmFactory, seedRelations, charEventOf } from './persona-growth.js';
 
@@ -295,6 +296,23 @@ export function createPersona({
       if (p && (p.familiarity ?? 0) > 0) lines.push(renderRelation(p, p.name || uid, { key }));
     }
     return lines.join('\n');
+  }
+
+  function sharedPrivateContext(userId) {
+    if (typeof userId !== 'string' || canonicalLegacyQQKey(`private:${userId}`) !== `private:${userId}`) return '';
+    const s = settings();
+    if (!s.enabled || !s.inject) return '';
+    const { core, people } = ensure();
+    if (!core) return '';
+    const lines = [renderCore(core)];
+    const person = people[userId];
+    if ((person?.familiarity ?? 0) > 0) {
+      // Only the aggregate relation is portable. Names, beliefs, jokes and
+      // immediate emotions can include material from an unrelated conversation.
+      const { familiarity, intimacy, trust, offsets } = person;
+      lines.push(renderRelation({ familiarity, intimacy, trust, offsets }, '对方'));
+    }
+    return redact(lines.join('\n'));
   }
 
   /** 写给 DSH 插件读的快照；内容不变就不写（插件按 mtime 缓存）。 */
@@ -635,6 +653,7 @@ export function createPersona({
     // LIFE_LOOP_PATCH（规格 §7.3）：生活回路的入口，同样各自隔离异常。
     onPromise: guarded('onPromise', undefined, onPromise),
     relationOf: guarded('relationOf', null, relationOf),
+    sharedPrivateContext: guarded('sharedPrivateContext', '', sharedPrivateContext),
     salienceByMsg: guarded('salienceByMsg', new Map(), salienceByMsg),
     appraisalByMsg: guarded('appraisalByMsg', new Map(), appraisalByMsg),
     console: consoleApi,

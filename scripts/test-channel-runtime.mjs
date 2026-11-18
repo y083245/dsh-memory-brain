@@ -14,6 +14,12 @@ import { startChannelHost } from '../src/runtime/channel-host.mjs';
 
 const FEISHU = { platform: 'feishu', accountId: 'cli_fixture', tenantId: 'tenant_fixture' };
 const TELEGRAM = { platform: 'telegram', accountId: '41', tenantId: null };
+const QQ = { platform: 'qq', accountId: '51', tenantId: null };
+const qqEndpoint = Object.freeze({
+  actor: { ...QQ, userId: '52' },
+  conversation: { ...QQ, chatType: 'private', chatId: '52', threadId: null },
+  bindingRevision: null,
+});
 const success = (value) => ({ result: { ok: true, value } });
 
 function makeEvent(id = 1, account = FEISHU, chatType = 'group') {
@@ -73,7 +79,7 @@ async function fixture(t, { enableTextTools = true } = {}) {
   const completed = new Set();
   const reconciled = new Set();
   const sent = [];
-  const controls = { ready: true, current: true, mute: false, onSend: null, onProjection: null };
+  const controls = { ready: true, current: true, mute: false, onSend: null, onProjection: null, onPresetRead: null, qqAllowed: false, qqPersona: '' };
   const api = {
     workspace: {
       create: async () => success({ workspace: { workspaceId: 'fixture-workspace' } }),
@@ -93,6 +99,7 @@ async function fixture(t, { enableTextTools = true } = {}) {
     async callUnary(method, params) {
       if (method === 'agentPresets/list') return success({ presets: [{ id: 'channel-chat-v2' }, { id: 'channel-chat-v2-text' }] });
       if (method === 'agentPresets/read') {
+        await controls.onPresetRead?.();
         const patch = yaml.load(readFileSync(new URL(`../plugins/channel-agent-presets/presets/${params.agentPreset}.patch.yml`, import.meta.url), 'utf8'));
         const preset = patch[0].insert.find((row) => row.config?.id === params.agentPreset).config;
         return success({ agentPreset: params.agentPreset, content: yaml.dump(preset.plugins) });
@@ -127,6 +134,10 @@ async function fixture(t, { enableTextTools = true } = {}) {
     readConfig: () => ({ channels }), canRunTurns: () => controls.ready,
     readRoleState: () => ({ role: 'Fixture Role', mode: controls.mute ? 'silent' : 'active' }),
     readRoleCard: () => 'Speak in a concise fixture style.',
+    authorizeQqProfile: ({ actor, conversation }) => controls.qqAllowed &&
+      actor.accountId === QQ.accountId && actor.userId === qqEndpoint.actor.userId &&
+      conversation.chatId === qqEndpoint.conversation.chatId,
+    readQqPersona: () => controls.qqPersona,
     isSensitive: (text) => text === 'do not send fixture',
     enableTextTools, intervalMs: 15,
   });
@@ -373,6 +384,135 @@ test('unlinking another private endpoint invalidates the remaining members of th
   assert.equal(host.privateBindings.unlink(removal).status, 'unlinked');
   assert.deepEqual(await signedTool(host.toolCredentials, prompt, 'stale_binding_call'), { status: 'denied' });
   assert.deepEqual(sent, []);
+});
+
+test('explicitly bound new-channel private turns use the permitted QQ profile without exposing other sources', async (t) => {
+  const { host, feishu, longMemory, controls, prompts, completed, reconciled, sent } = await fixture(t);
+  const { actor: { userId } } = qqEndpoint;
+  longMemory.remember({ userId, name: 'Shared fixture name', cat: 'fact', sourceKey: 'private:52', scope: 'public', text: 'Shared fixture memory' });
+  longMemory.remember({ userId, cat: 'fact', sourceKey: 'private:52', scope: 'private', text: 'Private fixture memory' });
+  longMemory.remember({ userId, cat: 'fact', sourceKey: 'group:52', scope: 'public', text: 'Group fixture memory' });
+  longMemory.remember({ userId, cat: 'event', sourceKey: 'private:52', scope: 'public', text: 'Curated fixture summary' });
+  longMemory.archive('private:52', { dir: 'in', userId, text: 'Raw QQ fixture transcript', msgId: '300' });
+  controls.qqAllowed = true;
+  controls.qqPersona = 'Shared fixture persona';
+  const firstFeishu = makeEvent(1, FEISHU, 'private');
+  const firstTelegram = makeEvent(1, TELEGRAM, 'private');
+  const endpoint = ({ actor, conversation }) => ({ actor, conversation, bindingRevision: null });
+  assert.equal(host.privateBindings.link([endpoint(firstFeishu), endpoint(firstTelegram), qqEndpoint]).status, 'linked');
+
+  assert.equal(feishu.accept(makeEvent(2)).status, 'durableAccepted');
+  const group = await eventually(() => prompts[0]);
+  assert.doesNotMatch(group.content[0].text, /Shared fixture/);
+
+  assert.equal(feishu.accept(firstFeishu).status, 'durableAccepted');
+  const linkedOnly = await eventually(() => prompts[1]);
+  assert.doesNotMatch(linkedOnly.content[0].text, /(?:Shared fixture|Curated fixture)/);
+  completed.add(linkedOnly.requestId);
+  await eventually(() => reconciled.has(linkedOnly.requestId));
+  const qqBinding = host.privateBindings.resolve(qqEndpoint);
+  assert.deepEqual(host.privateBindings.setLegacyQqProfileSharing({ ...qqEndpoint, ...qqBinding }, true), { status: 'updated' });
+
+  assert.equal(feishu.accept(makeEvent(3, FEISHU, 'private')).status, 'durableAccepted');
+  const first = await eventually(() => prompts[2]);
+  assert.notEqual(first.sessionId, linkedOnly.sessionId);
+  assert.match(first.content[0].text, /Shared fixture memory/);
+  assert.match(first.content[0].text, /Shared fixture persona/);
+  assert.match(first.content[0].text, /Curated fixture summary/);
+  assert.doesNotMatch(first.content[0].text, /(?:Private|Group) fixture memory|Raw QQ fixture transcript/);
+  completed.add(first.requestId);
+  await eventually(() => reconciled.has(first.requestId));
+
+  const telegram = host.registerAccount(TELEGRAM).startPolling();
+  assert.equal(telegram.acceptBatch([firstTelegram], telegram.readCheckpoint()).results[0].status, 'durableAccepted');
+  const second = await eventually(() => prompts[3]);
+  assert.match(second.content[0].text, /Shared fixture memory/);
+  assert.match(second.content[0].text, /Curated fixture summary/);
+  assert.doesNotMatch(second.content[0].text, /(?:Private|Group) fixture memory|Raw QQ fixture transcript/);
+
+  const page = await signedChannelCall(host.toolCredentials, second, 'read_tg_before_qq_revoke', 'channel_get_unread', {});
+  assert.equal(page.status, 'ok');
+  const waiting = signedChannelCall(host.toolCredentials, second, 'wait_tg_before_qq_revoke', 'channel_wait_for_messages', {
+    afterSeq: page.data.readThroughSeq, timeoutMs: 1_500,
+  });
+  await pause(100);
+  controls.qqAllowed = false;
+  assert.deepEqual(await waiting, { status: 'denied' });
+  assert.deepEqual(await signedTool(host.toolCredentials, first, 'revoked_qq_feishu'), { status: 'denied' });
+  assert.deepEqual(await signedTool(host.toolCredentials, second, 'revoked_qq_telegram'), { status: 'denied' });
+  assert.deepEqual(sent, []);
+  completed.add(second.requestId);
+  await eventually(() => reconciled.has(second.requestId));
+
+  assert.equal(feishu.accept(makeEvent(4, FEISHU, 'private')).status, 'durableAccepted');
+  const third = await eventually(() => prompts[4]);
+  assert.notEqual(third.sessionId, first.sessionId);
+  assert.doesNotMatch(third.content[0].text, /(?:Shared fixture|Curated fixture)/);
+
+  controls.qqAllowed = true;
+  const currentQqBinding = host.privateBindings.resolve(qqEndpoint);
+  assert.deepEqual(host.privateBindings.unlink({ ...qqEndpoint, ...currentQqBinding }), { status: 'unlinked' });
+  assert.deepEqual(await signedTool(host.toolCredentials, third, 'unlinked_qq'), { status: 'denied' });
+  completed.add(third.requestId);
+  await eventually(() => reconciled.has(third.requestId));
+  assert.equal(feishu.accept(makeEvent(5, FEISHU, 'private')).status, 'durableAccepted');
+  const fourth = await eventually(() => prompts[5]);
+  assert.doesNotMatch(fourth.content[0].text, /(?:Shared fixture|Curated fixture)/);
+});
+
+test('after forgetting a shared entry the next prompt cannot reuse the prior DSH session', async (t) => {
+  const { host, feishu, longMemory, controls, prompts, completed, reconciled } = await fixture(t);
+  const { actor: { userId } } = qqEndpoint;
+  const viewerKey = 'private:52';
+  const { item } = longMemory.remember({ userId, cat: 'fact', sourceKey: viewerKey, scope: 'public', text: 'Forgotten fixture memory' });
+  const { actor, conversation } = makeEvent(1, FEISHU, 'private');
+  const endpoint = { actor, conversation, bindingRevision: null };
+  controls.qqAllowed = true;
+  assert.equal(host.privateBindings.link([endpoint, qqEndpoint]).status, 'linked');
+  const binding = host.privateBindings.resolve(qqEndpoint);
+  assert.equal(host.privateBindings.setLegacyQqProfileSharing({ ...qqEndpoint, ...binding }, true).status, 'updated');
+
+  assert.equal(feishu.accept(makeEvent(1, FEISHU, 'private')).status, 'durableAccepted');
+  const first = await eventually(() => prompts[0]);
+  assert.match(first.content[0].text, /Forgotten fixture memory/);
+  completed.add(first.requestId);
+  await eventually(() => reconciled.has(first.requestId));
+
+  longMemory.forget({ userId, viewerKey, itemId: item.id });
+  assert.equal(feishu.accept(makeEvent(2, FEISHU, 'private')).status, 'durableAccepted');
+  const second = await eventually(() => prompts[1]);
+  assert.notEqual(second.sessionId, first.sessionId);
+  assert.doesNotMatch(second.content[0].text, /Forgotten fixture memory/);
+});
+
+test('forgetting a shared entry during DSH guard verification prevents a stale dispatch', async (t) => {
+  const { host, feishu, longMemory, controls, prompts } = await fixture(t);
+  const { actor: { userId } } = qqEndpoint;
+  const viewerKey = 'private:52';
+  const { item } = longMemory.remember({ userId, cat: 'fact', sourceKey: viewerKey, scope: 'public', text: 'Revoked while checking' });
+  const { actor, conversation } = makeEvent(1, FEISHU, 'private');
+  const endpoint = { actor, conversation, bindingRevision: null };
+  controls.qqAllowed = true;
+  assert.equal(host.privateBindings.link([endpoint, qqEndpoint]).status, 'linked');
+  const binding = host.privateBindings.resolve(qqEndpoint);
+  assert.equal(host.privateBindings.setLegacyQqProfileSharing({ ...qqEndpoint, ...binding }, true).status, 'updated');
+
+  let checking = false;
+  const { promise: hold, resolve: release } = Promise.withResolvers();
+  controls.onPresetRead = () => {
+    checking = true;
+    controls.onPresetRead = null;
+    return hold;
+  };
+  try {
+    assert.equal(feishu.accept(makeEvent(1, FEISHU, 'private')).status, 'durableAccepted');
+    await eventually(() => checking);
+    longMemory.forget({ userId, viewerKey, itemId: item.id });
+  } finally {
+    release();
+  }
+  const prompt = await eventually(() => prompts[0]);
+  assert.doesNotMatch(prompt.content[0].text, /Revoked while checking/);
 });
 
 test('an old Telegram poller cannot accept a response after account disable and re-enable', async (t) => {

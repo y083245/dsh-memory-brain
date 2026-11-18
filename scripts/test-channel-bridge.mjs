@@ -159,6 +159,104 @@ test('an invalid QQ administrator in mixed mode leaves Telegram available', asyn
   } finally { await h.close(); }
 });
 
+test('QQ profile sharing requires live login, private allowlist and current gateway', async () => {
+  const fixture = hostFixture({ managed: false });
+  const events = new Map();
+  const logins = [];
+  const bot = {
+    url: 'ws://127.0.0.1:3001',
+    isConnected: false,
+    on(name, listener) { events.set(name, listener); },
+    onEvent(listener) { events.set('event', listener); },
+    onBotStatus(listener) { events.set('bot_status', listener); },
+    async connect() {},
+    close() { this.isConnected = false; },
+    getLoginInfo() {
+      const lookup = Promise.withResolvers();
+      logins.push(lookup);
+      return lookup.promise;
+    },
+  };
+  const h = await bridgeHarness({
+    config: {
+      ...config, allow: { private: ['123', '124'] },
+      social: { enabled: false }, socialV2: { sticker: { enabled: false } },
+    },
+    globals: { ...fixture.globals, createQQAdapter: () => ({ bot, bindIngress() {} }) },
+  });
+  try {
+    const { authorizeQqProfile, readQqPersona } = fixture.starts[0];
+    assert.equal(typeof authorizeQqProfile, 'function');
+    assert.equal(typeof readQqPersona, 'function');
+    const account = { platform: 'qq', accountId: '41', tenantId: null };
+    const endpoint = {
+      actor: { ...account, userId: '123' },
+      conversation: { ...account, chatType: 'private', chatId: '123', threadId: null },
+    };
+    const peer = {
+      actor: { ...endpoint.actor, userId: '124' },
+      conversation: { ...endpoint.conversation, chatId: '124' },
+    };
+    h.setMode('chat');
+    h.startQqTransport();
+    assert.equal(authorizeQqProfile(endpoint), false);
+
+    bot.isConnected = true;
+    events.get('open')();
+    assert.equal(authorizeQqProfile(endpoint), false);
+    assert.equal(logins.length, 1);
+    const old = logins[0];
+    bot.isConnected = false;
+    events.get('close')({ code: 1000 });
+    bot.isConnected = true;
+    events.get('open')();
+    old.resolve({ user_id: 41 });
+    await old.promise;
+    assert.equal(authorizeQqProfile(endpoint), false);
+
+    logins[1].resolve({ user_id: 41 });
+    await logins[1].promise;
+    assert.equal(authorizeQqProfile(endpoint), true);
+    assert.equal(authorizeQqProfile({ ...endpoint, conversation: { ...endpoint.conversation, chatType: 'group' } }), false);
+    assert.equal(authorizeQqProfile({ ...endpoint, actor: { ...endpoint.actor, accountId: '42' } }), false);
+
+    const configFile = path.join(h.temp, 'config.json');
+    const saved = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+    const write = (patch) => fs.writeFileSync(configFile, JSON.stringify({ ...saved, ...patch }));
+    write({ deny: { private: [123] } });
+    assert.equal(authorizeQqProfile(endpoint), false);
+    write({ deny: { private: '123' } });
+    assert.equal(authorizeQqProfile(endpoint), false);
+    write({ allow: { private: [] }, allowAllWhenEmpty: true });
+    assert.equal(authorizeQqProfile(endpoint), true);
+    write({ allow: { private: [] }, allowAllWhenEmpty: true, deny: { private: [123] } });
+    assert.equal(authorizeQqProfile(endpoint), false);
+    write({ ignore: { sendQQ: [123, 124] } });
+    assert.equal(authorizeQqProfile(peer), false);
+    assert.equal(authorizeQqProfile(endpoint), true);
+    write({ ignore: { senders: ['124'] } });
+    assert.equal(authorizeQqProfile(peer), false);
+    write({ ignore: { sendQQ: '124' } });
+    assert.equal(authorizeQqProfile(peer), false);
+    assert.equal(authorizeQqProfile(endpoint), false);
+    write({ socialV2: { tools: { longMemory: false } } });
+    assert.equal(authorizeQqProfile(endpoint), false);
+    write({ snowluma: { wsUrl: 'ws://127.0.0.1:3999' } });
+    assert.equal(authorizeQqProfile(endpoint), false);
+    write({});
+    assert.equal(authorizeQqProfile(endpoint), true);
+    assert.equal(authorizeQqProfile(peer), true);
+
+    events.get('bot_status')({ sub_type: 'offline' });
+    assert.equal(authorizeQqProfile(endpoint), false);
+    events.get('bot_status')({ sub_type: 'online' });
+    assert.equal(authorizeQqProfile(endpoint), false);
+    logins[2].resolve({ user_id: 42 });
+    await logins[2].promise;
+    assert.equal(authorizeQqProfile(endpoint), false);
+  } finally { await h.close(); }
+});
+
 test('disabling QQ stops its client, and changing the flag back requires a restart', async () => {
   const fixture = hostFixture({ managed: false });
   const h = await bridgeHarness({ config, globals: fixture.globals });

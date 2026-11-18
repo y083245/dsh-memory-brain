@@ -163,7 +163,7 @@ export function createChannelTurnHost({
 
 /** Bridge composition for adapter bindings opened with a scoped archive. */
 export function createHostedChannelTurnRunner({
-  api, workspacePath, longMemory, rag, isScopeCurrent, readRoleState = () => null, readRoleCard, maxConcurrent, now,
+  api, workspacePath, longMemory, rag, isScopeCurrent, readRoleState = () => null, readRoleCard, readSharedContext, maxConcurrent, now,
   textTools, commonTools,
 } = {}) {
   function readSynchronousRoleState() {
@@ -179,7 +179,7 @@ export function createHostedChannelTurnRunner({
   const host = createChannelTurnHost({
     api, workspacePath, isScopeCurrent,
     preset: textTools === undefined && commonTools === undefined ? CHANNEL_DSH_PRESET : CHANNEL_DSH_TEXT_PRESET,
-    buildPrompt: createChannelTurnPrompt({ readRoleState: readSynchronousRoleState, readRoleCard, now }),
+    buildPrompt: createChannelTurnPrompt({ readRoleState: readSynchronousRoleState, readRoleCard, readSharedContext, now }),
   });
   const tools = textTools === undefined ? null : createChannelTextTools({ ...textTools, isSilent, findTextSession: host.findTextSession });
   const common = commonTools === undefined ? null : createChannelCommonToolGrants({ ...commonTools, findTextSession: host.findTextSession });

@@ -3,11 +3,14 @@ import { lstatSync, mkdirSync, readdirSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { createChannelCommonTools } from '../core/channel-common-tools.mjs';
+import { resolveTextTarget } from '../core/channel-intake.mjs';
 import { startChannelToolServer } from '../core/channel-tool-server.mjs';
 import { createHostedChannelTurnRunner } from '../core/channel-turn-host.mjs';
-import { decodeIdentityKey, readAccountRef, sameAccount } from '../core/identity.mjs';
+import { decodeIdentityKey, encodeConversationKey, readAccountRef, sameAccount } from '../core/identity.mjs';
 import { openChannelInbox } from '../core/inbox-store.mjs';
 import { openChannelOutbox } from '../core/outbox-store.mjs';
+import { truncateText } from '../md-to-plain.js';
+import { sanitizeUntrustedText } from '../qq-model-view.js';
 import { sensitiveTextForms, SENSITIVE_RE } from '../sensitive.js';
 import { hardenDir, isHardened } from '../state-acl.mjs';
 
@@ -94,11 +97,13 @@ function describeTransport(platform, settings) {
 /** Compose the trusted bridge, durable queues and verified platform registrations. */
 export async function startChannelHost({
   api, workspacePath, stateDir, longMemory, rag, readConfig, readRoleState, readRoleCard, isSensitive,
+  authorizeQqProfile = () => false, readQqPersona = () => '',
   canRunTurns = () => true, enableTextTools = false, log = () => {}, intervalMs = 500,
 } = {}) {
   if (typeof stateDir !== 'string' || !isAbsolute(stateDir) ||
       typeof workspacePath !== 'string' || !isAbsolute(workspacePath) ||
-      !longMemory?.channelArchive || ![readConfig, canRunTurns, log].every((fn) => typeof fn === 'function') ||
+      !longMemory?.channelArchive ||
+      ![readConfig, canRunTurns, log, authorizeQqProfile, readQqPersona].every((fn) => typeof fn === 'function') ||
       typeof enableTextTools !== 'boolean' || (enableTextTools && typeof isSensitive !== 'function') ||
       !Number.isSafeInteger(intervalMs) || intervalMs < 1 || intervalMs > 60_000) {
     throw new TypeError('Invalid channel host configuration');
@@ -131,6 +136,7 @@ export async function startChannelHost({
   let stopped = false;
   let textToolsAllowed = false;
   let roleSilent = false;
+  let roleName;
   let accountCursor = 0;
 
   function report(message) {
@@ -179,18 +185,28 @@ export async function startChannelHost({
     entry.policy = policy;
   }
 
-  function reload() {
+  function reload(checkSharedScopes = true) {
     if (stopped) return;
     const channels = readChannels();
     const textEnabled = enableTextTools && channels?.textTools === true;
+    let role;
     let silent = false;
-    try { silent = readRoleState !== undefined && readSync(readRoleState)?.mode === 'silent'; }
-    catch { silent = true; }
+    try {
+      role = readRoleState === undefined ? null : readSync(readRoleState);
+      silent = role?.mode === 'silent';
+    } catch { silent = true; }
     if (textEnabled !== textToolsAllowed || silent !== roleSilent) invalidateAll();
     textToolsAllowed = textEnabled;
     roleSilent = silent;
+    roleName = role?.role;
 
-    for (const entry of accounts.values()) refreshEntry(entry, channels?.[entry.account.platform]);
+    for (const entry of accounts.values()) {
+      refreshEntry(entry, channels?.[entry.account.platform]);
+      if (!checkSharedScopes) continue;
+      for (const [key, { sharedQq }] of entry.scopes) {
+        if (sharedQq && !isSharedQqAuthorized(sharedQq)) clearScope(entry, key);
+      }
+    }
   }
 
   function entryFor(account) {
@@ -199,7 +215,7 @@ export async function startChannelHost({
   }
 
   function readPolicy(entry) {
-    reload();
+    reload(false);
     return !stopped && entryFor(entry.account) === entry ? entry.policy : null;
   }
 
@@ -214,21 +230,23 @@ export async function startChannelHost({
     return entry.active ? 'registered' : 'unavailable';
   }
 
-  function isScopeCurrent({ conversationKey }, requiresTextTools) {
+  function isScopeCurrent({ conversationKey, bindingRevision }, requiresTextTools) {
     if (stopped) return false;
     const conversation = decodeIdentityKey(conversationKey);
     const entry = entryFor(conversation);
     if (!entry || readPolicy(entry)?.enabled !== true || requiresTextTools !== textToolsAllowed) return false;
     const revision = conversation.chatType === 'private' && conversation.threadId === null
       ? bindings.revisionForConversation(conversationKey) : null;
-    if (entry.scopes.has(conversationKey) && entry.scopes.get(conversationKey) !== revision) {
+    const scope = entry.scopes.get(conversationKey);
+    if (scope && (scope.revision !== revision || scope.sharedQq && !isSharedQqCurrent(scope.sharedQq))) {
       clearScope(entry, conversationKey);
       return false;
     }
+    if (bindingRevision !== revision) return false;
     // Use insertion order to cap cached generations for accounts that see many
     // conversations over their lifetime. Eviction revokes the corresponding grant.
     entry.scopes.delete(conversationKey);
-    entry.scopes.set(conversationKey, revision);
+    entry.scopes.set(conversationKey, scope ?? { revision });
     if (entry.scopes.size > MAX_QUEUE) clearScope(entry, entry.scopes.keys().next().value);
     return true;
   }
@@ -243,7 +261,7 @@ export async function startChannelHost({
     if (stopped) throw new Error('Channel host is closed');
     const result = work();
     for (const entry of accounts.values()) {
-      for (const [key, revision] of entry.scopes) {
+      for (const [key, { revision }] of entry.scopes) {
         const conversation = decodeIdentityKey(key);
         if (conversation.chatType === 'private' && conversation.threadId === null &&
             bindings.revisionForConversation(key) !== revision) clearScope(entry, key);
@@ -259,6 +277,7 @@ export async function startChannelHost({
     },
     link: (endpoints) => mutateBinding(() => bindings.link(endpoints)),
     unlink: (endpoint) => mutateBinding(() => bindings.unlink(endpoint)),
+    setLegacyQqProfileSharing: (endpoint, enabled) => mutateBinding(() => bindings.setLegacyQqProfileSharing(endpoint, enabled)),
   };
 
   function authorizeCommonSource({ source }) {
@@ -279,7 +298,7 @@ export async function startChannelHost({
   }
 
   function containsSensitive(text) {
-    if (readSync(isSensitive, text) !== false) return true;
+    if (isSensitive && readSync(isSensitive, text) !== false) return true;
     if (toolServer && sensitiveTextForms(text).some((form) => form.toLowerCase().includes(toolServer.secret))) return true;
     // All channels share the bridge. A platform's known secrets must be
     // protected even if the tool tries to send them through a different one.
@@ -287,6 +306,77 @@ export async function startChannelHost({
       if (entry.isSensitive && readSync(entry.isSensitive, text) !== false) return true;
     }
     return false;
+  }
+
+  function canReadQqProfile(endpoint) {
+    try { return readSync(authorizeQqProfile, endpoint) === true; }
+    catch { return false; }
+  }
+
+  function safeSharedText(value, maxChars) {
+    if (typeof value !== 'string' || containsSensitive(value) || SENSITIVE_RE.test(value)) return '';
+    return truncateText(sanitizeUntrustedText(value).replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').trim(), maxChars);
+  }
+
+  function readSharedPersona(userId) {
+    try { return safeSharedText(readSync(readQqPersona, userId), 600); }
+    catch { return ''; }
+  }
+
+  function renderSharedQqContext(userId) {
+    try {
+      const profile = longMemory.sharedQqProfile?.(userId);
+      const notes = (profile?.items ?? []).slice(0, 6)
+        .map(({ text }) => safeSharedText(text, 240))
+        .filter(Boolean);
+      const lines = [...notes, readSharedPersona(userId)].filter(Boolean).map((part) => `· ${part}`);
+      return lines.length ? `【已绑定私聊的人物档案】\n${lines.join('\n')}` : '';
+    } catch {
+      return '';
+    }
+  }
+
+  function sharedDigest(text) {
+    return text ? createHash('sha256').update(text).digest('hex') : '';
+  }
+
+  function isSharedQqAuthorized({ endpoint, role }) {
+    return role === roleName && canReadQqProfile(endpoint);
+  }
+
+  function isSharedQqCurrent(sharedQq) {
+    if (!isSharedQqAuthorized(sharedQq)) return false;
+    const text = renderSharedQqContext(sharedQq.endpoint.actor.userId);
+    return sharedDigest(text) === sharedQq.digest;
+  }
+
+  function readSharedContext(task) {
+    const { actor, conversation, conversationKey } = task.event;
+    if (conversation.chatType !== 'private' || conversation.threadId !== null || task.bindingRevision === null) return '';
+    const entry = entryFor(conversation);
+    const policy = entry && readPolicy(entry);
+    const scope = entry?.scopes.get(conversationKey);
+    const source = { actor, conversation };
+    if (!scope || scope.revision !== task.bindingRevision || !resolveTextTarget(policy, conversation, { source })) return '';
+    let endpoint;
+    try {
+      const binding = bindings.members(source, task);
+      if (binding?.sharedQqProfileKey) {
+        endpoint = binding.members.find(({ actor, conversation }) =>
+          actor.platform === 'qq' && encodeConversationKey(conversation) === binding.sharedQqProfileKey);
+      }
+    } catch { /* A failed binding check cannot authorize a shared projection. */ }
+
+    const text = endpoint && canReadQqProfile(endpoint) ? renderSharedQqContext(endpoint.actor.userId) : '';
+    const digest = sharedDigest(text);
+    if (scope.sharedQq && (scope.sharedQq.digest !== digest || scope.sharedQq.role !== roleName)) {
+      // A reused DSH session can contain a previous prompt. Roll its grant
+      // before the next turn whenever shared material changes or disappears.
+      clearScope(entry, conversationKey);
+      return '';
+    }
+    if (text) scope.sharedQq = { digest, endpoint, role: roleName };
+    return text;
   }
 
   function accountKey(account) {
@@ -455,7 +545,7 @@ export async function startChannelHost({
   }
 
   try {
-    const runnerOptions = { api, workspacePath, longMemory, rag, readRoleState, readRoleCard, maxConcurrent: MAX_TURNS };
+    const runnerOptions = { api, workspacePath, longMemory, rag, readRoleState, readRoleCard, readSharedContext, maxConcurrent: MAX_TURNS };
     hosted = createHostedChannelTurnRunner({ ...runnerOptions, isScopeCurrent: (scope) => isScopeCurrent(scope, false) });
     if (enableTextTools) {
       textHosted = createHostedChannelTurnRunner({

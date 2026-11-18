@@ -19,6 +19,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { withChannelLedger } from './core/channel-ledger.mjs';
+import { canonicalLegacyQQKey } from './core/identity.mjs';
 import { channelArchiveDirectory, createChannelArchive } from './core/channel-archive.mjs';
 import { normalizeDateRange, normalizeKeywords } from './memory-rag-client.js';
 
@@ -381,6 +382,14 @@ function createPeopleLedger({ people, saveNow, saveSoon, redact, log, onPromiseC
   // DECAY_PATCH：只在真的传了函数时才启用按牢固度排序，避免把 null / 别的类型当回调。
   const decayFn = typeof decayOf === 'function' ? decayOf : null;
 
+  function decayRank(item, userId) {
+    let state;
+    try { state = decayFn?.(item, userId); } catch { /* Fall back to natural ordering. */ }
+    if (!state || typeof state !== 'object') return 1;
+    if (state.frozen === true) return null;
+    return Number.isFinite(state.R) ? state.R : 1;
+  }
+
   function person(userId, name) {
     const id = String(userId ?? '').trim();
     validatePerson(id, userId);
@@ -644,6 +653,31 @@ function createPeopleLedger({ people, saveNow, saveSoon, redact, log, onPromiseC
     return { userId: String(userId), name: p.name, names: p.names, firstSeenAt: p.firstSeenAt, lastSeenAt: p.lastSeenAt, messages: p.messages, items: p.items.filter((x) => visible(x, viewerKey)) };
   }
 
+  // Trusted callers authorize the QQ account and binding before selecting a profile.
+  function sharedQqProfile(userId) {
+    if (typeof userId !== 'string') return null;
+    const key = `private:${userId}`;
+    if (canonicalLegacyQQKey(key) !== key || !Array.isArray(people[userId]?.items)) return null;
+
+    const candidates = [];
+    for (const [index, item] of people[userId].items.entries()) {
+      if (item?.sourceKey !== key || item.scope !== 'public' || item.cat === 'pending' ||
+          item.archivedAt || item.outdatedAt || !Object.hasOwn(CATEGORIES, item.cat) ||
+          typeof item.text !== 'string' || !item.text.trim()) continue;
+      const rank = decayRank(item, userId);
+      if (rank === null) continue;
+      candidates.push({ item, index, rank, core: item.core === true });
+    }
+    const compareCore = (a, b) => Number(b.core) - Number(a.core);
+    const items = candidates
+      .sort((a, b) => compareCore(a, b) || b.rank - a.rank || b.index - a.index)
+      .slice(0, 6)
+      .sort((a, b) => compareCore(a, b) || a.index - b.index)
+      .map(({ item }) => ({ cat: item.cat, text: redact(item.text).slice(0, MAX_TEXT) }));
+    // Legacy names have no source and can come from groups.
+    return { name: '', items };
+  }
+
   function listPeople() {
     // PERSONA_PATCH（v2 A1）：关系冷启动要算「认识多久」（seedRelations 的信任种子含 2 × 跨越天数），所以带上首条消息时间。
     return Object.entries(people).map(([id, p]) => ({ userId: id, name: p.name, names: p.names, items: p.items.length, messages: p.messages, firstSeenAt: p.firstSeenAt, lastSeenAt: p.lastSeenAt }))
@@ -692,12 +726,8 @@ function createPeopleLedger({ people, saveNow, saveSoon, redact, log, onPromiseC
         if (!decayFn) { push(label, arr.slice(-n), arr.length); return; }
         const scored = [];
         for (let i = 0; i < arr.length; i += 1) {
-          let st = null;
-          try { st = decayFn(arr[i], uid); } catch { st = null; }
-          // 回调出错 / 返回的不是对象：按「R = 1、不冻结」处理，不能因为遗忘曲线坏了就不注入
-          if (!st || typeof st !== 'object') { scored.push({ i, R: 1 }); continue; }
-          if (st.frozen === true) continue;
-          scored.push({ i, R: Number.isFinite(st.R) ? st.R : 1 });
+          const R = decayRank(arr[i], uid);
+          if (R !== null) scored.push({ i, R });
         }
         scored.sort((a, b) => (b.R - a.R) || (b.i - a.i)); // R 相同：arr 里靠后的（更新的）优先
         const picked = scored.slice(0, n).sort((a, b) => a.i - b.i).map((s) => arr[s.i]);
@@ -820,7 +850,7 @@ function createPeopleLedger({ people, saveNow, saveSoon, redact, log, onPromiseC
   }
 
   return { touch, remember, update, forget, personView, listPeople, renderFor, visibleTo: visible,
-    duePromises, similarItems, matchItems };
+    duePromises, similarItems, matchItems, sharedQqProfile };
 }
 
 export function createLongMemory({ stateDir, redact = (s) => s, log = () => {}, onPromiseClosed = null, decayOf = null }) {

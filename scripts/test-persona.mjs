@@ -16,7 +16,7 @@ const reply = (obj) => ({ ok: true, status: 200, json: async () => ({ choices: [
 const INSULT = { target: 'me', kind: 'insult', emotion: { label: '委屈', intensity: 0.7 }, pad: { p: -1, a: 1, d: -1 }, relation: { intimacy: -1, trust: -1 }, evidence: [{ about: 'self', type: 'insulted', gist: '说她菜' }], salience: 0.6, cause: '阿青说你菜' };
 const FACTORY = { traits: { O: 70, C: 45, E: 35, A: 30, N: 55 }, beliefs: ['我嘴硬但其实在意'] };
 
-async function withPersona(run, { fetchQueue = [], sessions = { 'private:2001': 'session-aaa', 'group:9': 'session-bbb' }, start = Date.parse('2026-11-02T12:00:00'), peopleStats = () => [], files = {}, roleCard = () => '# 角色卡\n傲娇嘴硬，心软。' } = {}) {
+async function withPersona(run, { fetchQueue = [], sessions = { 'private:2001': 'session-aaa', 'group:9': 'session-bbb' }, start = Date.parse('2026-11-02T12:00:00'), peopleStats = () => [], files = {}, roleCard = () => '# 角色卡\n傲娇嘴硬，心软。', roleName = () => '小鲸鱼' } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-persona-glue-'));
   const clock = { t: start };
   const calls = [];
@@ -30,7 +30,7 @@ async function withPersona(run, { fetchQueue = [], sessions = { 'private:2001': 
   const fetchImpl = async (url, init) => { calls.push(JSON.parse(init.body)); const r = fetchQueue.shift(); if (!r) throw new Error('no more fake responses'); return r; };
   const weekly = [];
   const persona = createPersona({
-    stateDir: dir, roleName: () => '小鲸鱼', roleCard, sessions: () => sessions, ownerQQ: () => '2001',
+    stateDir: dir, roleName, roleCard, sessions: () => sessions, ownerQQ: () => '2001',
     peopleStats, fetchImpl, now: () => clock.t, onWeeklyReport: (r) => weekly.push(r), log: (m) => logs.push(String(m))
   });
   try { await run({ persona, dir, clock, calls, weekly, logs, live: () => JSON.parse(fs.readFileSync(path.join(dir, 'live.json'), 'utf8')) }); }
@@ -84,6 +84,36 @@ await test('私聊被骂：情绪、关系、证据、判读日志都更新；�
     const appraisalLog = fs.readFileSync(path.join(dir, '小鲸鱼', 'appraisals', 'private_2001', '2026-11.jsonl'), 'utf8');
     assert.doesNotMatch(appraisalLog, /你好菜/, '判读日志不存原文');
   }, { fetchQueue: [reply(INSULT)] });
+});
+
+await test('sharedPrivateContext 遵守当前角色与人格注入开关，只带共享关系', async () => {
+  let role = '小鲸鱼';
+  const people = {
+    2001: {
+      name: '来源昵称', intimacy: 55, trust: 85, familiarity: 60, offsets: { A: 5 },
+      nickname: '旧昵称', jokes: ['群聊里的梗'],
+      beliefs: [
+        { status: 'accepted', keys: ['private:2001'], text: '原私聊里的记忆' },
+        { status: 'accepted', keys: ['group:9'], text: '群聊里的记忆' },
+      ],
+    },
+  };
+  await withPersona(({ persona }) => {
+    assert.equal(persona.sharedPrivateContext('2001'), '');
+    persona.console.confirmFactory(FACTORY);
+    const text = persona.sharedPrivateContext('2001');
+    assert.match(text, /我嘴硬但其实在意/);
+    assert.match(text, /朋友；信任高；你对他更软一点/);
+    assert.doesNotMatch(text, /你此刻|来源昵称|旧昵称|群聊里的梗|原私聊里的记忆|群聊里的记忆/);
+    assert.equal(persona.sharedPrivateContext('x'), '');
+    role = '另一张角色卡';
+    assert.equal(persona.sharedPrivateContext('2001'), '');
+    role = '小鲸鱼';
+    persona.console.saveConfig({ settings: { inject: false } });
+    assert.equal(persona.sharedPrivateContext('2001'), '');
+    persona.console.saveConfig({ settings: { enabled: false, inject: true } });
+    assert.equal(persona.sharedPrivateContext('2001'), '');
+  }, { files: { '小鲸鱼/people.json': people }, roleName: () => role });
 });
 
 await test('群聊里和她无关的普通消息不逐条调模型，攒够 20 条合批一次', async () => {
