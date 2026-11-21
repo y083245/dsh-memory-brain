@@ -67,9 +67,9 @@ async function withConsole(h, run) {
   const server = h.startConsoleServer();
   try {
     if (!server.listening) await once(server, 'listening');
-    const request = (route, { body, agent = false } = {}) => fetch(new URL(route, `http://127.0.0.1:${server.address().port}`), {
+    const request = (route, { body, agent = false, agentToken } = {}) => fetch(new URL(route, `http://127.0.0.1:${server.address().port}`), {
       method: body === undefined ? 'GET' : 'POST',
-      headers: { 'x-console-token': 'fixture-console-token', 'content-type': 'application/json', ...(agent ? { 'x-agent-call': '1' } : {}) },
+      headers: { 'x-console-token': 'fixture-console-token', 'content-type': 'application/json', ...(agent || agentToken ? { 'x-agent-call': '1' } : {}), ...(agentToken ? { 'x-agent-token': agentToken } : {}) },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     await run(request, server);
@@ -254,6 +254,104 @@ test('QQ profile sharing requires live login, private allowlist and current gate
     logins[2].resolve({ user_id: 42 });
     await logins[2].promise;
     assert.equal(authorizeQqProfile(endpoint), false);
+  } finally { await h.close(); }
+});
+
+test('QQ projects shared memory into verified private turns and retires stale sessions after forgetting', async () => {
+  const fixture = hostFixture({ managed: false });
+  const events = new Map();
+  const login = Promise.withResolvers();
+  const bot = {
+    url: 'ws://127.0.0.1:3001',
+    isConnected: false,
+    on(name, listener) { events.set(name, listener); },
+    onEvent() {},
+    onBotStatus() {},
+    async connect() {},
+    close() { this.isConnected = false; },
+    getLoginInfo: () => login.promise,
+  };
+  const key = 'private:123';
+  const item = {
+    id: 'a'.repeat(32), cat: 'fact', text: 'keeps a shared orchid collection', at: '2026-01-02T03:04:05.678Z',
+  };
+  const account = { platform: 'qq', accountId: '41', tenantId: null };
+  const endpoint = {
+    actor: { ...account, userId: '123' },
+    conversation: { ...account, chatType: 'private', chatId: '123', threadId: null },
+  };
+  let shared = [item];
+  const startChannelHost = async (options) => ({
+    ...await fixture.globals.startChannelHost(options),
+    readQqSharedMemory(source) {
+      return source.actor.userId === '123' && options.authorizeQqProfile(source) ? { items: shared, revision: 'fixture-revision' } : null;
+    },
+    forgetQqSharedMemory(source, itemId) {
+      assert.deepEqual(JSON.parse(JSON.stringify(source)), endpoint);
+      assert.equal(options.authorizeQqProfile(source), true);
+      if (!shared.some(({ id }) => id === itemId)) return false;
+      shared = [];
+      return true;
+    },
+  });
+  const h = await bridgeHarness({
+    config: {
+      ...config, allow: { private: ['123', '124'], groups: ['456'] },
+      social: { enabled: false }, socialV2: { sticker: { enabled: false } },
+    },
+    globals: { ...fixture.globals, startChannelHost, createQQAdapter: () => ({ bot, bindIngress() {} }) },
+  });
+  try {
+    h.setMode('reserved2');
+    h.setPresets(['qq-chat', 'qq-chat-v2']);
+    h.setReady(true);
+    h.startQqTransport();
+
+    const send = async (destination) => {
+      const result = await h.deliverPrompt(destination, 'Tell me what you remember.');
+      assert.equal(result.ok, true);
+      return h.calls.prompts.at(-1);
+    };
+    const beforeLogin = await send(key);
+    assert.doesNotMatch(beforeLogin.content[0].text, /shared orchid/);
+
+    bot.isConnected = true;
+    events.get('open')();
+    login.resolve({ user_id: 41 });
+    await login.promise;
+    const authorized = await send(key);
+    assert.match(authorized.content[0].text, /shared orchid/);
+    assert.notEqual(authorized.sessionId, beforeLogin.sessionId);
+    assert.doesNotMatch((await send('private:124')).content[0].text, /shared orchid/);
+    assert.doesNotMatch((await send('group:456')).content[0].text, /shared orchid/);
+
+    const token = String(h.getSocialV2State(key).agentToken);
+    await withConsole(h, async (request) => {
+      const recall = '/api/socialV2/ltm-recall';
+      const ordinary = await request(recall, { body: { key } });
+      assert.equal(ordinary.status, 200);
+      assert.deepEqual((await ordinary.json()).person.items, []);
+
+      const sharedResult = await request(recall, { body: { key, query: 'orchid' }, agentToken: token });
+      assert.equal(sharedResult.status, 200);
+      assert.deepEqual((await sharedResult.json()).person.items, [{ ...item, shared: true }]);
+
+      const wrongPerson = await request(recall, { body: { key, userId: '124' }, agentToken: token });
+      assert.equal(wrongPerson.status, 200);
+      assert.deepEqual((await wrongPerson.json()).person.items, []);
+
+      const forgotten = await request('/api/socialV2/ltm-forget', { body: { key, itemId: item.id }, agentToken: token });
+      assert.equal(forgotten.status, 200);
+      assert.deepEqual(await forgotten.json(), { ok: true, removed: { id: item.id, shared: true } });
+
+      const stale = await request(recall, { body: { key }, agentToken: token });
+      assert.equal(stale.status, 403);
+    });
+
+    const afterForget = await send(key);
+    assert.doesNotMatch(afterForget.content[0].text, /shared orchid/);
+    assert.notEqual(afterForget.sessionId, authorized.sessionId);
+    assert.ok(h.calls.forgotten.includes(authorized.sessionId));
   } finally { await h.close(); }
 });
 

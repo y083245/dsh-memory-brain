@@ -630,3 +630,47 @@ test('real grammy Api + startChannelHost + openChannelInbox integration persists
     inbox.close();
   }
 });
+
+test('only a directly authored private Telegram command can approve memory sharing', async (t) => {
+  const text = '/share_memory remember this';
+  const messages = [
+    {},
+    { forward_origin: { type: 'hidden_user', sender_user_name: 'Original sender', date: 1700000000 } },
+    { reply_to_message: { message_id: 100 } },
+    { quote: { text: 'remember this' } },
+    { entities: [{ type: 'expandable_blockquote', offset: 0, length: text.length }] },
+    { chat: { id: -10012345, type: 'supergroup' } },
+  ];
+  const { promise: batchDone, resolve: notify } = Promise.withResolvers();
+  let sentBatch = false;
+  const sdk = makeSdkHarness({
+    getUpdatesImpl: async (_params, signal) => {
+      if (sentBatch) {
+        return new Promise((_, reject) => {
+          signal.addEventListener('abort', () => reject(Object.assign(new Error('Aborted'), { name: 'AbortError' })), { once: true });
+        });
+      }
+      sentBatch = true;
+      return messages.map((message, index) => ({
+        update_id: index + 1,
+        message: {
+          chat: { id: 101, type: 'private' }, from: { id: 101, is_bot: false }, message_id: index + 1,
+          text, date: 1700000000, ...message,
+        },
+      }));
+    },
+  });
+  const host = makeHostHarness({ acceptBatchImpl: () => { notify(); return { status: 'accepted' }; } });
+  const adapter = createTelegramAdapter({
+    channelHost: host.channelHost,
+    readConfig: () => ({ channels: { telegram: { enabled: true } } }),
+    env: { TELEGRAM_BOT_TOKEN: '123:fixture_token' },
+    loadSdk: sdk.loadSdk,
+  });
+  t.after(() => adapter.stop());
+  await adapter.start();
+  await batchDone;
+  assert.deepEqual(host.batches[0].events.map((event) => event.memoryShareAllowed === true),
+    [true, false, false, false, false, false]);
+  assert.ok(host.batches[0].events.every((event) => event.text === text));
+});

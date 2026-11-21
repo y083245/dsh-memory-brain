@@ -538,3 +538,38 @@ test('real @larksuiteoapi/node-sdk EventDispatcher + startChannelHost integratio
     inbox.close();
   }
 });
+
+test('only a direct private Feishu text can approve memory sharing', async (t) => {
+  const sdk = makeSdkHarness();
+  const host = makeHostHarness();
+  const appId = 'cli_aabbccddeeff0011';
+  const adapter = createFeishuAdapter({
+    channelHost: host.channelHost,
+    readConfig: () => ({ channels: { feishu: { enabled: true, appId } } }),
+    env: { FEISHU_APP_SECRET: 'fixture_app_secret' },
+    loadSdk: sdk.loadSdk,
+  });
+  t.after(() => adapter.stop());
+  await adapter.start();
+  const text = '/share_memory remember this';
+  const messages = [
+    {},
+    { parent_id: 'om_parent' },
+    { root_id: 'om_root' },
+    { message_type: 'post', content: JSON.stringify({ content: [[{ tag: 'text', text }]] }) },
+    { chat_type: 'group' },
+  ];
+  for (const [index, message] of messages.entries()) {
+    await sdk.emitReceive({
+      app_id: appId, tenant_key: 'tenant_1', event_id: 'evt_share_' + index,
+      sender: { sender_type: 'user', sender_id: { open_id: 'ou_user_1' } },
+      message: {
+        message_id: 'om_share_' + index, chat_id: 'oc_chat_1', chat_type: 'p2p', message_type: 'text',
+        content: JSON.stringify({ text }), ...message,
+      },
+    });
+  }
+  assert.deepEqual(host.accepted.map((event) => event.memoryShareAllowed === true),
+    [true, false, false, false, false]);
+  assert.ok(host.accepted.every((event) => event.text === text));
+});

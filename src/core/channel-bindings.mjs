@@ -20,6 +20,17 @@ export const PRIVATE_BINDING_SCHEMA = `
     principal_id TEXT PRIMARY KEY,
     conversation_key TEXT NOT NULL UNIQUE
   ) WITHOUT ROWID;
+  CREATE TABLE IF NOT EXISTS channel_memory_sharing (
+    principal_id TEXT NOT NULL,
+    conversation_key TEXT NOT NULL,
+    PRIMARY KEY (principal_id, conversation_key)
+  ) WITHOUT ROWID;
+  CREATE TABLE IF NOT EXISTS channel_shared_memory (
+    principal_id TEXT NOT NULL,
+    conversation_key TEXT NOT NULL,
+    ledger TEXT NOT NULL,
+    PRIMARY KEY (principal_id, conversation_key)
+  ) WITHOUT ROWID;
 `;
 
 function endpointKeys({ actor: inputActor, conversation: inputConversation }) {
@@ -75,6 +86,21 @@ export function createPrivateBindings(db, transact) {
     DELETE FROM channel_legacy_qq_profile_sharing WHERE principal_id = ? AND (conversation_key = ? OR (
       SELECT COUNT(*) FROM channel_private_bindings WHERE principal_id = ?
     ) < 2)
+  `);
+
+  const memoryGrants = db.prepare('SELECT conversation_key FROM channel_memory_sharing WHERE principal_id = ?');
+  const hasMemoryGrant = db.prepare('SELECT 1 FROM channel_memory_sharing WHERE principal_id = ? AND conversation_key = ?');
+  const grantMemory = db.prepare('INSERT INTO channel_memory_sharing (principal_id, conversation_key) VALUES (?, ?)');
+  const revokeMemory = db.prepare('DELETE FROM channel_memory_sharing WHERE principal_id = ? AND conversation_key = ?');
+  const revokeDetachedMemory = db.prepare(`
+    DELETE FROM channel_memory_sharing WHERE principal_id = ? AND (conversation_key = ? OR (
+      SELECT COUNT(*) FROM channel_private_bindings WHERE principal_id = ?
+    ) < 2)
+  `);
+  const findMemory = db.prepare('SELECT ledger FROM channel_shared_memory WHERE principal_id = ? AND conversation_key = ?');
+  const saveMemory = db.prepare(`
+    INSERT INTO channel_shared_memory (principal_id, conversation_key, ledger) VALUES (?, ?, ?)
+    ON CONFLICT (principal_id, conversation_key) DO UPDATE SET ledger = excluded.ledger
   `);
 
   function resolveKeys(keys) {
@@ -180,6 +206,72 @@ export function createPrivateBindings(db, transact) {
     });
   }
 
+  // An endpoint can contribute and read shared memories only after a trusted
+  // caller grants that endpoint access against the current binding revision.
+  function setMemorySharing(endpoint, enabled) {
+    const { personKey, conversationKey } = endpointKeys(endpoint);
+    if (typeof enabled !== 'boolean') throw new TypeError('Invalid memory sharing request');
+    return transact(() => {
+      const row = find.get(conversationKey);
+      if ((row?.binding_revision ?? null) !== endpoint.bindingRevision || (row && row.person_key !== personKey)) {
+        return { status: 'stale_binding' };
+      }
+      const scope = members(endpoint);
+      if (!scope) return { status: 'binding_conflict' };
+      const { principalId } = scope;
+      const granted = hasMemoryGrant.get(principalId, conversationKey) !== undefined;
+      if (granted === enabled) return { status: 'updated' };
+      if (enabled) grantMemory.run(principalId, conversationKey);
+      else revokeMemory.run(principalId, conversationKey);
+      reviseMembers.run(randomUUID(), principalId);
+      return { status: 'updated' };
+    });
+  }
+
+  function withSharedMemory(endpoint, { expectedMapping = null, authorize, write = false }, run) {
+    function permitted(member) {
+      try {
+        const result = authorize(member);
+        if (typeof result?.then === 'function') void Promise.resolve(result).catch(() => {});
+        return result === true;
+      } catch {
+        return false;
+      }
+    }
+
+    return transact(() => {
+      const scope = members(endpoint, expectedMapping);
+      if (!scope) return null;
+      const { principalId, bindingRevision } = scope;
+      const conversationKey = encodeConversationKey(endpoint.conversation);
+      const grants = new Set(memoryGrants.all(principalId).map(({ conversation_key }) => conversation_key));
+      const participants = scope.members.map((member) => [encodeConversationKey(member.conversation), member]);
+      const reader = participants.find(([key]) => key === conversationKey)?.[1];
+      if (!grants.has(conversationKey) || !reader || !permitted(reader)) return null;
+
+      const entries = participants.flatMap(([sourceKey, member]) => {
+        if (!grants.has(sourceKey) || (sourceKey !== conversationKey && !permitted(member))) return [];
+        const stored = findMemory.get(principalId, sourceKey);
+        return [{ sourceKey, ledger: stored ? JSON.parse(stored.ledger) : {} }];
+      });
+      const visibleKeys = new Set(entries.map(({ sourceKey }) => sourceKey));
+      const changes = new Map();
+      const result = run({
+        conversationKey, bindingRevision, entries,
+        save(sourceKey, ledger) {
+          if (write !== true || !visibleKeys.has(sourceKey)) throw new TypeError('Shared memory is outside the write scope');
+          changes.set(sourceKey, JSON.stringify(ledger));
+        },
+      });
+      if (typeof result?.then === 'function') {
+        void Promise.resolve(result).catch(() => {});
+        throw new TypeError('Shared memory callback must be synchronous');
+      }
+      for (const [sourceKey, ledger] of changes) saveMemory.run(principalId, sourceKey, ledger);
+      return result;
+    });
+  }
+
   function unlink(endpoint) {
     const { personKey, conversationKey } = endpointKeys(endpoint);
     return transact(() => {
@@ -193,6 +285,7 @@ export function createPrivateBindings(db, transact) {
       // The detached endpoint keeps a revision so pre-binding work stays stale.
       save.run(conversationKey, personKey, null, null, revision);
       revokeDetachedSharing.run(row.principal_id, conversationKey, row.principal_id);
+      revokeDetachedMemory.run(row.principal_id, conversationKey, row.principal_id);
       return { status: 'unlinked' };
     });
   }
@@ -201,6 +294,8 @@ export function createPrivateBindings(db, transact) {
     resolve: (endpoint) => resolveKeys(endpointKeys(endpoint)),
     members,
     setLegacyQqProfileSharing,
+    setMemorySharing,
+    withSharedMemory,
     revisionForConversation: (conversationKey) => find.get(conversationKey)?.binding_revision ?? null,
     link,
     unlink,

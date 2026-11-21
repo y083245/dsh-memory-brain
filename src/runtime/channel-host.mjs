@@ -16,6 +16,7 @@ import { hardenDir, isHardened } from '../state-acl.mjs';
 
 const MAX_TURNS = 4;
 const MAX_QUEUE = 1000;
+const MEMORY_ID = /^[a-f0-9]{32}$/;
 const DISABLED = Object.freeze({ status: 'retryableFailure', reason: 'channel_unavailable' });
 const STALE_POLL = Object.freeze({ status: 'retryableFailure', reason: 'stale_checkpoint' });
 const TRANSPORT_CONFIG = {
@@ -238,7 +239,8 @@ export async function startChannelHost({
     const revision = conversation.chatType === 'private' && conversation.threadId === null
       ? bindings.revisionForConversation(conversationKey) : null;
     const scope = entry.scopes.get(conversationKey);
-    if (scope && (scope.revision !== revision || scope.sharedQq && !isSharedQqCurrent(scope.sharedQq))) {
+    if (scope && (scope.revision !== revision || scope.sharedQq && !isSharedQqCurrent(scope.sharedQq) ||
+        scope.sharedMemory?.exposed.size && !isSharedMemoryCurrent(scope.sharedMemory))) {
       clearScope(entry, conversationKey);
       return false;
     }
@@ -277,6 +279,7 @@ export async function startChannelHost({
     },
     link: (endpoints) => mutateBinding(() => bindings.link(endpoints)),
     unlink: (endpoint) => mutateBinding(() => bindings.unlink(endpoint)),
+    setMemorySharing: (endpoint, enabled) => mutateBinding(() => bindings.setMemorySharing(endpoint, enabled)),
     setLegacyQqProfileSharing: (endpoint, enabled) => mutateBinding(() => bindings.setLegacyQqProfileSharing(endpoint, enabled)),
   };
 
@@ -350,7 +353,7 @@ export async function startChannelHost({
     return sharedDigest(text) === sharedQq.digest;
   }
 
-  function readSharedContext(task) {
+  function readLegacySharedContext(task) {
     const { actor, conversation, conversationKey } = task.event;
     if (conversation.chatType !== 'private' || conversation.threadId !== null || task.bindingRevision === null) return '';
     const entry = entryFor(conversation);
@@ -377,6 +380,146 @@ export async function startChannelHost({
     }
     if (text) scope.sharedQq = { digest, endpoint, role: roleName };
     return text;
+  }
+
+  function authorizeMemorySource(endpoint) {
+    const { conversation } = endpoint;
+    if (stopped) return false;
+    if (conversation.platform === 'qq') return canReadQqProfile(endpoint);
+    const entry = entryFor(conversation);
+    return !!entry && !!resolveTextTarget(readPolicy(entry), conversation, { source: endpoint });
+  }
+
+  function safeSharedMemoryItem(item) {
+    if (!MEMORY_ID.test(item?.id) || item.cat === 'pending' ||
+        !Object.hasOwn(longMemory.CATEGORIES, item.cat)) return null;
+    const text = safeSharedText(item.text, 300).toWellFormed();
+    if (!text) return null;
+    const { id, cat, at, core, archivedAt, outdatedAt } = item;
+    return {
+      id, cat, text, shared: true,
+      ...(typeof at === 'string' && { at }),
+      ...(core === true && { core: true }),
+      ...(typeof archivedAt === 'string' && { archivedAt }),
+      ...(typeof outdatedAt === 'string' && { outdatedAt }),
+    };
+  }
+
+  function safeMemoryItems(result) {
+    return result?.status === 'ok' ? result.data.items.map(safeSharedMemoryItem).filter(Boolean) : [];
+  }
+
+  function accessSharedMemory(source, write, run) {
+    if (stopped || source?.conversation?.chatType !== 'private' || source.conversation.threadId !== null) return null;
+    reload(false);
+    if (roleSilent) return null;
+    if (typeof longMemory.sharedChannelMemory !== 'function') return null;
+    return bindings.withSharedMemory(source, { authorize: authorizeMemorySource, write }, run);
+  }
+
+  function sharedSnapshot(source) {
+    try {
+      return accessSharedMemory(source, false, (view) => {
+        const response = longMemory.sharedChannelMemory('recall', view);
+        return response?.status === 'ok' ? {
+          items: safeMemoryItems(response), revision: view.bindingRevision,
+        } : null;
+      });
+    } catch { return null; }
+  }
+
+  function readQqSharedMemory(endpoint) {
+    if (endpoint?.conversation?.platform !== 'qq') return null;
+    return sharedSnapshot(endpoint);
+  }
+
+  function forgetVisibleSharedMemory(view, args) {
+    const response = longMemory.sharedChannelMemory('recall', view);
+    if (response?.status !== 'ok') return response;
+    if (!safeMemoryItems(response).some(({ id }) => id === args.itemId)) return null;
+    return longMemory.sharedChannelMemory('forget', view, args);
+  }
+
+  function forgetQqSharedMemory(endpoint, itemId) {
+    if (endpoint?.conversation?.platform !== 'qq' || !MEMORY_ID.test(itemId)) return false;
+    try {
+      return accessSharedMemory(endpoint, true, (view) =>
+        forgetVisibleSharedMemory(view, { itemId }))?.status === 'ok';
+    } catch { return false; }
+  }
+
+  function memoryFingerprints(items) {
+    return new Map(items.map((item) => [item.id, sharedDigest(JSON.stringify(item))]));
+  }
+
+  function isSharedMemoryCurrent({ source, exposed, revision }) {
+    const snapshot = sharedSnapshot(source);
+    if (!snapshot || snapshot.revision !== revision) return false;
+    const fingerprints = memoryFingerprints(snapshot.items);
+    return [...exposed].every(([id, hash]) => fingerprints.get(id) === hash);
+  }
+
+  function trackSharedExposure(scope, source, items, revision) {
+    if (!items.length || scope.revision !== revision) return;
+    const exposure = scope.sharedMemory ??= { source, revision, exposed: new Map() };
+    for (const [id, hash] of memoryFingerprints(items)) exposure.exposed.set(id, hash);
+  }
+
+  function readSharedContext(task) {
+    const legacy = readLegacySharedContext(task);
+    const { actor, conversation, conversationKey } = task.event;
+    const entry = entryFor(conversation);
+    const scope = entry?.scopes.get(conversationKey);
+    if (!scope || task.bindingRevision === null || scope.revision !== task.bindingRevision) return legacy;
+    const source = { actor, conversation };
+    const snapshot = sharedSnapshot(source);
+    if (!snapshot || snapshot.revision !== scope.revision) return legacy;
+    const items = snapshot.items.filter((item) => !item.archivedAt && !item.outdatedAt).reverse()
+      .sort((a, b) => Number(!!b.core) - Number(!!a.core)).slice(0, 6);
+    trackSharedExposure(scope, source, items, snapshot.revision);
+    return [legacy, items.length && '【获准共享的私聊记忆】\n' +
+      items.map(({ text, id }) => '· ' + text + '〔' + id + '〕').join('\n')].filter(Boolean).join('\n\n');
+  }
+
+  function channelSharedMemory(action, context, args, noteRetiredByMutation) {
+    const { source, conversationKey, bindingRevision, memoryShareText } = context;
+    const entry = entryFor(source.conversation);
+    const scope = entry?.scopes.get(conversationKey);
+    if (!scope || bindingRevision === null || scope.revision !== bindingRevision) return null;
+    if (action === 'recall') {
+      const snapshot = sharedSnapshot(source);
+      if (!snapshot || snapshot.revision !== bindingRevision) return null;
+      trackSharedExposure(scope, source, snapshot.items, snapshot.revision);
+      return { status: 'ok', data: { items: snapshot.items } };
+    }
+
+    if (action === 'remember' && (args.text !== memoryShareText || args.cat === 'pending' ||
+        args.replaces !== undefined || args.text.length > 300 || !safeSharedText(args.text, 300))) return { status: 'denied' };
+
+    let result;
+    try {
+      result = accessSharedMemory(source, true, (view) => {
+        if (view.bindingRevision !== bindingRevision) return null;
+        return action === 'forget'
+          ? forgetVisibleSharedMemory(view, args)
+          : longMemory.sharedChannelMemory('remember', view, args);
+      });
+    } catch { return { status: 'unavailable' }; }
+    if (result?.status !== 'ok') return result;
+    // Retire immediately if this turn saw material changed by its own write.
+    // The signed caller can still receive the result after an exact-turn recheck.
+    const retire = scope.sharedMemory?.exposed.size && !isSharedMemoryCurrent(scope.sharedMemory);
+    if (retire) {
+      clearScope(entry, conversationKey);
+      noteRetiredByMutation();
+    }
+    if (action === 'remember') {
+      const item = safeSharedMemoryItem(result.data.item);
+      if (!item) return { status: 'unavailable' };
+      if (!retire) trackSharedExposure(scope, source, [item], bindingRevision);
+      return { status: 'ok', data: { item, duplicate: result.data.duplicate } };
+    }
+    return result;
   }
 
   function accountKey(account) {
@@ -554,7 +697,7 @@ export async function startChannelHost({
         commonTools: {
           authorizeSource: authorizeCommonSource,
           actions: createChannelCommonTools({
-            longMemory, rag, redact: (text) => containsSensitive(text) || SENSITIVE_RE.test(text) ? '***' : text,
+            longMemory, rag, sharedMemory: channelSharedMemory, redact: (text) => containsSensitive(text) || SENSITIVE_RE.test(text) ? '***' : text,
           }),
         },
       });
@@ -587,7 +730,7 @@ export async function startChannelHost({
   }
 
   return {
-    registerAccount, privateBindings, reload, invalidateAll, close, platformState,
+    registerAccount, privateBindings, reload, invalidateAll, close, platformState, readQqSharedMemory, forgetQqSharedMemory,
     // Trusted host callers supply an already-authorized account or conversation.
     getDeliveryStatus: (account, operationId) => stopped ? null : outbox?.getDeliveryStatus(account, operationId) ?? null,
     getConversationDeliveryStats: (conversation) => stopped ? null : outbox?.getConversationDeliveryStats(conversation) ?? null,

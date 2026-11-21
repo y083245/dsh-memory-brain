@@ -492,6 +492,8 @@ export function createFeishuAdapter({
           message: { conversation, platformChatId: msg.chat_id, messageId: msg.message_id },
           replyTo,
           text,
+          ...(chatType === 'private' && threadId === null && msg.message_type === 'text' && !msg.parent_id &&
+            !msg.root_id && !msg.mentions?.length && text.startsWith('/share_memory ') && { memoryShareAllowed: true }),
           occurredAt,
           deliveryRef,
           trigger,

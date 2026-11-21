@@ -97,6 +97,8 @@ export function routeChannelMessage(channel, input) {
       event: {
         kind: 'message', senderType: 'human', actor, conversation, message, replyTo, occurredAt, deliveryRef, trigger, text,
         conversationKey, personKey: encodePersonKey(actor), messageKey: encodeMessageKey(message),
+        ...(input.memoryShareAllowed === true && conversation.chatType === 'private' && conversation.threadId === null &&
+          replyTo === null && text.startsWith('/share_memory ') && { memoryShareAllowed: true }),
       },
     };
   } catch {

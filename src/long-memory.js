@@ -378,7 +378,7 @@ function lineMetas(buf) {
 // DECAY_PATCH：新增可选 decayOf —— (item, userId) => { R, frozen } | null，renderFor 用它
 // 挑「先带哪几条」；没传时 renderFor 的行为与改动前逐字相同。
 function createPeopleLedger({ people, saveNow, saveSoon, redact, log, onPromiseClosed, decayOf, validatePerson,
-  createItemId = () => crypto.randomBytes(4).toString('hex') }) {
+  createItemId = () => crypto.randomBytes(4).toString('hex'), dedupeAcrossCategories = false }) {
   // DECAY_PATCH：只在真的传了函数时才启用按牢固度排序，避免把 null / 别的类型当回调。
   const decayFn = typeof decayOf === 'function' ? decayOf : null;
 
@@ -461,7 +461,8 @@ function createPeopleLedger({ people, saveNow, saveSoon, redact, log, onPromiseC
     const byWho = byIn ? normalizeBy(byIn) : null;
     const wantCore = core === true;
     // 完全相同的内容不重复记
-    const dup = p.items.find((x) => x.cat === cat && x.text === t && (x.scope === 'public' || x.sourceKey === sk));
+    const dup = p.items.find((x) => (dedupeAcrossCategories || x.cat === cat) && x.text === t &&
+      (x.scope === 'public' || x.sourceKey === sk));
     // DECAY_PATCH（规格 M5）：replaces —— 「这条是在更新一件旧事」。
     // 校验必须在动任何条目之前做完（找不到 / 不可见 / 已过时的旧条目都直接抛错），
     // 否则会留下「新条目写进去、旧条目没标上」的半截账本。
@@ -492,7 +493,7 @@ function createPeopleLedger({ people, saveNow, saveSoon, redact, log, onPromiseC
       // DECAY_PATCH：核心转移；旧条目标过时，at 不动（它还是原来那条历史）
       if (inheritCore) { dup.core = true; delete old.core; }
       if (old) { old.outdatedAt = nowIso(); old.outdatedBy = dup.id; }
-      if (restored) enforceCap(p, cat, String(userId ?? '').trim());
+      if (restored) enforceCap(p, dup.cat, String(userId ?? '').trim());
       saveNow();
       return { item: dup, duplicate: true, replaced: old };
     }
@@ -896,6 +897,56 @@ export function createLongMemory({ stateDir, redact = (s) => s, log = () => {}, 
         throw new LedgerInputError();
       });
       return { status: 'ok', data };
+    } catch (error) {
+      if (error instanceof LedgerInputError) return { status: 'invalid' };
+      if (error instanceof LedgerAccessError) return { status: 'denied' };
+      return { status: 'unavailable' };
+    }
+  }
+
+  function sharedChannelMemory(action, { conversationKey, entries, save }, args = {}) {
+    try {
+      function openSource({ sourceKey, ledger: people }) {
+        const ledger = createPeopleLedger({
+          people, saveNow: () => save(sourceKey, people), redact, log: () => {},
+          // A model's category choice cannot create multiple items from the same approved text.
+          dedupeAcrossCategories: true,
+          validatePerson(id) { if (id !== sourceKey) throw new LedgerAccessError(); },
+          createItemId: () => crypto.randomBytes(16).toString('hex'),
+        });
+        const items = (ledger.personView(sourceKey, sourceKey)?.items ?? []).filter(
+          (item) => item.sourceKey === sourceKey && item.scope === 'private' && item.cat !== 'pending',
+        );
+        return { ledger, items };
+      }
+
+      if (action === 'recall') {
+        const items = entries.flatMap((entry) => openSource(entry).items);
+        items.sort((a, b) => String(a.at).localeCompare(String(b.at)));
+        const visible = args.activeOnly === true ? items.filter((item) => !item.archivedAt && !item.outdatedAt) : items;
+        return { status: 'ok', data: { items: visible } };
+      }
+      if (action === 'remember') {
+        const origin = entries.find(({ sourceKey }) => sourceKey === conversationKey);
+        if (!origin || args.cat === 'pending' || args.replaces !== undefined) throw new LedgerAccessError();
+        const { ledger } = openSource(origin);
+        const data = ledger.remember({
+          ...args, userId: conversationKey, name: undefined, sourceKey: conversationKey, scope: 'private',
+        });
+        return { status: 'ok', data };
+      }
+      if (action === 'forget') {
+        for (const entry of entries) {
+          const { ledger, items } = openSource(entry);
+          const match = items.find(({ id }) => id === args.itemId);
+          if (!match) continue;
+          const { sourceKey } = entry;
+          const item = ledger.forget({ userId: sourceKey, viewerKey: sourceKey, itemId: match.id });
+          return { status: 'ok', data: { item } };
+        }
+        throw new LedgerAccessError();
+      }
+      throw new LedgerInputError();
     } catch (error) {
       if (error instanceof LedgerInputError) return { status: 'invalid' };
       if (error instanceof LedgerAccessError) return { status: 'denied' };
@@ -1406,7 +1457,7 @@ export function createLongMemory({ stateDir, redact = (s) => s, log = () => {}, 
 
   return {
     CATEGORIES,
-    ...qqLedger, channelMemory,
+    ...qqLedger, channelMemory, sharedChannelMemory,
     archive, channelArchive, hasArchive, search, searchChannelHistory, archiveStats, archiveKeys,
     // RAG_PATCH（P2）：控制台的存档浏览 / 删除，以及给状态页看的遗忘请求队列
     listArchiveRows, deleteArchiveRows, pendingForgetKeys,

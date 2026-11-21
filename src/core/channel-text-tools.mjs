@@ -144,7 +144,7 @@ export function createChannelCommonToolGrants({ actions, authorizeSource, findTe
   }
   const grants = new WeakMap();
 
-  function currentSource(entry, binding, requestId, source) {
+  function currentSource(entry, binding, requestId, source, allowRetiredMutation = false) {
     try {
       const turn = binding.readTextTurn({ ...entry.snapshot, requestId }, { source });
       if (turn.status !== 'active') return null;
@@ -155,7 +155,7 @@ export function createChannelCommonToolGrants({ actions, authorizeSource, findTe
         return null;
       }
       if (!resolveTextTarget(policy, turn.source.conversation, { source: turn.source }) ||
-          findTextSession(entry.snapshot) !== entry) return null;
+          (!allowRetiredMutation && findTextSession(entry.snapshot) !== entry)) return null;
       return turn;
     } catch {
       return null;
@@ -189,14 +189,20 @@ export function createChannelCommonToolGrants({ actions, authorizeSource, findTe
       const { binding, source } = grant;
       const { conversationKey } = entry.snapshot;
       let context;
-      function readContext() {
-        if (signal?.aborted || grants.get(entry) !== grant || findTextSession(entry.snapshot) !== entry) return null;
-        const turn = currentSource(entry, binding, requestId, source);
+      let retiredByMutation = false;
+      function readContext({ finishMutation = false } = {}) {
+        const allowRetiredMutation = finishMutation && retiredByMutation;
+        if (signal?.aborted || grants.get(entry) !== grant ||
+            (!allowRetiredMutation && findTextSession(entry.snapshot) !== entry)) return null;
+        const turn = currentSource(entry, binding, requestId, source, allowRetiredMutation);
         if (!turn) {
           grants.delete(entry);
           return null;
         }
-        context ??= Object.freeze({ conversationKey, source, message: turn.message, requestId, callId, binding });
+        context ??= Object.freeze({
+          conversationKey, bindingRevision: entry.snapshot.bindingRevision, source, message: turn.message,
+          memoryShareText: turn.memoryShareText, requestId, callId, binding,
+        });
         return context;
       }
 
@@ -207,8 +213,10 @@ export function createChannelCommonToolGrants({ actions, authorizeSource, findTe
         const persisted = binding.toolReadCursor(conversationKey);
         if (!Number.isSafeInteger(persisted) || cursor > persisted) return { status: 'denied' };
       }
-      const result = await actions.invoke({ name, args, readContext, signal });
-      if (!readContext()) return { status: 'denied' };
+      const result = await actions.invoke({
+        name, args, readContext, signal, noteRetiredByMutation: () => { retiredByMutation = true; },
+      });
+      if (!readContext({ finishMutation: true })) return { status: 'denied' };
       if (!validChannelToolResult(name, result)) return { status: 'unavailable' };
       if (page && result.status === 'ok' && Array.isArray(result.data.messages)) {
         // The inbox supplies a chronological page from the authorized cursor.

@@ -79,6 +79,7 @@ const argumentsByTool = Object.freeze({
   channel_memory_remember: [{
     cat: category, text: memoryText, due: date, by: choiceField(['me', 'them'], '谁答应的，me 是你，them 是对方'),
     core: boolean, replaces: itemId,
+    share: { ...boolean, schema: { ...boolean.schema, description: '仅在本次私聊直接收到 /share_memory 内容时使用 true；text 必须逐字匹配用户输入的内容。' } },
   }, ['cat', 'text']],
   channel_memory_update: [{
     itemId, text: memoryText, cat: category, due: clearableDate,

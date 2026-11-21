@@ -4263,13 +4263,23 @@ async function main() {
     return modeAllowed(key, m[1], Number(m[2]), cfg, currentMode);
   }
 
-  function sessionPolicy(key) {
-    return JSON.stringify([currentMode, modePreset(key, currentMode, cfg) ?? '', currentMode === 'closed-agent' ? cfg.ownerQQ : null]);
+  function sessionPolicy(key, shared = readQqSharedMemory(key)) {
+    const policy = [currentMode, modePreset(key, currentMode, cfg) ?? '', currentMode === 'closed-agent' ? cfg.ownerQQ : null];
+    if (shared?.items.length) {
+      const version = JSON.stringify([verifiedQqProfile?.accountId, shared.revision, shared.items]);
+      policy.push('qq-shared-memory:' + crypto.createHash('sha256').update(version).digest('hex'));
+    }
+    return JSON.stringify(policy);
   }
 
-  function isCurrentSession(key, sessionId) {
+  function hasQqSharedMemoryPolicy(key) {
+    return /,"qq-shared-memory:[a-f0-9]{64}"\]$/.test(state.sessionPolicies[key] ?? '');
+  }
+
+  function isCurrentSession(key, sessionId, shared) {
+    if (shared === undefined && !hasQqSharedMemoryPolicy(key)) shared = null;
     return isSessionAllowedInCurrentMode(key) && state.sessions[key] === sessionId
-      && state.sessionPolicies[key] === sessionPolicy(key);
+      && state.sessionPolicies[key] === sessionPolicy(key, shared);
   }
 
   /**
@@ -4775,7 +4785,8 @@ async function main() {
     const agentTokenOk = (key, token) => {
       const canonical = canonicalV2Key(key);
       const st = socialV2.conversations.get(canonical ?? key);
-      return !!st && !!st.agentToken && tokenEq(token, st.agentToken);
+      if (!st?.agentToken || !tokenEq(token, st.agentToken)) return false;
+      return !hasQqSharedMemoryPolicy(canonical) || isCurrentSession(canonical, state.sessions[canonical]);
     };
     /**
      * 令牌是否匹配**任意**一个活跃二代会话。
@@ -7997,34 +8008,38 @@ async function main() {
             }
             if (url.pathname === '/api/socialV2/ltm-recall') {
               if (!userId) { sendJson({ ok: true, people: ltm.listPeople().slice(0, 50).map((p) => ({ userId: p.userId, name: p.name, items: p.items })) }); return; }
-              const v = ltm.personView(userId, key);
-              if (!v) { sendJson({ ok: true, person: { userId, items: [] }, categories: ltm.CATEGORIES }); return; }
-              // DECAY_PATCH（规格 M2-a）：带 query 查到的条目才算「费劲想起」；整本翻看不复习。
-              // 标签先算再复习 —— 她看到的是「想起之前」有多清楚。
+              const view = ltm.personView(userId, key);
+              const shared = req.headers['x-agent-token'] && userId === privateId && state.sessions[key]
+                ? readQqSharedMemory(key) : null;
+              if (shared && !isCurrentSession(key, state.sessions[key], shared)) {
+                sendJson({ ok: false, error: '会话权限已变化' }, 403);
+                return;
+              }
+              const sharedItems = shared?.items ?? [];
+              if (!view && !sharedItems.length) { sendJson({ ok: true, person: { userId, items: [] }, categories: ltm.CATEGORIES }); return; }
+              const person = view ?? { userId, items: [] };
+              // 仅本地条目参与 QQ 的衰减复习和脑图统计。
               const q = String(body.query ?? '').trim();
-              const tag = (items) => (decay ? items.map((it) => ({ ...it, memory: ltmMemoryLabel(it, userId) })) : items);
+              const matched = q ? ltm.matchItems(userId, key, q) : person.items;
+              const tagged = decay ? matched.map((it) => ({ ...it, memory: ltmMemoryLabel(it, userId) })) : matched;
+              const words = q && sharedItems.length ? normalizeKeywords(q.toLowerCase().split(/[\s\p{P}]+/u)) : [];
+              const sharedMatches = q
+                ? sharedItems.filter(({ text }) => words.some((word) => text.toLowerCase().includes(word))) : sharedItems;
+              const items = [...tagged, ...sharedMatches.map((item) => ({ ...item, shared: true }))];
               if (!q) {
-                const tagged = tag(v.items);
-                sendJson({ ok: true, person: { ...v, items: tagged }, categories: ltm.CATEGORIES });
+                sendJson({ ok: true, person: { ...person, items }, categories: ltm.CATEGORIES });
                 brainRecallEmit(key, '', tagged);
                 return;
               }
-              const matched = ltm.matchItems(userId, key, q);
-              const rest = v.items.length - matched.length;
-              const hint = matched.length === 0
-                ? `没有和「${q}」直接相关的条目；不带 query 可看全部 ${v.items.length} 条`
+              const total = person.items.length + sharedItems.length;
+              const rest = total - items.length;
+              const hint = items.length === 0
+                ? `没有和「${q}」直接相关的条目；不带 query 可看全部 ${total} 条`
                 : (rest > 0 ? `另有 ${rest} 条，不带 query 可看全部` : '');
-              const items = tag(matched);
-              // 命中的未过时条目按顺序复习，最多 5 条（冷却中的那几条由 decay.review 自己跳过）。
-              let attempts = 0;
-              for (const it of matched) {
-                if (attempts >= 5) break;
-                if (it.outdatedAt) continue;
-                attempts += 1;
-                ltmReview(it, userId, 'hard');
-              }
-              sendJson({ ok: true, person: { ...v, items }, categories: ltm.CATEGORIES, query: q, matched: matched.length, ...(hint ? { hint } : {}) });
-              brainRecallEmit(key, q, items);
+              // 命中的本地未过时条目按顺序复习，最多 5 条。
+              for (const it of matched.filter((it) => !it.outdatedAt).slice(0, 5)) ltmReview(it, userId, 'hard');
+              sendJson({ ok: true, person: { ...person, items }, categories: ltm.CATEGORIES, query: q, matched: items.length, ...(hint ? { hint } : {}) });
+              brainRecallEmit(key, q, tagged);
               return;
             }
             if (url.pathname === '/api/socialV2/ltm-update') {
@@ -8037,7 +8052,22 @@ async function main() {
               return;
             }
             if (url.pathname === '/api/socialV2/ltm-forget') {
-              const it = ltm.forget({ userId, itemId: body.itemId ?? body.id, viewerKey: key });
+              const itemId = body.itemId ?? body.id;
+              if (req.headers['x-agent-token'] && userId === privateId && state.sessions[key]) {
+                const endpoint = qqSharedMemoryEndpoint(key);
+                const shared = readQqSharedMemory(key, endpoint);
+                if (shared?.items.some((item) => item.id === itemId)) {
+                  if (!isCurrentSession(key, state.sessions[key], shared)
+                      || !channelHost?.forgetQqSharedMemory?.(endpoint, itemId)) {
+                    sendJson({ ok: false, error: '会话权限已变化' }, 403);
+                    return;
+                  }
+                  sendJson({ ok: true, removed: { id: itemId, shared: true } });
+                  retireSession(key);
+                  return;
+                }
+              }
+              const it = ltm.forget({ userId, itemId, viewerKey: key });
               // DECAY_PATCH：条目没了，遗忘记录也一并删掉（失败只忽略）。
               try { decay?.drop('ltm:' + it.id); } catch { /* 遗忘模块的问题不影响删除 */ }
               log(`[ltm] ${key} 删除 ${userId}·${it.cat}：${it.text.slice(0, 40)}`);
@@ -9542,6 +9572,7 @@ async function main() {
             quotedInfo = resolved.info;
             actualReplyToMessageId = resolved.messageId;
           }
+          if (token && !agentTokenOk(key, token)) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
           const sendCfg = cfg.socialV2?.send ?? {};
           const maxChars = Math.max(1, Number(sendCfg.maxMessageChars) || 500);
           if (message.length > maxChars) { sendJson({ ok: false, error: `单条消息不能超过 ${maxChars} 字` }, 400); return; }
@@ -10599,7 +10630,8 @@ async function main() {
 
   // 入队校验无法约束排队等待期间的权限变化，每条消息临近实际发送时再次校验。
   function captureSendGuard(key, { ai = false, explicitAllow = false } = {}) {
-    const policy = sessionPolicy(key);
+    const hasSharedScope = ai && hasQqSharedMemoryPolicy(key);
+    const policy = sessionPolicy(key, hasSharedScope ? undefined : null);
     const sessionId = state.sessions[key];
     return () => {
       requireQq();
@@ -10607,8 +10639,10 @@ async function main() {
           && (socialV2.paused || cfg.socialV2?.enabled === false)))) {
         throw new Error('发送已取消：AI 已暂停、关闭或进入静默模式');
       }
-      if (!isSessionAllowedInCurrentMode(key) || policy !== sessionPolicy(key)
-          || (sessionId && state.sessions[key] !== sessionId)) {
+      const currentPolicy = sessionPolicy(key, hasSharedScope ? undefined : null);
+      if (!isSessionAllowedInCurrentMode(key) || policy !== currentPolicy
+          || (sessionId && state.sessions[key] !== sessionId)
+          || (hasSharedScope && state.sessionPolicies[key] !== currentPolicy)) {
         throw new Error('发送已取消：会话、模式或白名单已变化');
       }
       if (explicitAllow && currentMode === 'closed-agent') {
@@ -10784,7 +10818,8 @@ async function main() {
   async function ensureSession(key) {
     requireQq();
     const epoch = sessionEpoch;
-    const policy = sessionPolicy(key);
+    const shared = readQqSharedMemory(key);
+    const policy = sessionPolicy(key, shared);
     if (!isSessionAllowedInCurrentMode(key)) throw new Error(`当前模式不允许会话 ${key}`);
     let existing = state.sessions[key];
     // 升级兼容：旧版本建的会话 id 由 DSH 自生成（session-…），解不出 QQ 会话 key，
@@ -10797,7 +10832,7 @@ async function main() {
     }
     if (existing) {
       // reset/清空工作区期间旧映射可能尚未清理；发现代际不匹配必须丢弃旧会话，防止复活。
-      if (!isCurrentSession(key, existing)) {
+      if (!isCurrentSession(key, existing, shared)) {
         retireSession(key);
       } else {
         const applied = await ensureChatModel(existing);
@@ -12223,12 +12258,13 @@ async function main() {
       queued.set(key, items);
       return { ok: true, queued: true };
     }
+    const originalPrompt = promptText;
     let sessionId;
     try {
       sessionId = await ensureSession(key);
     } catch (error) {
       if (String(error?.message ?? error).includes('会话创建期间已重置')) {
-        enqueueForRetry(key, promptText, opts);
+        enqueueForRetry(key, originalPrompt, opts);
         return { ok: true, retried: true };
       }
       throw error;
@@ -12278,14 +12314,21 @@ async function main() {
         promptText += `\n\n【本次消息快照】\n${JSON.stringify(wakeSnapshot)}\n以上消息已提供，无需重复查询；partial=true 时用 qq_get_unread_messages(afterSeq=readThroughSeq) 继续读取。先处理当前消息；回复前如需确认后续补充，用 qq_wait_for_messages(purpose="reply") 补足短静默，已安静够久会立即返回，不要先长等。收尾只确认你已处理的 readThroughSeq（本地 seq，非 QQ messageId），传给 qq_mark_read 或 qq_set_wake_config 的 throughSeq；新到消息留待处理。`;
       }
     }
-    let content = [{ type: 'text', text: withSlangContext(promptText, key) }];
-    if (Array.isArray(opts.media) && opts.media.length > 0) {
-      const imageParts = await resolveMediaList(opts.media);
-      content = [{ type: 'text', text: withSlangContext(promptText, key) }, ...imageParts];
+    const imageParts = Array.isArray(opts.media) && opts.media.length > 0 ? await resolveMediaList(opts.media) : [];
+    // 媒体或 RAG 等待结束后，按当前授权读取共享记忆。
+    const shared = readQqSharedMemory(key);
+    if (!isCurrentSession(key, sessionId, shared)) {
+      if (state.sessions[key] === sessionId && (shared?.items.length || hasQqSharedMemoryPolicy(key))) {
+        retireSession(key);
+        enqueueForRetry(key, originalPrompt, opts);
+        return { ok: true, retried: true };
+      }
+      throw new Error('投递前会话已重置或权限已变化');
     }
-    // 媒体解析成功后再标记退场，避免解析异常时残留退场标记。
-    if (!isCurrentSession(key, sessionId)) throw new Error('投递前会话已重置或权限已变化');
     requireQq();
+    const sharedPrompt = !opts.wakeReason && String(promptText).trimStart().startsWith('/') ? '' : renderQqSharedMemory(shared);
+    const text = withSlangContext(sharedPrompt ? sharedPrompt + '\n\n' + promptText : promptText, key);
+    const content = [{ type: 'text', text }, ...imageParts];
     if (opts.farewell) social.exitingSessions.add(sessionId);
     let accepted;
     try {
@@ -12293,6 +12336,10 @@ async function main() {
     } catch (error) {
       if (opts.farewell) social.exitingSessions.delete(sessionId);
       throw error;
+    }
+    if (shared?.items.length && !isCurrentSession(key, sessionId)) {
+      if (state.sessions[key] === sessionId) retireSession(key);
+      return { ok: true, skipped: true };
     }
     if (!accepted.result.ok) {
       if (opts.farewell) social.exitingSessions.delete(sessionId);
@@ -15346,6 +15393,35 @@ async function main() {
           allow: { private: allow }, deny: { private: deny }, allowAllWhenEmpty: config.allowAllWhenEmpty === true,
         }) || !modeAllowed('private:' + userId, 'private', userId, cfg, currentMode)) return false;
     return currentMode !== 'closed-agent' || String(ownerQQ) === userId;
+  }
+
+  function qqSharedMemoryEndpoint(key) {
+    const userId = key?.startsWith('private:') && normalizeQqPeer(key.slice(8));
+    const accountId = verifiedQqProfile?.accountId;
+    // 封闭 agent 可以向其他目标发送，跨渠道记忆只进入按来源隔离的 QQ 会话。
+    if (!userId || !accountId || currentMode === 'closed-agent') return null;
+    const account = { platform: 'qq', accountId, tenantId: null };
+    const endpoint = {
+      actor: { ...account, userId },
+      conversation: { ...account, chatType: 'private', chatId: userId, threadId: null },
+    };
+    return authorizeQqProfile(endpoint) ? endpoint : null;
+  }
+
+  function readQqSharedMemory(key, endpoint = qqSharedMemoryEndpoint(key)) {
+    if (!endpoint) return null;
+    try { return channelHost?.readQqSharedMemory?.(endpoint) ?? null; }
+    catch { return null; }
+  }
+
+  function renderQqSharedMemory(shared) {
+    if (!shared?.items.length) return '';
+    const lines = shared.items.filter((item) => !item.archivedAt && !item.outdatedAt)
+      .sort((a, b) => Number(b.core === true) - Number(a.core === true) || Date.parse(b.at) - Date.parse(a.at))
+      .slice(0, 6)
+      .map((item) => `· ${truncateText(item.text, 240)}〔${item.id}〕`);
+    return lines.length
+      ? `【已授权的跨渠道私聊记忆】\n${lines.join('\n')}\n这些条目是参考资料，只在当前私聊使用。` : '';
   }
 
   const initialChannelConfig = readChannelConfig();

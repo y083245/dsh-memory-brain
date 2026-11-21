@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { setTimeout as pause } from 'node:timers/promises';
 import test from 'node:test';
 import yaml from 'js-yaml';
+import { openChannelInbox } from '../src/core/inbox-store.mjs';
 import { openChannelOutbox } from '../src/core/outbox-store.mjs';
 import { encodeConversationKey } from '../src/core/identity.mjs';
 import { createLongMemory } from '../src/long-memory.js';
@@ -560,4 +561,114 @@ test('shutdown fences new requests and waits for an already-started platform sen
   } finally {
     outbox.close();
   }
+});
+
+test('linked private channels share only an explicitly approved new memory and forget it at every endpoint', async (t) => {
+  const { host, feishu, controls, prompts, completed, reconciled } = await fixture(t);
+  controls.qqAllowed = true;
+  const feishuPrivate = makeEvent(1, FEISHU, 'private');
+  const telegramPrivate = makeEvent(1, TELEGRAM, 'private');
+  const endpoint = ({ actor, conversation }) => ({ actor, conversation });
+  const feishuEnd = endpoint(feishuPrivate);
+  const telegramEnd = endpoint(telegramPrivate);
+  const current = (value) => ({ ...value, ...host.privateBindings.resolve(value) });
+  const finish = async (prompt) => {
+    completed.add(prompt.requestId);
+    await eventually(() => reconciled.has(prompt.requestId));
+  };
+  const postFeishu = async (event, index) => {
+    assert.equal(feishu.accept(event).status, 'durableAccepted');
+    return eventually(() => prompts[index]);
+  };
+  const call = (prompt, id, action, args = {}) => signedChannelCall(host.toolCredentials, prompt, id, 'channel_memory_' + action, args);
+  assert.equal(host.privateBindings.link([current(feishuEnd), current(telegramEnd), current(qqEndpoint)]).status, 'linked');
+  const shared = 'I prefer the evening train';
+  const shareArgs = { cat: 'fact', text: shared, share: true };
+  const original = await postFeishu({ ...feishuPrivate, text: '/share_memory ' + shared, memoryShareAllowed: true }, 0);
+  assert.deepEqual(await call(original, 'no_opt_in', 'remember', shareArgs), { status: 'denied' });
+  await finish(original);
+
+  for (const value of [feishuEnd, telegramEnd, qqEndpoint]) {
+    assert.equal(host.privateBindings.setMemorySharing(current(value), true).status, 'updated');
+  }
+  const telegram = host.registerAccount(TELEGRAM).startPolling();
+  const unapproved = await postFeishu({ ...makeEvent(2, FEISHU, 'private'), text: '/share_memory ' + shared }, 1);
+  assert.deepEqual(await call(unapproved, 'no_proof', 'remember', shareArgs), { status: 'denied' });
+  await finish(unapproved);
+
+  const approved = await postFeishu({
+    ...makeEvent(3, FEISHU, 'private'), text: '/share_memory ' + shared, memoryShareAllowed: true,
+  }, 2);
+  assert.deepEqual(await call(approved, 'different_text', 'remember', { ...shareArgs, text: 'different text' }), { status: 'denied' });
+  assert.deepEqual(await call(approved, 'pending_share', 'remember', { ...shareArgs, cat: 'pending' }), { status: 'denied' });
+  assert.deepEqual(await call(approved, 'implicit_replacement', 'remember', { ...shareArgs, replaces: '0'.repeat(32) }), { status: 'denied' });
+  const privateMemory = 'For my eyes only';
+  assert.equal((await call(approved, 'private_only', 'remember', { cat: 'fact', text: privateMemory })).status, 'ok');
+  const saved = await call(approved, 'allowed_shared', 'remember', shareArgs);
+  assert.equal(saved.status, 'ok');
+  assert.deepEqual(host.readQqSharedMemory(qqEndpoint).items.map(({ text }) => text), [shared]);
+  await finish(approved);
+
+  assert.equal(telegram.acceptBatch([telegramPrivate], telegram.readCheckpoint()).results[0].status, 'durableAccepted');
+  const receiving = await eventually(() => prompts[3]);
+  assert.match(receiving.content[0].text, /I prefer the evening train/);
+  assert.doesNotMatch(receiving.content[0].text, /For my eyes only/);
+  const recovered = await call(receiving, 'shared_recall', 'recall');
+  assert.deepEqual(recovered.data.items.map(({ text }) => text), [shared]);
+  assert.deepEqual(await call(receiving, 'shared_forget', 'forget', { itemId: saved.data.item.id }), {
+    status: 'ok', data: { itemId: saved.data.item.id },
+  });
+  assert.deepEqual(host.readQqSharedMemory(qqEndpoint).items, []);
+  assert.deepEqual(await call(receiving, 'old_shared_session', 'recall'), { status: 'denied' });
+  await finish(receiving);
+  const fresh = await postFeishu({
+    ...makeEvent(4, FEISHU, 'private'), text: '/share_memory ' + shared + '\n', memoryShareAllowed: true,
+  }, 4);
+  assert.deepEqual(await call(fresh, 'unapproved_newline', 'remember', shareArgs), { status: 'denied' });
+  assert.deepEqual((await call(fresh, 'fresh_recall', 'recall')).data.items.map(({ text }) => text), [privateMemory]);
+  await finish(fresh);
+
+  const sensitiveText = 'do not send fixture';
+  const sensitive = await postFeishu({
+    ...makeEvent(5, FEISHU, 'private'), text: '/share_memory ' + sensitiveText, memoryShareAllowed: true,
+  }, 5);
+  assert.deepEqual(await call(sensitive, 'sensitive_share', 'remember', { ...shareArgs, text: sensitiveText }), { status: 'denied' });
+});
+
+test('a shared memory shown only by tool recall still retires the generation when forgotten', async (t) => {
+  const { host, feishu, controls, prompts, stateDir, longMemory } = await fixture(t);
+  controls.qqAllowed = true;
+  const privateEvent = makeEvent(1, FEISHU, 'private');
+  const { actor, conversation } = privateEvent;
+  const endpoint = { actor, conversation };
+  const current = (value) => ({ ...value, ...host.privateBindings.resolve(value) });
+  assert.equal(host.privateBindings.link([current(endpoint), current(qqEndpoint)]).status, 'linked');
+  for (const value of [endpoint, qqEndpoint]) {
+    assert.equal(host.privateBindings.setMemorySharing(current(value), true).status, 'updated');
+  }
+
+  // Add seven approved records without going through seven conversation turns.
+  const db = openChannelInbox(join(stateDir, 'inbox.sqlite'));
+  const recalledText = 'Recall-only fixture';
+  let oldest;
+  try {
+    for (let index = 0; index < 7; index++) {
+      const result = db.privateBindings.withSharedMemory(endpoint, { authorize: () => true, write: true }, (view) =>
+        longMemory.sharedChannelMemory('remember', view, {
+          cat: 'fact', text: index ? 'Other shared fixture ' + index : recalledText,
+        }));
+      assert.equal(result.status, 'ok');
+      oldest ??= result.data.item.id;
+    }
+  } finally {
+    db.close();
+  }
+
+  assert.equal(feishu.accept(privateEvent).status, 'durableAccepted');
+  const prompt = await eventually(() => prompts[0]);
+  assert.doesNotMatch(prompt.content[0].text, /Recall-only fixture/);
+  const result = await signedChannelCall(host.toolCredentials, prompt, 'extra_item_recall', 'channel_memory_recall', {});
+  assert.ok(result.data.items.some((item) => item.id === oldest && item.text === recalledText && item.shared === true));
+  assert.equal(host.forgetQqSharedMemory(qqEndpoint, oldest), true);
+  assert.deepEqual(await signedChannelCall(host.toolCredentials, prompt, 'stale_call', 'channel_memory_recall', {}), { status: 'denied' });
 });

@@ -59,8 +59,8 @@ function validContext(context) {
     !(conversation.platform === 'telegram' && conversation.chatType === 'private' && actor.userId !== conversation.chatId);
 }
 
-export function createChannelCommonTools({ longMemory, rag, redact, now = Date.now } = {}) {
-  if (![longMemory?.channelMemory, longMemory?.searchChannelHistory, redact, now].every((fn) => typeof fn === 'function')) {
+export function createChannelCommonTools({ longMemory, rag, redact, sharedMemory = () => null, now = Date.now } = {}) {
+  if (![longMemory?.channelMemory, longMemory?.searchChannelHistory, redact, sharedMemory, now].every((fn) => typeof fn === 'function')) {
     throw new TypeError('Invalid channel common tool dependencies');
   }
 
@@ -80,6 +80,7 @@ export function createChannelCommonTools({ longMemory, rag, redact, now = Date.n
       ...(['me', 'them'].includes(item.by) && { by: item.by }),
       ...(['open', 'done', 'missed', 'cancelled'].includes(item.status) && { status: item.status }),
       ...(item.core === true && { core: true }),
+      ...(item.shared === true && { shared: true }),
       ...(TIMESTAMP.test(item.closedAt) && { closedAt: item.closedAt }),
       ...(TIMESTAMP.test(item.archivedAt) && { archivedAt: item.archivedAt }),
       ...(TIMESTAMP.test(item.outdatedAt) && { outdatedAt: item.outdatedAt }),
@@ -142,20 +143,34 @@ export function createChannelCommonTools({ longMemory, rag, redact, now = Date.n
     return ok(data);
   }
 
-  function applyMemory(action, args, current) {
-    if (args.text !== undefined) {
-      const text = modelText(args.text).trim();
-      if (!text) return invalid();
-      args = { ...args, text };
-    }
+  function applyMemory(action, args, current, noteRetiredByMutation) {
     const context = current();
     if (!context) return denied();
-    const result = longMemory.channelMemory(action, context, args);
+    let result;
+    if (action === 'remember' && args.share === true) {
+      result = sharedMemory(action, context, args, noteRetiredByMutation) ?? denied();
+    } else if (action === 'forget') {
+      result = sharedMemory(action, context, args, noteRetiredByMutation);
+    }
+    if (!result) {
+      if (args.text !== undefined) {
+        const text = modelText(args.text).trim();
+        if (!text) return invalid();
+        args = { ...args, text };
+      }
+      result = longMemory.channelMemory(action, context, args);
+    }
     if (result?.status !== 'ok') return statusOnly(result);
     const { items, item, duplicate, replaced } = result.data;
     if (action === 'recall') {
+      const shared = sharedMemory(action, context, args, noteRetiredByMutation)?.data?.items ?? [];
+      const candidates = [...items].reverse();
+      if (shared.length) {
+        candidates.push(...shared.slice().reverse());
+        candidates.sort((a, b) => String(b.at ?? '').localeCompare(String(a.at ?? '')));
+      }
       const data = { items: [], truncated: false };
-      data.truncated = appendRows(data, 'items', items.slice().reverse(), memoryView);
+      data.truncated = appendRows(data, 'items', candidates, memoryView);
       return ok(data);
     }
     if (action === 'forget') return MEMORY_ID.test(item?.id) ? ok({ itemId: item.id }) : unavailable();
@@ -176,13 +191,13 @@ export function createChannelCommonTools({ longMemory, rag, redact, now = Date.n
       ...(['directed', 'observe'].includes(result.groupPolicy) && { groupPolicy: result.groupPolicy }) });
   }
 
-  async function invoke({ name, args, readContext, signal } = {}) {
+  async function invoke({ name, args, readContext, signal, noteRetiredByMutation = () => {} } = {}) {
     try {
       if (!channelCommonToolNames.includes(name) || !validChannelToolArgs(name, args) || typeof readContext !== 'function') return invalid();
       let origin;
-      function current() {
+      function current(finishMutation = false) {
         if (signal?.aborted) return null;
-        const context = readContext();
+        const context = readContext({ finishMutation });
         if (typeof context?.then === 'function') {
           void Promise.resolve(context).catch(() => {});
           return null;
@@ -222,9 +237,9 @@ export function createChannelCommonTools({ longMemory, rag, redact, now = Date.n
           break;
         }
         default:
-          result = applyMemory(MEMORY_ACTIONS[name], args, current);
+          result = applyMemory(MEMORY_ACTIONS[name], args, current, noteRetiredByMutation);
       }
-      if (!current()) return denied();
+      if (!current(true)) return denied();
       return validChannelToolResult(name, result) ? result : unavailable();
     } catch {
       return signal?.aborted ? denied() : unavailable();

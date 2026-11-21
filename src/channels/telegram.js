@@ -185,6 +185,10 @@ function normalizeTelegramUpdate(update, me, accountId, log) {
     message: { conversation, platformChatId: chatId, messageId: String(msg.message_id) },
     replyTo,
     text,
+    ...(chatType === 'private' && threadId === null && text.startsWith('/share_memory ') &&
+      !msg.forward_origin && !msg.is_automatic_forward && !msg.reply_to_message && !msg.external_reply && !msg.quote &&
+      !msg.via_bot && !(Array.isArray(msg.entities) && msg.entities.some((entity) =>
+        entity?.type === 'blockquote' || entity?.type === 'expandable_blockquote')) && { memoryShareAllowed: true }),
     occurredAt: Number.isSafeInteger(msg.date) && msg.date >= 0 ? msg.date * 1000 : Date.now(),
     deliveryRef,
     trigger,

@@ -12,7 +12,7 @@ const descriptions = Object.freeze({
   channel_get_unread: '查看当前会话的未读消息。用上次返回的 readThroughSeq 作为 afterSeq 继续读取。',
   channel_history_search: '搜索当前会话的历史消息。可以提供关键词与日期范围。',
   channel_memory_recall: '查看当前回合获准访问的记忆，返回可用于更新和遗忘的条目编号。',
-  channel_memory_remember: '记住当前回合中值得保留的事情。更新已经变化的事实时，可传原条目编号 replaces。',
+  channel_memory_remember: '默认记为本会话私密条目。用户在本次私聊直接发送 /share_memory 内容时，可传 share: true 并逐字提交命令中的内容。',
   channel_memory_update: '更新当前回合获准访问的一条记忆。',
   channel_memory_forget: '从当前回合获准访问的记忆中删除指定条目。',
   channel_wait_for_messages: '等待当前会话到达新消息，最长等待 30 秒。可以从上次读取的 readThroughSeq 之后等候。',

@@ -7,6 +7,7 @@ import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 import { openChannelInbox } from '../src/core/inbox-store.mjs';
 import { createChannelArchive } from '../src/core/channel-archive.mjs';
+import { createLongMemory } from '../src/long-memory.js';
 import { encodeConversationKey, encodePersonKey } from '../src/core/identity.mjs';
 
 const telegram = { platform: 'telegram', accountId: '41' };
@@ -67,6 +68,124 @@ function fixture(t, capacity = 4, withArchive = false) {
     advance: (elapsed) => { time += elapsed; },
   };
 }
+
+test('shared memories require explicit grants and live authorization for the reader and source', (t) => {
+  const f = fixture(t);
+  const source = privateEndpoint(feishu);
+  const reader = privateEndpoint(telegram);
+  const qqReader = privateEndpoint(qq);
+  const sourceKey = encodeConversationKey(source.conversation);
+  const longMemory = createLongMemory({ stateDir: f.file + '.memory' });
+  const deniedPlatforms = new Set();
+  const authorize = ({ actor }) => !deniedPlatforms.has(actor.platform);
+  const access = (endpoint, action, args, expectedMapping) => f.bindings.withSharedMemory(
+    endpoint, { expectedMapping, authorize, write: action !== 'recall' },
+    (view) => longMemory.sharedChannelMemory(action, view, args),
+  );
+  const share = (endpoint, enabled) => f.bindings.setMemorySharing(withRevision(f.bindings, endpoint)[0], enabled);
+  assert.equal(f.bindings.link(withRevision(f.bindings, source, reader)).status, 'linked');
+  const oldMapping = f.bindings.resolve(reader);
+  const [staleSource] = withRevision(f.bindings, source);
+  const memory = { cat: 'fact', text: 'likes model trains' };
+  assert.equal(access(source, 'remember', memory), null);
+  assert.equal(share(source, true).status, 'updated');
+  assert.equal(f.bindings.setMemorySharing(staleSource, true).status, 'stale_binding');
+  assert.notEqual(f.bindings.resolve(reader).bindingRevision, oldMapping.bindingRevision);
+  const [confirmedSource] = withRevision(f.bindings, source);
+  assert.equal(share(source, true).status, 'updated');
+  assert.deepEqual(withRevision(f.bindings, source)[0], confirmedSource);
+  assert.equal(access(reader, 'recall'), null);
+  assert.equal(share(reader, true).status, 'updated');
+  assert.equal(access(reader, 'recall', {}, oldMapping), null);
+  assert.equal(access(source, 'remember', { cat: 'pending', text: 'a private promise' }).status, 'denied');
+  const stored = access(source, 'remember', memory);
+  assert.equal(stored.status, 'ok');
+  const { id } = stored.data.item;
+  assert.equal(stored.data.item.sourceKey, sourceKey);
+  assert.equal(access(source, 'remember', { ...memory, text: 'likes puzzles', replaces: id }).status, 'denied');
+  assert.equal(access(source, 'remember', memory).data.duplicate, true);
+  const recategorized = access(source, 'remember', { ...memory, cat: 'note' }).data;
+  assert.equal(recategorized.duplicate, true);
+  assert.equal(recategorized.item.id, id);
+  assert.equal(recategorized.item.cat, memory.cat);
+  assert.deepEqual(longMemory.channelMemory('recall', { conversationKey: sourceKey, source }, {}).data.items, []);
+
+  assert.equal(f.bindings.link(withRevision(f.bindings, reader, qqReader)).status, 'linked');
+  assert.equal(access(qqReader, 'recall'), null);
+  assert.equal(share(qqReader, true).status, 'updated');
+  f.reopen();
+  for (const endpoint of [source, reader, qqReader]) {
+    assert.deepEqual(access(endpoint, 'recall').data.items.map((item) => item.id), [id]);
+  }
+  deniedPlatforms.add(feishu.platform);
+  assert.equal(access(source, 'recall'), null);
+  assert.deepEqual(access(reader, 'recall').data.items, []);
+  assert.equal(access(reader, 'forget', { itemId: id }).status, 'denied');
+  deniedPlatforms.clear();
+  assert.equal(share(source, false).status, 'updated');
+  assert.deepEqual(access(qqReader, 'recall').data.items, []);
+  assert.equal(share(source, true).status, 'updated');
+  assert.equal(access(qqReader, 'forget', { itemId: id }).data.item.id, id);
+  f.reopen();
+  for (const endpoint of [source, reader, qqReader]) {
+    assert.deepEqual(access(endpoint, 'recall').data.items, []);
+  }
+  assert.equal(access(message(telegram, '1'), 'remember', memory), null);
+
+  assert.equal(access(source, 'remember', memory).status, 'ok');
+  assert.equal(f.bindings.unlink(withRevision(f.bindings, source)[0]).status, 'unlinked');
+  assert.equal(access(source, 'recall'), null);
+  assert.deepEqual(access(reader, 'recall').data.items, []);
+  assert.equal(f.bindings.link(withRevision(f.bindings, reader, source)).status, 'linked');
+  assert.equal(access(source, 'recall'), null);
+  assert.deepEqual(access(reader, 'recall').data.items, []);
+
+  assert.equal(f.bindings.unlink(withRevision(f.bindings, source)[0]).status, 'unlinked');
+  assert.equal(f.bindings.unlink(withRevision(f.bindings, reader)[0]).status, 'unlinked');
+  assert.equal(f.bindings.link(withRevision(f.bindings, qqReader, source)).status, 'linked');
+  assert.equal(access(source, 'recall'), null);
+  assert.equal(access(qqReader, 'recall'), null);
+});
+
+test('shared memory writes roll back with the transaction and require the current binding revision across connections', (t) => {
+  const f = fixture(t);
+  const source = privateEndpoint(feishu);
+  const reader = privateEndpoint(telegram);
+  const longMemory = createLongMemory({ stateDir: f.file + '.memory' });
+  const authorize = () => true;
+  const memory = { cat: 'fact', text: 'prefers window seats' };
+  const share = (endpoint, enabled) => f.bindings.setMemorySharing(withRevision(f.bindings, endpoint)[0], enabled);
+  assert.equal(f.bindings.link(withRevision(f.bindings, source, reader)).status, 'linked');
+  assert.equal(share(source, true).status, 'updated');
+  assert.equal(share(reader, true).status, 'updated');
+
+  const other = openChannelInbox(f.file);
+  try {
+    const access = (endpoint, action, args, expectedMapping, bindings = other.privateBindings) =>
+      bindings.withSharedMemory(endpoint, { expectedMapping, authorize, write: action !== 'recall' },
+        (view) => longMemory.sharedChannelMemory(action, view, args));
+    const snapshot = other.privateBindings.resolve(source);
+    assert.throws(() => f.bindings.withSharedMemory(source, { authorize, write: true }, (view) => {
+      assert.equal(longMemory.sharedChannelMemory('remember', view, memory).status, 'ok');
+      throw new Error('fixture transaction failure');
+    }), /fixture transaction failure/);
+    assert.deepEqual(access(reader, 'recall').data.items, []);
+    const stored = access(source, 'remember', memory, snapshot);
+    assert.equal(stored.status, 'ok');
+    const { id } = stored.data.item;
+    assert.deepEqual(access(reader, 'recall', undefined, undefined, f.bindings).data.items.map((item) => item.id), [id]);
+
+    assert.equal(share(reader, false).status, 'updated');
+    assert.equal(share(reader, true).status, 'updated');
+    assert.equal(access(source, 'remember', { ...memory, text: 'prefers aisle seats' }, snapshot), null);
+    assert.deepEqual(access(reader, 'recall').data.items.map((item) => item.id), [id]);
+    const current = other.privateBindings.resolve(reader);
+    assert.equal(access(reader, 'forget', { itemId: id }, current).data.item.id, id);
+    assert.deepEqual(access(source, 'recall', undefined, undefined, f.bindings).data.items, []);
+  } finally {
+    other.close();
+  }
+});
 
 test('tool inbox pages within the original topic and persists read progress without completing tasks', (t) => {
   const f = fixture(t);

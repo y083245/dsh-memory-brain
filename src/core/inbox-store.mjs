@@ -561,7 +561,8 @@ export function openChannelInbox(file, { capacity = 1000, now = Date.now, leaseM
     }
 
     // Tool callbacks can arrive after the dispatch lease is released. They may
-    // check the exact durable turn and its source without obtaining the body.
+    // check the exact durable turn and its source without obtaining the body,
+    // except for the payload of a verified direct memory-sharing command.
     function readTextTurn({ requestId, conversationKey, bindingRevision, sessionId, generation }, { source, allowCompleted = false } = {}) {
       return write(() => {
         const row = findTextTurn.get(scope, requestId);
@@ -599,7 +600,13 @@ export function openChannelInbox(file, { capacity = 1000, now = Date.now, leaseM
         if (event.conversationKey !== conversationKey || event.personKey !== projected.personKey ||
             (source && (encodeConversationKey(source.conversation) !== conversationKey ||
             encodePersonKey(source.actor) !== event.personKey))) return denied;
-        return { status: 'active', source: { conversation: event.conversation, actor: event.actor }, message: event.message };
+        const memoryShareText = event.memoryShareAllowed
+          ? /^\/share_memory ([^\u0000-\u001f\u007f-\u009f\u2028\u2029]{1,300})(?![\s\S])/u.exec(event.text)?.[1]
+          : undefined;
+        return {
+          status: 'active', source: { conversation: event.conversation, actor: event.actor }, message: event.message,
+          ...((memoryShareText && memoryShareText.length <= 300 && memoryShareText.trim() === memoryShareText) && { memoryShareText }),
+        };
       });
     }
 
