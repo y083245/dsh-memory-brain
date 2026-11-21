@@ -175,7 +175,7 @@ test('native channel tools require the exact preset and a live direct call and v
     channel_get_unread: ['afterSeq', 'limit'],
     channel_history_search: ['query', 'keywords', 'from', 'to', 'limit'],
     channel_memory_recall: [],
-    channel_memory_remember: ['cat', 'text', 'due', 'by', 'core', 'replaces'],
+    channel_memory_remember: ['cat', 'text', 'due', 'by', 'core', 'replaces', 'share'],
     channel_memory_update: ['itemId', 'text', 'cat', 'due', 'by', 'core', 'status', 'archived', 'outdated'],
     channel_memory_forget: ['itemId'],
     channel_wait_for_messages: ['afterSeq', 'timeoutMs'],
@@ -226,6 +226,10 @@ test('native channel tools require the exact preset and a live direct call and v
       assert.equal(definition.parameters.properties.text.type, 'string');
     }
   }
+
+  const remember = definitions.get('channel_memory_remember');
+  assert.deepEqual(remember.parameters.required, ['cat', 'text']);
+  assert.equal(remember.parameters.properties.share.type, 'boolean');
 
   const sendText = definitions.get('channel_send_text');
   const replyText = definitions.get('channel_reply_text');
