@@ -169,12 +169,10 @@ const LOCAL_EXECUTION_TOOLS = [
 ]
 
 /**
- * 0.2.1 起改为「按需安装」的可选能力包里才会注册的全局工具名。
+ * 只在部分 DSH 版本或可选能力包里注册的全局工具名。
  *
- * 它们默认**不存在**于安装树里（0.2.0 时写在 `dsh-web-app/presets/*.patch.yml`），
- * `tools.restrict()` 对它们必然抛错——守卫逐个 try/catch 正是为这种名字设计的。
- * 保留的收益：用户装上 Codex / Claude Code 组合包后，名字回到全局层时**立刻**被挡，
- * 不必等下一次对账。
+ * 当前安装可能没有这些工具，`tools.restrict()` 会对未知名字抛错。
+ * 守卫逐个处理，已注册的工具仍会被限制。
  *
  * 扫描器与测试用这一组把「可选项」和「拼错的假名」区分开：只有不在本组、又扫不到的
  * 名字才判成假名。
@@ -192,6 +190,12 @@ export const OPTIONAL_BUNDLE_TOOL_NAMES = Object.freeze([
   'schedule_view',
   'schedule_edit',
   'apply_patch',
+  // 0.2.1 的实验 Team 工具在 0.2.2-rc.5 中已不再注册。
+  'spawn_teammate',
+  // DSH 0.2.2-rc.5 的 Office 工具可访问宿主文档，旧版本没有这组工具。
+  'office_convert', 'office_recalculate', 'office_render',
+  // 新版终端面板可读取用户终端的清单和输出。
+  'user_terminal_list', 'user_terminal_read',
 ])
 
 const KNOWN_DANGEROUS_GLOBAL_TOOLS = [

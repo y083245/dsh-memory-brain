@@ -28,8 +28,8 @@ const { names, packages } = collectDshToolNames();
 const guardPath = path.join(ROOT, 'plugins', 'qq-agent-presets', 'qq-tool-restrict.mjs');
 const guard = await import(pathToFileURL(guardPath).href);
 const guarded = new Set(guard.RESTRICTED_TOOL_NAMES);
-// 0.2.1 起 Codex / Claude Code 改为按需安装的可选插件：这组名字默认扫不到，
-// 不能算「拼错假名」（装上组合包后它们就回来了）。
+// 这些工具名只在部分 DSH 版本或可选能力包中注册。
+// 当前安装缺少这些名字时，不计入假名。
 const optional = new Set(guard.OPTIONAL_BUNDLE_TOOL_NAMES ?? []);
 
 const sorted = [...names.keys()].sort();
@@ -44,7 +44,7 @@ const fabricated = [...guarded]
 console.log('=== ① 守卫名单里、但安装包中找不到的名字（restrict 会抛错并静默失效） ===');
 console.log(fabricated.length ? fabricated.map((n) => `  ${n}`).join('\n') : '  (无)');
 if (optional.size) {
-  console.log(`  （另：${[...optional].join(', ')} 属于按需安装的可选组合包，默认扫不到但仍在名单里）`);
+  console.log(`  （另：${[...optional].join(', ')} 取决于 DSH 版本或可选能力包，当前安装缺少时不计入假名）`);
 }
 
 /** ② 安装包里有、守卫没覆盖的危险语义名字（可能是新版本新增的能力）。 */
